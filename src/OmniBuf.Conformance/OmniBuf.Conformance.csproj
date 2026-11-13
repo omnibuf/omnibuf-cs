@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>OmniBuf.ConformanceRunner</RootNamespace>
+    <AssemblyName>OmniBuf.Conformance</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\OmniBuf\OmniBuf.csproj" />
+  </ItemGroup>
+</Project>

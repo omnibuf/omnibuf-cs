@@ -1,0 +1,7 @@
+version: v2
+clean: true
+plugins:
+  - protoc_builtin: csharp
+    out: src/OmniBuf.Conformance/Generated
+  - local: ./src/ProtocGenOmniBufCs/bin/Release/net8.0/protoc-gen-omnibuf-cs
+    out: src/OmniBuf.Conformance/Generated

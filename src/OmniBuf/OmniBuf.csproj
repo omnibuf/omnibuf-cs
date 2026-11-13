@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>OmniBuf</RootNamespace>
+    <AssemblyName>OmniBuf</AssemblyName>
+    <Description>Zero-parseable, SIMD-friendly binary serialization format for .NET 8.</Description>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.35.1" />
+  </ItemGroup>
+</Project>
