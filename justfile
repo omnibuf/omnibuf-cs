@@ -1,5 +1,3 @@
-CONFORMANCE_RUNNER := env_var_or_default("CONFORMANCE_RUNNER", "../omnibuf-go/bin/conformance-runner")
-
 # List available recipes
 default:
     @just --list
@@ -21,9 +19,23 @@ test:
     dotnet test OmniBuf.sln -c Release
 
 # Build the conformance adapter and run the 758-case cross-language conformance runner
-conformance runner=CONFORMANCE_RUNNER:
+conformance:
+    #!/usr/bin/env bash
+    set -euo pipefail
     dotnet build src/OmniBuf.Conformance/OmniBuf.Conformance.csproj -c Release -v minimal
-    "{{runner}}" ./src/OmniBuf.Conformance/bin/Release/net8.0/OmniBuf.Conformance
+    if [[ -n "${CONFORMANCE_RUNNER:-}" ]]; then
+        RUNNER="$CONFORMANCE_RUNNER"
+    elif [[ -x "../omnibuf-go/bin/conformance-runner" ]]; then
+        RUNNER="../omnibuf-go/bin/conformance-runner"
+    elif command -v conformance-runner >/dev/null 2>&1; then
+        RUNNER="conformance-runner"
+    elif command -v go >/dev/null 2>&1; then
+        exec go run github.com/omnibuf/omnibuf-go/cmd/conformance-runner@71dad83aadd7dc65401d662521d34cfaeb1011ab ./src/OmniBuf.Conformance/bin/Release/net8.0/OmniBuf.Conformance
+    else
+        echo "conformance-runner binary not found; set CONFORMANCE_RUNNER or install conformance-runner" >&2
+        exit 1
+    fi
+    "$RUNNER" ./src/OmniBuf.Conformance/bin/Release/net8.0/OmniBuf.Conformance
 
 # Run the PeerUpdate benchmark suite in Release mode and write testdata/benchmarks.json
 bench:
