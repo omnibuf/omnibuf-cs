@@ -13,8 +13,8 @@
       "results": [
         {
           "name": "OmniBuf (Generated)",
-          "nsPerOp": 310,
-          "opsPerSec": 3226200,
+          "nsPerOp": 314,
+          "opsPerSec": 3187067,
           "bytesPerOp": 392,
           "wireBytes": 366,
           "highlight": true,
@@ -22,30 +22,30 @@
         },
         {
           "name": "OmniBuf ([OmniBufField])",
-          "nsPerOp": 453,
-          "opsPerSec": 2208232,
+          "nsPerOp": 458,
+          "opsPerSec": 2183058,
           "bytesPerOp": 392,
           "wireBytes": 366,
           "highlight": true
         },
         {
           "name": "MessagePack-CSharp",
-          "nsPerOp": 589,
-          "opsPerSec": 1697604,
+          "nsPerOp": 599,
+          "opsPerSec": 1670588,
           "bytesPerOp": 656,
           "wireBytes": 626
         },
         {
           "name": "Google.Protobuf",
-          "nsPerOp": 629,
-          "opsPerSec": 1591003,
+          "nsPerOp": 635,
+          "opsPerSec": 1574917,
           "bytesPerOp": 432,
           "wireBytes": 341
         },
         {
           "name": "System.Text.Json",
-          "nsPerOp": 1103,
-          "opsPerSec": 906909,
+          "nsPerOp": 1108,
+          "opsPerSec": 902380,
           "bytesPerOp": 832,
           "wireBytes": 803
         }
@@ -58,35 +58,35 @@
       "results": [
         {
           "name": "OmniBuf (Generated)",
-          "nsPerOp": 706,
-          "opsPerSec": 1416612,
+          "nsPerOp": 659,
+          "opsPerSec": 1516985,
           "bytesPerOp": 1400,
           "highlight": true,
           "baseline": true
         },
         {
           "name": "OmniBuf ([OmniBufField])",
-          "nsPerOp": 794,
-          "opsPerSec": 1259605,
+          "nsPerOp": 756,
+          "opsPerSec": 1323264,
           "bytesPerOp": 1280,
           "highlight": true
         },
         {
           "name": "Google.Protobuf",
-          "nsPerOp": 834,
-          "opsPerSec": 1199248,
+          "nsPerOp": 816,
+          "opsPerSec": 1225491,
           "bytesPerOp": 1568
         },
         {
           "name": "MessagePack-CSharp",
-          "nsPerOp": 1220,
-          "opsPerSec": 819975,
+          "nsPerOp": 1181,
+          "opsPerSec": 847040,
           "bytesPerOp": 1376
         },
         {
           "name": "System.Text.Json",
-          "nsPerOp": 3167,
-          "opsPerSec": 315805,
+          "nsPerOp": 3132,
+          "opsPerSec": 319255,
           "bytesPerOp": 1896
         }
       ]
@@ -98,28 +98,28 @@
       "results": [
         {
           "name": "OmniBuf (Generated)",
-          "nsPerOp": 140,
-          "opsPerSec": 7135695,
+          "nsPerOp": 141,
+          "opsPerSec": 7114907,
           "bytesPerOp": 160,
           "highlight": true,
           "baseline": true
         },
         {
           "name": "Google.Protobuf",
-          "nsPerOp": 835,
-          "opsPerSec": 1197782,
+          "nsPerOp": 815,
+          "opsPerSec": 1226962,
           "bytesPerOp": 1568
         },
         {
           "name": "MessagePack-CSharp",
-          "nsPerOp": 1210,
-          "opsPerSec": 826247,
+          "nsPerOp": 1176,
+          "opsPerSec": 850331,
           "bytesPerOp": 1376
         },
         {
           "name": "System.Text.Json",
-          "nsPerOp": 3120,
-          "opsPerSec": 320495,
+          "nsPerOp": 3128,
+          "opsPerSec": 319714,
           "bytesPerOp": 1896
         }
       ]
@@ -131,28 +131,28 @@
       "results": [
         {
           "name": "OmniBuf (Generated)",
-          "nsPerOp": 128,
-          "opsPerSec": 7788259,
+          "nsPerOp": 134,
+          "opsPerSec": 7445664,
           "bytesPerOp": 512,
           "highlight": true,
           "baseline": true
         },
         {
           "name": "Google.Protobuf",
-          "nsPerOp": 1486,
-          "opsPerSec": 673060,
+          "nsPerOp": 1503,
+          "opsPerSec": 665250,
           "bytesPerOp": 2000
         },
         {
           "name": "MessagePack-CSharp",
-          "nsPerOp": 1811,
-          "opsPerSec": 552333,
+          "nsPerOp": 1834,
+          "opsPerSec": 545164,
           "bytesPerOp": 2032
         },
         {
           "name": "System.Text.Json",
-          "nsPerOp": 4331,
-          "opsPerSec": 230908,
+          "nsPerOp": 4298,
+          "opsPerSec": 232686,
           "bytesPerOp": 2728
         }
       ]
