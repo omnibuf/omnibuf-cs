@@ -1,3 +1,5 @@
+CONFORMANCE_RUNNER := env_var_or_default("CONFORMANCE_RUNNER", "../omnibuf-go/bin/conformance-runner")
+
 # List available recipes
 default:
     @just --list
@@ -18,8 +20,8 @@ build:
 test:
     dotnet test OmniBuf.sln -c Release
 
-# Build the conformance adapter and run the 584-case cross-language conformance runner
-conformance runner="/Users/kevin/Projects/omnibuf/omnibuf-go/bin/conformance-runner":
+# Build the conformance adapter and run the 758-case cross-language conformance runner
+conformance runner=CONFORMANCE_RUNNER:
     dotnet build src/OmniBuf.Conformance/OmniBuf.Conformance.csproj -c Release -v minimal
     "{{runner}}" ./src/OmniBuf.Conformance/bin/Release/net8.0/OmniBuf.Conformance
 
@@ -42,5 +44,5 @@ lint:
     buf lint
     dotnet build OmniBuf.sln -c Release -warnaserror
 
-# Full CI gate: formatting, Buf + compiler lint, xUnit tests, and 584/584 conformance
+# Full CI gate: formatting, Buf + compiler lint, xUnit tests, and 758/758 conformance
 ci: fmt-check lint test conformance

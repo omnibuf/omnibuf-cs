@@ -130,21 +130,36 @@ public static class Program
 
     private static ConformanceResponseFrame HandlePluginTier(ConformanceRequestFrame req)
     {
-        if (req.TestOpaqueSplice || req.TestOpaqueSpliceShrink)
-        {
-            string? aliasErr = CheckSpliceAliasedPrefix(req.OmniBufPayload);
-            if (aliasErr is not null)
-            {
-                return new ConformanceResponseFrame { RuntimeError = aliasErr };
-            }
-        }
-
         var opts = new MarshalOptions(SelfDescribing: req.SelfDescribing, Deterministic: true);
 
         switch (req.MessageType)
         {
             case "omnibuf.bench.PeerUpdate":
                 {
+                    if (req.TestOpaqueSplice || req.TestOpaqueSpliceShrink)
+                    {
+                        var probe = new OpaquePeerUpdate(req.OmniBufPayload);
+                        try
+                        {
+                            probe.Sequence = probe.Sequence + 1UL;
+                        }
+                        catch (OmniBufException ex)
+                        {
+                            return new ConformanceResponseFrame { ParseError = ex.Message };
+                        }
+
+                        if (!probe.TryMarshal(out _, out string? probeErr))
+                        {
+                            return new ConformanceResponseFrame { ParseError = probeErr ?? "opaque PeerUpdate splice validation failed" };
+                        }
+
+                        string? aliasErr = CheckSpliceAliasedPrefix(req.OmniBufPayload);
+                        if (aliasErr is not null)
+                        {
+                            return new ConformanceResponseFrame { RuntimeError = aliasErr };
+                        }
+                    }
+
                     // Pre-populate stale values to verify UnmarshalOmniBuf clears absent fields and sub-messages.
                     var msg = new PeerUpdate
                     {
@@ -170,6 +185,11 @@ public static class Program
                     var op = new OpaquePeerUpdate(req.OmniBufPayload);
                     string opCity = op.GetLocationCity();
                     string wantCity = msg.Location?.City ?? string.Empty;
+                    OpaqueLocation? opLoc = op.Location;
+                    uint opLatBits = BitConverter.SingleToUInt32Bits(opLoc?.Latitude ?? 0f);
+                    uint wantLatBits = BitConverter.SingleToUInt32Bits(msg.Location?.Latitude ?? 0f);
+                    uint opLonBits = BitConverter.SingleToUInt32Bits(opLoc?.Longitude ?? 0f);
+                    uint wantLonBits = BitConverter.SingleToUInt32Bits(msg.Location?.Longitude ?? 0f);
                     if (op.Asn != msg.Asn
                         || op.RouterId != msg.RouterId
                         || op.Active != msg.Active
@@ -179,6 +199,8 @@ public static class Program
                         || op.Tags.Count != msg.Tags.Count
                         || op.Prefixes.Count != msg.Prefixes.Count
                         || opCity != wantCity
+                        || opLatBits != wantLatBits
+                        || opLonBits != wantLonBits
                         || op.Neighbors.Count != msg.Neighbors.Count
                         || op.Sequence != msg.Sequence)
                     {
@@ -205,7 +227,9 @@ public static class Program
                             Longitude = 13.405f,
                         });
                         op.Sequence += 1UL;
-                        return new ConformanceResponseFrame { OmniBufPayload = op.MarshalOmniBuf() };
+                        return op.TryMarshal(out byte[] spliced, out string? spliceErr)
+                            ? new ConformanceResponseFrame { OmniBufPayload = spliced }
+                            : new ConformanceResponseFrame { ParseError = spliceErr ?? "opaque PeerUpdate splice failed" };
                     }
 
                     if (req.TestOpaqueSpliceShrink)
@@ -228,14 +252,47 @@ public static class Program
                             Longitude = 2.0f,
                         });
                         op.Sequence = 2UL;
-                        return new ConformanceResponseFrame { OmniBufPayload = op.MarshalOmniBuf() };
+                        return op.TryMarshal(out byte[] shrunk, out string? shrinkErr)
+                            ? new ConformanceResponseFrame { OmniBufPayload = shrunk }
+                            : new ConformanceResponseFrame { ParseError = shrinkErr ?? "opaque PeerUpdate shrink splice failed" };
                     }
 
-                    return new ConformanceResponseFrame { OmniBufPayload = msg.MarshalOmniBuf(opts) };
+                    try
+                    {
+                        return new ConformanceResponseFrame { OmniBufPayload = msg.MarshalOmniBuf(opts) };
+                    }
+                    catch (OmniBufException ex)
+                    {
+                        return new ConformanceResponseFrame { SerializeError = ex.Message };
+                    }
                 }
 
             case "omnibuf.conformance.TestAllTypes":
                 {
+                    if (req.TestOpaqueSplice || req.TestOpaqueSpliceShrink)
+                    {
+                        var probe = new OpaqueTestAllTypes(req.OmniBufPayload);
+                        try
+                        {
+                            probe.F1Uint32 = probe.F1Uint32 + 1u;
+                        }
+                        catch (OmniBufException ex)
+                        {
+                            return new ConformanceResponseFrame { ParseError = ex.Message };
+                        }
+
+                        if (!probe.TryMarshal(out _, out string? probeErr))
+                        {
+                            return new ConformanceResponseFrame { ParseError = probeErr ?? "opaque TestAllTypes splice validation failed" };
+                        }
+
+                        string? aliasErr = CheckSpliceAliasedPrefix(req.OmniBufPayload);
+                        if (aliasErr is not null)
+                        {
+                            return new ConformanceResponseFrame { RuntimeError = aliasErr };
+                        }
+                    }
+
                     var msg = new TestAllTypes
                     {
                         F1Uint32 = 999999u,
@@ -311,9 +368,9 @@ public static class Program
                         op.SetF10Uint32Arr(new uint[] { 100000u, 200000u, 300000u, 400000u, 500000u });
                         op.SetF11SubMsgArr(new[]
                         {
-                        new AllTypesSubMsg { Id = 100001u, Label = RepeatString("elem0-", 25), Flag = true, Score = -500000L },
-                        new AllTypesSubMsg { Id = 100002u, Label = "elem1-grown", Flag = false, Score = 500000L },
-                    });
+                            new AllTypesSubMsg { Id = 100001u, Label = RepeatString("elem0-", 25), Flag = true, Score = -500000L },
+                            new AllTypesSubMsg { Id = 100002u, Label = "elem1-grown", Flag = false, Score = 500000L },
+                        });
                         op.SetF12MapStrUint(new Dictionary<string, ulong>(StringComparer.Ordinal)
                         {
                             ["k1"] = 1000000UL,
@@ -325,7 +382,9 @@ public static class Program
                         op.F15Fixed32 = 0xdeadbeefu;
                         op.F16Fixed64 = 0xcafebabedeadbeefUL;
                         op.F20OverflowStr = RepeatString("overflow20-", 20);
-                        return new ConformanceResponseFrame { OmniBufPayload = op.MarshalOmniBuf() };
+                        return op.TryMarshal(out byte[] spliced, out string? spliceErr)
+                            ? new ConformanceResponseFrame { OmniBufPayload = spliced }
+                            : new ConformanceResponseFrame { ParseError = spliceErr ?? "opaque TestAllTypes splice failed" };
                     }
 
                     if (req.TestOpaqueSpliceShrink)
@@ -342,18 +401,27 @@ public static class Program
                         op.SetF10Uint32Arr(new uint[] { 7u });
                         op.SetF11SubMsgArr(new[]
                         {
-                        new AllTypesSubMsg { Id = 1u, Label = "e", Flag = true, Score = 1L },
-                    });
+                            new AllTypesSubMsg { Id = 1u, Label = "e", Flag = true, Score = 1L },
+                        });
                         op.SetF12MapStrUint(new Dictionary<string, ulong>(StringComparer.Ordinal) { ["k"] = 1UL });
                         op.F13Float32 = 0.5f;
                         op.F14Float64 = -0.25d;
                         op.F15Fixed32 = 7u;
                         op.F16Fixed64 = 9UL;
                         op.F20OverflowStr = "z";
-                        return new ConformanceResponseFrame { OmniBufPayload = op.MarshalOmniBuf() };
+                        return op.TryMarshal(out byte[] shrunk, out string? shrinkErr)
+                            ? new ConformanceResponseFrame { OmniBufPayload = shrunk }
+                            : new ConformanceResponseFrame { ParseError = shrinkErr ?? "opaque TestAllTypes shrink splice failed" };
                     }
 
-                    return new ConformanceResponseFrame { OmniBufPayload = msg.MarshalOmniBuf(opts) };
+                    try
+                    {
+                        return new ConformanceResponseFrame { OmniBufPayload = msg.MarshalOmniBuf(opts) };
+                    }
+                    catch (OmniBufException ex)
+                    {
+                        return new ConformanceResponseFrame { SerializeError = ex.Message };
+                    }
                 }
 
             default:
@@ -507,7 +575,7 @@ public static class Program
                         return new ConformanceResponseFrame { OmniBufPayload = OmniBufSerializer.Marshal(msg, opts) };
                     }
 
-                default:
+                case "omnibuf.conformance.TestAllTypes":
                     {
                         var msg = new AnnotatedTestAllTypes
                         {
@@ -521,6 +589,9 @@ public static class Program
                         OmniBufSerializer.Unmarshal(req.OmniBufPayload, msg);
                         return new ConformanceResponseFrame { OmniBufPayload = OmniBufSerializer.Marshal(msg, opts) };
                     }
+
+                default:
+                    return new ConformanceResponseFrame { Skipped = $"unsupported annotated struct type: {req.MessageType}" };
             }
         }
         catch (OmniBufException ex)

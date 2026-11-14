@@ -12,23 +12,24 @@ public sealed class OmniBufEncoder
 {
     private const int InitialBufferCapacity = 512;
     private const int InitialStackCapacity = 64;
+    internal const int MaxRetainedBufferCapacity = 65_536;
+    private const int MaxRetainedStackCapacity = 256;
 
     [ThreadStatic]
     private static OmniBufEncoder? t_shared;
-    [ThreadStatic]
-    private static bool t_sharedInUse;
 
     private byte[] _buf;
     private int _pos;
     private int[] _containerStack;
     private int _depth;
+    private bool _inUse;
 
     public static OmniBufEncoder RentThreadLocal(out bool rented)
     {
-        if (!t_sharedInUse)
+        OmniBufEncoder enc = t_shared ??= new OmniBufEncoder(InitialBufferCapacity);
+        if (!enc._inUse)
         {
-            t_sharedInUse = true;
-            OmniBufEncoder enc = t_shared ??= new OmniBufEncoder(InitialBufferCapacity);
+            enc._inUse = true;
             enc.Reset();
             rented = true;
             return enc;
@@ -40,10 +41,25 @@ public sealed class OmniBufEncoder
 
     public static void ReturnThreadLocal(OmniBufEncoder encoder, bool rented)
     {
-        if (rented)
+        if (rented && encoder is not null)
         {
-            encoder.Reset();
-            t_sharedInUse = false;
+            try
+            {
+                encoder.Reset();
+                if (encoder._buf.Length > MaxRetainedBufferCapacity)
+                {
+                    encoder._buf = new byte[InitialBufferCapacity];
+                }
+
+                if (encoder._containerStack.Length > MaxRetainedStackCapacity)
+                {
+                    encoder._containerStack = new int[InitialStackCapacity];
+                }
+            }
+            finally
+            {
+                encoder._inUse = false;
+            }
         }
     }
 
@@ -59,6 +75,8 @@ public sealed class OmniBufEncoder
     }
 
     public int Length => _pos;
+
+    public int Capacity => _buf.Length;
 
     public int ContainerDepth => _depth;
 

@@ -2,11 +2,18 @@
   <PropertyGroup>
     <RootNamespace>OmniBuf</RootNamespace>
     <AssemblyName>OmniBuf</AssemblyName>
-    <Description>Zero-parseable, SIMD-friendly binary serialization format for .NET 8.</Description>
+    <PackageId>OmniBuf</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>OmniBuf Contributors</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Description>Self-delimiting, SIMD-friendly binary serialization format for .NET 8.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/sudorandom/omnibuf</RepositoryUrl>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <PackageReference Include="Google.Protobuf" Version="3.35.1" />
   </ItemGroup>
 </Project>

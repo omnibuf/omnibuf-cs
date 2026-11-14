@@ -1,0 +1,175 @@
+syntax = "proto3";
+package omnibuf.conformance;
+
+import "google/protobuf/wrappers.proto";
+
+option go_package = "github.com/sudorandom/omnibuf/internal/pb;pb";
+
+// AdvancedStatus tests top-level enum encoding across singular, optional, repeated, oneof, and map fields.
+enum AdvancedStatus {
+  ADVANCED_STATUS_UNSPECIFIED = 0;
+  ADVANCED_STATUS_ACTIVE = 1;
+  ADVANCED_STATUS_PAUSED = 2;
+}
+
+// OuterEnvelope exercises maps, wrappers, optional scalars, oneofs, nested types, C# collisions, and >64 field tags.
+message OuterEnvelope {
+  enum NestedMode {
+    NESTED_MODE_UNSPECIFIED = 0;
+    NESTED_MODE_FAST = 1;
+    NESTED_MODE_STRICT = 2;
+  }
+
+  message InnerPayload {
+    uint32 code = 1;
+    string detail = 2;
+    NestedMode mode = 3;
+  }
+
+  map<int32, string> map_i32_str = 1;
+  map<int64, uint32> map_i64_u32 = 2;
+  map<uint32, AdvancedStatus> map_u32_enum = 3;
+  map<uint64, InnerPayload> map_u64_msg = 4;
+  map<sint32, sint64> map_s32_s64 = 5;
+  map<sint64, bool> map_s64_bool = 6;
+  map<fixed32, float> map_f32_flt = 7;
+  map<fixed64, double> map_f64_dbl = 8;
+  map<sfixed32, bytes> map_sf32_bytes = 9;
+  map<sfixed64, fixed64> map_sf64_f64 = 10;
+  map<bool, string> map_bool_str = 11;
+  map<string, google.protobuf.Int32Value> map_str_wrap = 12;
+
+  repeated AdvancedStatus rep_status = 13;
+  repeated bool rep_bool = 14;
+  repeated sint64 rep_sint64 = 15;
+  repeated double rep_double = 16;
+  repeated bytes rep_bytes = 17;
+  repeated google.protobuf.Int32Value rep_i32_wrap = 18;
+  repeated google.protobuf.StringValue rep_str_wrap = 19;
+  repeated InnerPayload rep_inner = 20;
+
+  google.protobuf.DoubleValue w_double = 21;
+  google.protobuf.FloatValue w_float = 22;
+  google.protobuf.Int64Value w_int64 = 23;
+  google.protobuf.UInt64Value w_uint64 = 24;
+  google.protobuf.Int32Value w_int32 = 25;
+  google.protobuf.UInt32Value w_uint32 = 26;
+  google.protobuf.BoolValue w_bool = 27;
+  google.protobuf.StringValue w_string = 28;
+  google.protobuf.BytesValue w_bytes = 29;
+
+  optional int32 opt_int = 30;
+  optional bool opt_bool = 31;
+  optional string opt_str = 32;
+  optional AdvancedStatus opt_status = 33;
+  optional InnerPayload opt_inner = 34;
+
+  oneof choice {
+    int32 c_int = 35;
+    string c_str = 36;
+    bool c_bool = 37;
+    AdvancedStatus c_status = 38;
+    InnerPayload c_msg = 39;
+    google.protobuf.Int32Value c_wrap = 40;
+  }
+
+  string types = 41;
+  optional int32 descriptor = 42;
+  uint32 parser = 43;
+  bool equals = 44;
+  string to_string = 45;
+  uint64 get_hash_code = 46;
+  string outer_envelope = 47;
+
+  oneof collision_choice {
+    string clone = 48;
+    int32 merge_from = 49;
+  }
+
+  InnerPayload single_inner = 50;
+
+  uint32 f63_boundary = 63;
+  uint32 f64_boundary = 64;
+  string f65_high = 65;
+  InnerPayload f90_sub = 90;
+  optional int32 f130_opt = 130;
+}
+
+// ProtoTreeNode tests recursive SelfDescribing Field #0 emission and cycle detection.
+message ProtoTreeNode {
+  uint32 id = 1;
+  string name = 2;
+  ProtoTreeNode primary = 3;
+  repeated ProtoTreeNode children = 4;
+  map<string, ProtoTreeNode> branches = 5;
+}
+
+// WideMessage exercises >64 distinct fields in a single message (multi-word tracking).
+message WideMessage {
+  uint32 f1 = 1;
+  uint32 f2 = 2;
+  uint32 f3 = 3;
+  uint32 f4 = 4;
+  uint32 f5 = 5;
+  uint32 f6 = 6;
+  uint32 f7 = 7;
+  uint32 f8 = 8;
+  uint32 f9 = 9;
+  uint32 f10 = 10;
+  uint32 f11 = 11;
+  uint32 f12 = 12;
+  uint32 f13 = 13;
+  uint32 f14 = 14;
+  uint32 f15 = 15;
+  uint32 f16 = 16;
+  uint32 f17 = 17;
+  uint32 f18 = 18;
+  uint32 f19 = 19;
+  uint32 f20 = 20;
+  uint32 f21 = 21;
+  uint32 f22 = 22;
+  uint32 f23 = 23;
+  uint32 f24 = 24;
+  uint32 f25 = 25;
+  uint32 f26 = 26;
+  uint32 f27 = 27;
+  uint32 f28 = 28;
+  uint32 f29 = 29;
+  uint32 f30 = 30;
+  uint32 f31 = 31;
+  uint32 f32 = 32;
+  uint32 f33 = 33;
+  uint32 f34 = 34;
+  uint32 f35 = 35;
+  uint32 f36 = 36;
+  uint32 f37 = 37;
+  uint32 f38 = 38;
+  uint32 f39 = 39;
+  uint32 f40 = 40;
+  uint32 f41 = 41;
+  uint32 f42 = 42;
+  uint32 f43 = 43;
+  uint32 f44 = 44;
+  uint32 f45 = 45;
+  uint32 f46 = 46;
+  uint32 f47 = 47;
+  uint32 f48 = 48;
+  uint32 f49 = 49;
+  uint32 f50 = 50;
+  uint32 f51 = 51;
+  uint32 f52 = 52;
+  uint32 f53 = 53;
+  uint32 f54 = 54;
+  uint32 f55 = 55;
+  uint32 f56 = 56;
+  uint32 f57 = 57;
+  uint32 f58 = 58;
+  uint32 f59 = 59;
+  uint32 f60 = 60;
+  uint32 f61 = 61;
+  uint32 f62 = 62;
+  uint32 f63 = 63;
+  uint32 f64 = 64;
+  string f65 = 65;
+  repeated uint32 f66 = 66;
+}

@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -13,19 +14,17 @@ public static class OmniBufBlind
 {
     private sealed class BlindSchema
     {
-        public SchemaMeta? Inherited { get; init; }
         public SchemaMeta? Local { get; init; }
+        public BlindSchema? Parent { get; init; }
 
         public string FieldName(uint fieldNum)
         {
-            if (Local is not null && Local.Fields.TryGetValue(fieldNum, out string? localName) && !string.IsNullOrEmpty(localName))
+            for (BlindSchema? s = this; s is not null; s = s.Parent)
             {
-                return localName;
-            }
-
-            if (Inherited is not null && Inherited.Fields.TryGetValue(fieldNum, out string? inhName) && !string.IsNullOrEmpty(inhName))
-            {
-                return inhName;
+                if (s.Local is not null && s.Local.Fields.TryGetValue(fieldNum, out string? name))
+                {
+                    return string.IsNullOrEmpty(name) ? $"field_{fieldNum}" : name;
+                }
             }
 
             return $"field_{fieldNum}";
@@ -33,18 +32,32 @@ public static class OmniBufBlind
 
         public BlindSchema? Child(uint fieldNum)
         {
-            SchemaMeta? inhChild = null;
-            SchemaMeta? locChild = null;
-            Inherited?.Children.TryGetValue(fieldNum, out inhChild);
-            Local?.Children.TryGetValue(fieldNum, out locChild);
-            if (inhChild is null && locChild is null)
+            BlindSchema? parentChild = Parent?.Child(fieldNum);
+            SchemaMeta? localChild = null;
+            Local?.Children.TryGetValue(fieldNum, out localChild);
+            if (parentChild is null && localChild is null)
             {
                 return null;
             }
 
-            return new BlindSchema { Inherited = inhChild, Local = locChild };
+            return localChild is not null
+                ? new BlindSchema { Local = localChild, Parent = parentChild }
+                : parentChild;
         }
     }
+
+    private struct SubMsgAccum
+    {
+        public int FirstOffset;
+        public int FirstLength;
+        public List<byte>? Merged;
+    }
+
+    private sealed record ContainerShape(
+        OmniBufWireType Kind,
+        OmniBufWireType KeyOrElem,
+        OmniBufWireType Val,
+        ContainerShape? Inner);
 
     /// <summary>
     /// Decodes an arbitrary OmniBuf packet into a nested dictionary using wire tags and any embedded Field #0 metadata.
@@ -60,12 +73,13 @@ public static class OmniBufBlind
 
     /// <summary>
     /// Decodes an arbitrary OmniBuf packet and formats it as canonical JSON using <see cref="Utf8JsonWriter"/>.
-    /// When <paramref name="fallbackOnNonFinite"/> is true (used by TIER_BLIND conformance), messages containing
-    /// NaN or Infinity return "{}" because RFC 8259 JSON cannot represent non-finite IEEE-754 floats.
+    /// By default (<paramref name="fallbackOnNonFinite"/> = false), packets containing NaN or Infinity throw
+    /// <see cref="OmniBufException"/> because RFC 8259 JSON cannot represent non-finite IEEE-754 floats.
+    /// When <paramref name="fallbackOnNonFinite"/> is true (used by TIER_BLIND conformance), "{}" is returned instead.
     /// </summary>
     public static string DecodeBlindJson(
         ReadOnlySpan<byte> packet,
-        bool fallbackOnNonFinite = true,
+        bool fallbackOnNonFinite = false,
         int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         Dictionary<string, object?> decoded = DecodeBlind(packet, maxDepth);
@@ -122,13 +136,14 @@ public static class OmniBufBlind
         }
 
         BlindSchema? activeSchema = localMeta is not null
-            ? new BlindSchema { Inherited = schema?.Inherited, Local = SchemaMeta.Merge(schema?.Local, localMeta) }
+            ? new BlindSchema { Local = localMeta, Parent = schema }
             : schema;
 
         var result = new Dictionary<string, object?>(StringComparer.Ordinal);
         var nameOwner = new Dictionary<string, uint>(StringComparer.Ordinal);
         var fieldShapes = new Dictionary<uint, uint>();
-        Dictionary<uint, List<byte>>? pendingSubMsgs = null;
+        Dictionary<uint, ContainerShape>? nestedContainerShapes = null;
+        Dictionary<uint, SubMsgAccum>? pendingSubMsgs = null;
         List<uint>? pendingSubMsgOrder = null;
 
         // Pass 2: Decode every field, enforcing name collision and wire-shape consistency across concatenated segments.
@@ -150,7 +165,7 @@ public static class OmniBufBlind
 
             nameOwner[key] = fnum;
 
-            uint shape = ReadFieldShape(data, pos, wt);
+            uint shape = ReadFieldShape(data, pos, wt, depth, maxDepth, out ContainerShape? nestedShape);
             if (fieldShapes.TryGetValue(fnum, out uint prevShape) && prevShape != shape)
             {
                 throw new OmniBufException($"omnibuf: field #{fnum} changed wire shape across concatenated occurrences");
@@ -158,19 +173,68 @@ public static class OmniBufBlind
 
             fieldShapes[fnum] = shape;
 
+            if (nestedShape is not null)
+            {
+                nestedContainerShapes ??= new Dictionary<uint, ContainerShape>();
+                if (nestedContainerShapes.TryGetValue(fnum, out ContainerShape? prevNested))
+                {
+                    if (!TryUnifyContainerShape(prevNested, nestedShape, out ContainerShape? unified))
+                    {
+                        throw new OmniBufException($"omnibuf: field #{fnum} changed nested container wire shape across concatenated occurrences");
+                    }
+
+                    nestedContainerShapes[fnum] = unified!;
+                }
+                else
+                {
+                    nestedContainerShapes[fnum] = nestedShape;
+                }
+            }
+
             if (wt == OmniBufWireType.SubMsg)
             {
-                ReadOnlySpan<byte> subSlice = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                pendingSubMsgs ??= new Dictionary<uint, List<byte>>();
-                pendingSubMsgOrder ??= new List<uint>();
-                if (!pendingSubMsgs.TryGetValue(fnum, out List<byte>? acc))
+                ulong subByteLen = OmniBufDecoder.ReadVarint(data, ref pos);
+                if (subByteLen > (ulong)(data.Length - pos))
                 {
-                    acc = new List<byte>(subSlice.Length);
-                    pendingSubMsgs[fnum] = acc;
-                    pendingSubMsgOrder.Add(fnum);
+                    throw new OmniBufException($"omnibuf: length-prefixed payload ({subByteLen}B) out of bounds at {pos}");
                 }
 
-                acc.AddRange(subSlice.ToArray());
+                int subLen = (int)subByteLen;
+                int subOffset = pos;
+                pos += subLen;
+
+                pendingSubMsgs ??= new Dictionary<uint, SubMsgAccum>();
+                pendingSubMsgOrder ??= new List<uint>();
+                if (!pendingSubMsgs.TryGetValue(fnum, out SubMsgAccum acc))
+                {
+                    pendingSubMsgs[fnum] = new SubMsgAccum
+                    {
+                        FirstOffset = subOffset,
+                        FirstLength = subLen,
+                        Merged = null,
+                    };
+                    pendingSubMsgOrder.Add(fnum);
+                }
+                else
+                {
+                    ReadOnlySpan<byte> nextSeg = data.Slice(subOffset, subLen);
+                    if (acc.Merged is null)
+                    {
+                        ReadOnlySpan<byte> firstSeg = data.Slice(acc.FirstOffset, acc.FirstLength);
+                        OmniBufDecoder.ValidateMessage(firstSeg, depth + 1, maxDepth);
+                        OmniBufDecoder.ValidateMessage(nextSeg, depth + 1, maxDepth);
+                        acc.Merged = new List<byte>(acc.FirstLength + subLen);
+                        AppendSpanToList(acc.Merged, firstSeg);
+                    }
+                    else
+                    {
+                        OmniBufDecoder.ValidateMessage(nextSeg, depth + 1, maxDepth);
+                    }
+
+                    AppendSpanToList(acc.Merged, nextSeg);
+                    pendingSubMsgs[fnum] = acc;
+                }
+
                 continue;
             }
 
@@ -197,16 +261,38 @@ public static class OmniBufBlind
             foreach (uint fnum in pendingSubMsgOrder)
             {
                 string key = activeSchema is not null ? activeSchema.FieldName(fnum) : $"field_{fnum}";
-                byte[] mergedSub = pendingSubMsgs[fnum].ToArray();
-                result[key] = DecodeMessage(mergedSub, activeSchema?.Child(fnum), depth + 1, maxDepth);
+                SubMsgAccum acc = pendingSubMsgs[fnum];
+                ReadOnlySpan<byte> subSpan = acc.Merged is null
+                    ? data.Slice(acc.FirstOffset, acc.FirstLength)
+                    : CollectionsMarshal.AsSpan(acc.Merged);
+                result[key] = DecodeMessage(subSpan, activeSchema?.Child(fnum), depth + 1, maxDepth);
             }
         }
 
         return result;
     }
 
-    private static uint ReadFieldShape(ReadOnlySpan<byte> data, int pos, OmniBufWireType wt)
+    private static void AppendSpanToList(List<byte> dst, ReadOnlySpan<byte> src)
     {
+        if (src.IsEmpty)
+        {
+            return;
+        }
+
+        int oldCount = dst.Count;
+        CollectionsMarshal.SetCount(dst, oldCount + src.Length);
+        src.CopyTo(CollectionsMarshal.AsSpan(dst).Slice(oldCount, src.Length));
+    }
+
+    private static uint ReadFieldShape(
+        ReadOnlySpan<byte> data,
+        int pos,
+        OmniBufWireType wt,
+        int depth,
+        int maxDepth,
+        out ContainerShape? nestedShape)
+    {
+        nestedShape = null;
         OmniBufWireType norm = wt == OmniBufWireType.BoolTrue ? OmniBufWireType.BoolFalse : wt;
         if (norm == OmniBufWireType.Array)
         {
@@ -215,6 +301,11 @@ public static class OmniBufBlind
             if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out _, out _))
             {
                 throw new OmniBufException("omnibuf: invalid WireArray header");
+            }
+
+            if (elemWt is OmniBufWireType.Array or OmniBufWireType.Map)
+            {
+                nestedShape = InspectContainerBodyShape(body, OmniBufWireType.Array, depth + 1, maxDepth);
             }
 
             return (uint)OmniBufWireType.Array | ((uint)elemWt << 8);
@@ -229,10 +320,134 @@ public static class OmniBufBlind
                 throw new OmniBufException("omnibuf: invalid WireMap header");
             }
 
+            if (valWt is OmniBufWireType.Array or OmniBufWireType.Map)
+            {
+                nestedShape = InspectContainerBodyShape(body, OmniBufWireType.Map, depth + 1, maxDepth);
+            }
+
             return (uint)OmniBufWireType.Map | ((uint)keyWt << 8) | ((uint)valWt << 16);
         }
 
         return (uint)norm;
+    }
+
+    private static ContainerShape InspectContainerBodyShape(
+        ReadOnlySpan<byte> body,
+        OmniBufWireType containerKind,
+        int depth,
+        int maxDepth)
+    {
+        if (depth > maxDepth)
+        {
+            throw new OmniBufException($"omnibuf: container nesting depth {depth} exceeds maximum {maxDepth}");
+        }
+
+        if (containerKind == OmniBufWireType.Array)
+        {
+            if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out int count, out int p))
+            {
+                throw new OmniBufException("omnibuf: invalid WireArray header in DecodeBlind");
+            }
+
+            ContainerShape? unifiedInner = null;
+            if (elemWt is OmniBufWireType.Array or OmniBufWireType.Map)
+            {
+                int minChildLen = elemWt == OmniBufWireType.Array ? 2 : 3;
+                for (int i = 0; i < count; i++)
+                {
+                    ReadOnlySpan<byte> childBody = OmniBufDecoder.ReadLenSlice(body, ref p, minChildLen);
+                    ContainerShape elemShape = InspectContainerBodyShape(childBody, elemWt, depth + 1, maxDepth);
+                    if (unifiedInner is null)
+                    {
+                        unifiedInner = elemShape;
+                    }
+                    else if (!TryUnifyContainerShape(unifiedInner, elemShape, out unifiedInner))
+                    {
+                        throw new OmniBufException("omnibuf: conflicting nested container element wire types in WireArray");
+                    }
+                }
+
+                if (p != body.Length)
+                {
+                    throw new OmniBufException("omnibuf: trailing bytes in WireArray");
+                }
+            }
+
+            return new ContainerShape(OmniBufWireType.Array, elemWt, default, unifiedInner);
+        }
+
+        if (!OmniBufDecoder.TryParseMapHeader(body, out OmniBufWireType keyWt, out OmniBufWireType valWt, out int mapCount, out int mp))
+        {
+            throw new OmniBufException("omnibuf: invalid WireMap header in DecodeBlind");
+        }
+
+        ContainerShape? unifiedMapInner = null;
+        if (valWt is OmniBufWireType.Array or OmniBufWireType.Map)
+        {
+            int minChildLen = valWt == OmniBufWireType.Array ? 2 : 3;
+            for (int i = 0; i < mapCount; i++)
+            {
+                if (keyWt == OmniBufWireType.BoolFalse)
+                {
+                    _ = OmniBufDecoder.ReadBoolElement(body, ref mp);
+                }
+                else
+                {
+                    OmniBufDecoder.ValidateValue(body, ref mp, keyWt, depth + 1, maxDepth);
+                }
+
+                ReadOnlySpan<byte> childBody = OmniBufDecoder.ReadLenSlice(body, ref mp, minChildLen);
+                ContainerShape valShape = InspectContainerBodyShape(childBody, valWt, depth + 1, maxDepth);
+                if (unifiedMapInner is null)
+                {
+                    unifiedMapInner = valShape;
+                }
+                else if (!TryUnifyContainerShape(unifiedMapInner, valShape, out unifiedMapInner))
+                {
+                    throw new OmniBufException("omnibuf: conflicting nested container value wire types in WireMap");
+                }
+            }
+
+            if (mp != body.Length)
+            {
+                throw new OmniBufException("omnibuf: trailing bytes in WireMap");
+            }
+        }
+
+        return new ContainerShape(OmniBufWireType.Map, keyWt, valWt, unifiedMapInner);
+    }
+
+    private static bool TryUnifyContainerShape(
+        ContainerShape a,
+        ContainerShape b,
+        out ContainerShape? unified)
+    {
+        if (a.Kind != b.Kind || a.KeyOrElem != b.KeyOrElem || a.Val != b.Val)
+        {
+            unified = null;
+            return false;
+        }
+
+        if (a.Inner is null)
+        {
+            unified = a with { Inner = b.Inner };
+            return true;
+        }
+
+        if (b.Inner is null)
+        {
+            unified = a;
+            return true;
+        }
+
+        if (!TryUnifyContainerShape(a.Inner, b.Inner, out ContainerShape? innerUnified))
+        {
+            unified = null;
+            return false;
+        }
+
+        unified = a with { Inner = innerUnified };
+        return true;
     }
 
     private static object? DecodeValue(

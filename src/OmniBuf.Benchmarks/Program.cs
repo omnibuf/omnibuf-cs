@@ -13,6 +13,10 @@ namespace OmniBuf.Benchmarks;
 
 public static class Program
 {
+    private static byte[]? s_sinkBytes;
+    private static string? s_sinkString;
+    private static ulong s_sinkChecksum;
+
     public static int Main(string[] args)
     {
         string outPath = ResolveOutputPath(args);
@@ -43,7 +47,41 @@ public static class Program
             throw new InvalidOperationException($"Expected Google.Protobuf wire size 341B, got {protobufWire.Length}B");
         }
 
-        VerifyRoundTrips(omnibufWire, protobufWire, msgpackWire, jsonWire);
+        VerifyRoundTripsAndChecksums(omnibufWire, protobufWire, msgpackWire, jsonWire);
+
+        // Stress Category 5 inputs: >16 KiB nested sub-message and array element shifts.
+        string largeDc = new('d', 20_480);
+        string largeNeighborRouter = new('n', 18_432);
+        PeerUpdate shiftProtoPeer = CreateLargeNestedProtoPeer(largeDc, largeNeighborRouter);
+        AnnotatedPeerUpdate shiftAnnotatedPeer = CreateLargeNestedAnnotatedPeer(largeDc, largeNeighborRouter);
+        MpPeerUpdate shiftMpPeer = CreateLargeNestedMpPeer(largeDc, largeNeighborRouter);
+        JsonPeerUpdate shiftJsonPeer = CreateLargeNestedJsonPeer(largeDc, largeNeighborRouter);
+
+        byte[] shiftOmnibufWire = shiftProtoPeer.MarshalOmniBuf();
+        byte[] shiftAnnotatedWire = OmniBufSerializer.Marshal(shiftAnnotatedPeer);
+        byte[] shiftProtobufWire = shiftProtoPeer.ToByteArray();
+        byte[] shiftMsgpackWire = MessagePackSerializer.Serialize(shiftMpPeer);
+        byte[] shiftJsonWire = JsonSerializer.SerializeToUtf8Bytes(shiftJsonPeer, WorkloadJsonContext.Default.JsonPeerUpdate);
+
+        if (!shiftAnnotatedWire.AsSpan().SequenceEqual(shiftOmnibufWire))
+        {
+            throw new InvalidOperationException("Large nested AnnotatedPeerUpdate wire bytes diverged from generated PeerUpdate");
+        }
+
+        VerifyRoundTripsAndChecksums(shiftOmnibufWire, shiftProtobufWire, shiftMsgpackWire, shiftJsonWire);
+
+        // Stress Category 6 inputs: 32 trailing neighbors after location, growing location.datacenter > 16 KiB.
+        string grownDc = new('g', 20_480);
+        PeerUpdate growBaseProto = Create32NeighborProtoPeer();
+        MpPeerUpdate growBaseMp = Create32NeighborMpPeer();
+        JsonPeerUpdate growBaseJson = Create32NeighborJsonPeer();
+
+        byte[] growOmnibufWire = growBaseProto.MarshalOmniBuf();
+        byte[] growProtobufWire = growBaseProto.ToByteArray();
+        byte[] growMsgpackWire = MessagePackSerializer.Serialize(growBaseMp);
+        byte[] growJsonWire = JsonSerializer.SerializeToUtf8Bytes(growBaseJson, WorkloadJsonContext.Default.JsonPeerUpdate);
+
+        VerifyEmbeddedGrowthParity(growOmnibufWire, growProtobufWire, growMsgpackWire, growJsonWire, grownDc);
 
         string runtimeDesc = $".NET {Environment.Version}";
         string platform = GetNormalizedPlatform();
@@ -53,8 +91,6 @@ public static class Program
         Console.WriteLine($"OmniBuf C# Benchmark Suite ({runtimeDesc}, {platform}/{arch}, {cpu})");
         Console.WriteLine($"Wire sizes: OmniBuf={omnibufWire.Length}B, Google.Protobuf={protobufWire.Length}B, MessagePack={msgpackWire.Length}B, JSON={jsonWire.Length}B");
         Console.WriteLine();
-
-        int sink = 0;
 
         var encodeCategory = new BenchCategory
         {
@@ -68,51 +104,31 @@ public static class Program
                     WireBytes: omnibufWire.Length,
                     Highlight: true,
                     Baseline: true,
-                    Action: () =>
-                    {
-                        byte[] b = protoPeer.MarshalOmniBuf();
-                        sink ^= b.Length;
-                    }),
+                    Action: () => ConsumeBytes(protoPeer.MarshalOmniBuf())),
                 new ContenderSpec(
                     "OmniBuf ([OmniBufField])",
                     WireBytes: annotatedWire.Length,
                     Highlight: true,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        byte[] b = OmniBufSerializer.Marshal(annotatedPeer);
-                        sink ^= b.Length;
-                    }),
+                    Action: () => ConsumeBytes(OmniBufSerializer.Marshal(annotatedPeer))),
                 new ContenderSpec(
                     "Google.Protobuf",
                     WireBytes: protobufWire.Length,
                     Highlight: false,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        byte[] b = protoPeer.ToByteArray();
-                        sink ^= b.Length;
-                    }),
+                    Action: () => ConsumeBytes(protoPeer.ToByteArray())),
                 new ContenderSpec(
                     "MessagePack-CSharp",
                     WireBytes: msgpackWire.Length,
                     Highlight: false,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        byte[] b = MessagePackSerializer.Serialize(mpPeer);
-                        sink ^= b.Length;
-                    }),
+                    Action: () => ConsumeBytes(MessagePackSerializer.Serialize(mpPeer))),
                 new ContenderSpec(
                     "System.Text.Json",
                     WireBytes: jsonWire.Length,
                     Highlight: false,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        byte[] b = JsonSerializer.SerializeToUtf8Bytes(jsonPeer, WorkloadJsonContext.Default.JsonPeerUpdate);
-                        sink ^= b.Length;
-                    }),
+                    Action: () => ConsumeBytes(JsonSerializer.SerializeToUtf8Bytes(jsonPeer, WorkloadJsonContext.Default.JsonPeerUpdate))),
             }),
         };
         PrintCategory(encodeCategory);
@@ -129,51 +145,31 @@ public static class Program
                     WireBytes: null,
                     Highlight: true,
                     Baseline: true,
-                    Action: () =>
-                    {
-                        PeerUpdate m = PeerUpdate.ParseOmniBuf(omnibufWire);
-                        sink ^= (int)m.Asn;
-                    }),
+                    Action: () => ConsumeChecksum(ChecksumProtoPeer(PeerUpdate.ParseOmniBuf(omnibufWire)))),
                 new ContenderSpec(
                     "OmniBuf ([OmniBufField])",
                     WireBytes: null,
                     Highlight: true,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        AnnotatedPeerUpdate m = OmniBufSerializer.Unmarshal<AnnotatedPeerUpdate>(omnibufWire);
-                        sink ^= (int)m.Asn;
-                    }),
+                    Action: () => ConsumeChecksum(ChecksumAnnotatedPeer(OmniBufSerializer.Unmarshal<AnnotatedPeerUpdate>(omnibufWire)))),
                 new ContenderSpec(
                     "Google.Protobuf",
                     WireBytes: null,
                     Highlight: false,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        PeerUpdate m = PeerUpdate.Parser.ParseFrom(protobufWire);
-                        sink ^= (int)m.Asn;
-                    }),
+                    Action: () => ConsumeChecksum(ChecksumProtoPeer(PeerUpdate.Parser.ParseFrom(protobufWire)))),
                 new ContenderSpec(
                     "MessagePack-CSharp",
                     WireBytes: null,
                     Highlight: false,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        MpPeerUpdate m = MessagePackSerializer.Deserialize<MpPeerUpdate>(msgpackWire);
-                        sink ^= (int)m.Asn;
-                    }),
+                    Action: () => ConsumeChecksum(ChecksumMpPeer(MessagePackSerializer.Deserialize<MpPeerUpdate>(msgpackWire)))),
                 new ContenderSpec(
                     "System.Text.Json",
                     WireBytes: null,
                     Highlight: false,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        JsonPeerUpdate m = JsonSerializer.Deserialize(jsonWire, WorkloadJsonContext.Default.JsonPeerUpdate)!;
-                        sink ^= (int)m.Asn;
-                    }),
+                    Action: () => ConsumeChecksum(ChecksumJsonPeer(JsonSerializer.Deserialize(jsonWire, WorkloadJsonContext.Default.JsonPeerUpdate)!))),
             }),
         };
         PrintCategory(decodeCategory);
@@ -181,7 +177,7 @@ public static class Program
         var lookupCategory = new BenchCategory
         {
             Id = "lookup_city",
-            Title = "Read a Single Nested Field (peer.location.city)",
+            Title = "Read a Single Nested Field",
             Unit = "ns",
             Results = MeasureCategory(new[]
             {
@@ -190,50 +186,33 @@ public static class Program
                     WireBytes: null,
                     Highlight: true,
                     Baseline: true,
-                    Action: () =>
-                    {
-                        string city = new OpaquePeerUpdate(omnibufWire).GetLocationCity();
-                        sink ^= city.Length;
-                    }),
+                    Action: () => ConsumeString(new OpaquePeerUpdate(omnibufWire).GetLocationCity())),
                 new ContenderSpec(
                     "Google.Protobuf",
                     WireBytes: null,
                     Highlight: false,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        string city = PeerUpdate.Parser.ParseFrom(protobufWire).Location.City;
-                        sink ^= city.Length;
-                    }),
+                    Action: () => ConsumeString(PeerUpdate.Parser.ParseFrom(protobufWire).Location.City)),
                 new ContenderSpec(
                     "MessagePack-CSharp",
                     WireBytes: null,
                     Highlight: false,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        string city = MessagePackSerializer.Deserialize<MpPeerUpdate>(msgpackWire).Location!.City;
-                        sink ^= city.Length;
-                    }),
+                    Action: () => ConsumeString(MessagePackSerializer.Deserialize<MpPeerUpdate>(msgpackWire).Location!.City)),
                 new ContenderSpec(
                     "System.Text.Json",
                     WireBytes: null,
                     Highlight: false,
                     Baseline: false,
-                    Action: () =>
-                    {
-                        string city = JsonSerializer.Deserialize(jsonWire, WorkloadJsonContext.Default.JsonPeerUpdate)!.Location!.City;
-                        sink ^= city.Length;
-                    }),
+                    Action: () => ConsumeString(JsonSerializer.Deserialize(jsonWire, WorkloadJsonContext.Default.JsonPeerUpdate)!.Location!.City)),
             }),
         };
         PrintCategory(lookupCategory);
 
-        ulong seqCounter = 9876543211UL;
         var mutateCategory = new BenchCategory
         {
             Id = "mutate_sequence",
-            Title = "Selective Single-Field Mutation (peer.sequence)",
+            Title = "Selective Single-Field Mutation",
             Unit = "ns",
             Results = MeasureCategory(new[]
             {
@@ -245,9 +224,12 @@ public static class Program
                     Action: () =>
                     {
                         var op = new OpaquePeerUpdate(omnibufWire);
-                        op.Sequence = ++seqCounter;
-                        byte[] outBytes = op.MarshalOmniBuf();
-                        sink ^= outBytes.Length;
+                        if (op.GetLocationCity() == "Frankfurt")
+                        {
+                            op.Sequence = op.Sequence + 1UL;
+                        }
+
+                        ConsumeBytes(op.MarshalOmniBuf());
                     }),
                 new ContenderSpec(
                     "Google.Protobuf",
@@ -257,9 +239,12 @@ public static class Program
                     Action: () =>
                     {
                         PeerUpdate m = PeerUpdate.Parser.ParseFrom(protobufWire);
-                        m.Sequence = ++seqCounter;
-                        byte[] outBytes = m.ToByteArray();
-                        sink ^= outBytes.Length;
+                        if (m.Location.City == "Frankfurt")
+                        {
+                            m.Sequence = m.Sequence + 1UL;
+                        }
+
+                        ConsumeBytes(m.ToByteArray());
                     }),
                 new ContenderSpec(
                     "MessagePack-CSharp",
@@ -269,9 +254,12 @@ public static class Program
                     Action: () =>
                     {
                         MpPeerUpdate m = MessagePackSerializer.Deserialize<MpPeerUpdate>(msgpackWire);
-                        m.Sequence = ++seqCounter;
-                        byte[] outBytes = MessagePackSerializer.Serialize(m);
-                        sink ^= outBytes.Length;
+                        if (m.Location!.City == "Frankfurt")
+                        {
+                            m.Sequence = m.Sequence + 1UL;
+                        }
+
+                        ConsumeBytes(MessagePackSerializer.Serialize(m));
                     }),
                 new ContenderSpec(
                     "System.Text.Json",
@@ -281,17 +269,127 @@ public static class Program
                     Action: () =>
                     {
                         JsonPeerUpdate m = JsonSerializer.Deserialize(jsonWire, WorkloadJsonContext.Default.JsonPeerUpdate)!;
-                        m.Sequence = ++seqCounter;
-                        byte[] outBytes = JsonSerializer.SerializeToUtf8Bytes(m, WorkloadJsonContext.Default.JsonPeerUpdate);
-                        sink ^= outBytes.Length;
+                        if (m.Location!.City == "Frankfurt")
+                        {
+                            m.Sequence = m.Sequence + 1UL;
+                        }
+
+                        ConsumeBytes(JsonSerializer.SerializeToUtf8Bytes(m, WorkloadJsonContext.Default.JsonPeerUpdate));
                     }),
             }),
         };
         PrintCategory(mutateCategory);
 
-        if (sink == int.MinValue)
+        var encodeShiftCategory = new BenchCategory
         {
-            Console.WriteLine(sink);
+            Id = "encode_nested_shift",
+            Title = "Large Embedded Message Encode",
+            Unit = "ns",
+            Results = MeasureCategory(new[]
+            {
+                new ContenderSpec(
+                    "OmniBuf (Generated)",
+                    WireBytes: shiftOmnibufWire.Length,
+                    Highlight: true,
+                    Baseline: true,
+                    Action: () => ConsumeBytes(shiftProtoPeer.MarshalOmniBuf())),
+                new ContenderSpec(
+                    "OmniBuf ([OmniBufField])",
+                    WireBytes: shiftAnnotatedWire.Length,
+                    Highlight: true,
+                    Baseline: false,
+                    Action: () => ConsumeBytes(OmniBufSerializer.Marshal(shiftAnnotatedPeer))),
+                new ContenderSpec(
+                    "Google.Protobuf",
+                    WireBytes: shiftProtobufWire.Length,
+                    Highlight: false,
+                    Baseline: false,
+                    Action: () => ConsumeBytes(shiftProtoPeer.ToByteArray())),
+                new ContenderSpec(
+                    "MessagePack-CSharp",
+                    WireBytes: shiftMsgpackWire.Length,
+                    Highlight: false,
+                    Baseline: false,
+                    Action: () => ConsumeBytes(MessagePackSerializer.Serialize(shiftMpPeer))),
+                new ContenderSpec(
+                    "System.Text.Json",
+                    WireBytes: shiftJsonWire.Length,
+                    Highlight: false,
+                    Baseline: false,
+                    Action: () => ConsumeBytes(JsonSerializer.SerializeToUtf8Bytes(shiftJsonPeer, WorkloadJsonContext.Default.JsonPeerUpdate))),
+            }),
+        };
+        PrintCategory(encodeShiftCategory);
+
+        var mutateEmbeddedGrowCategory = new BenchCategory
+        {
+            Id = "mutate_embedded_grow",
+            Title = "Embedded Message Growth",
+            Unit = "ns",
+            Results = MeasureCategory(new[]
+            {
+                new ContenderSpec(
+                    "OmniBuf (Generated)",
+                    WireBytes: null,
+                    Highlight: true,
+                    Baseline: true,
+                    Action: () =>
+                    {
+                        var op = new OpaquePeerUpdate(growOmnibufWire);
+                        OpaqueLocation loc = op.Location!;
+                        op.SetLocation(new Location
+                        {
+                            Region = loc.Region,
+                            Datacenter = grownDc,
+                            City = loc.City,
+                            Rack = loc.Rack,
+                            Latitude = loc.Latitude,
+                            Longitude = loc.Longitude,
+                        });
+                        ConsumeBytes(op.MarshalOmniBuf());
+                    }),
+                new ContenderSpec(
+                    "Google.Protobuf",
+                    WireBytes: null,
+                    Highlight: false,
+                    Baseline: false,
+                    Action: () =>
+                    {
+                        PeerUpdate m = PeerUpdate.Parser.ParseFrom(growProtobufWire);
+                        m.Location.Datacenter = grownDc;
+                        ConsumeBytes(m.ToByteArray());
+                    }),
+                new ContenderSpec(
+                    "MessagePack-CSharp",
+                    WireBytes: null,
+                    Highlight: false,
+                    Baseline: false,
+                    Action: () =>
+                    {
+                        MpPeerUpdate m = MessagePackSerializer.Deserialize<MpPeerUpdate>(growMsgpackWire);
+                        m.Location!.Datacenter = grownDc;
+                        ConsumeBytes(MessagePackSerializer.Serialize(m));
+                    }),
+                new ContenderSpec(
+                    "System.Text.Json",
+                    WireBytes: null,
+                    Highlight: false,
+                    Baseline: false,
+                    Action: () =>
+                    {
+                        JsonPeerUpdate m = JsonSerializer.Deserialize(growJsonWire, WorkloadJsonContext.Default.JsonPeerUpdate)!;
+                        m.Location!.Datacenter = grownDc;
+                        ConsumeBytes(JsonSerializer.SerializeToUtf8Bytes(m, WorkloadJsonContext.Default.JsonPeerUpdate));
+                    }),
+            }),
+        };
+        PrintCategory(mutateEmbeddedGrowCategory);
+
+        if (Volatile.Read(ref s_sinkBytes) is null
+            || Volatile.Read(ref s_sinkString) is null
+            || Volatile.Read(ref s_sinkChecksum) == 0UL)
+        {
+            throw new InvalidOperationException("Benchmark consumer sinks were unexpectedly empty");
         }
 
         var report = new BenchReport
@@ -308,6 +406,8 @@ public static class Program
                 decodeCategory,
                 lookupCategory,
                 mutateCategory,
+                encodeShiftCategory,
+                mutateEmbeddedGrowCategory,
             },
         };
 
@@ -321,6 +421,203 @@ public static class Program
         File.WriteAllText(outPath, jsonOut);
         Console.WriteLine($"Wrote benchmark report to {outPath}");
         return 0;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ConsumeBytes(byte[] bytes) => Volatile.Write(ref s_sinkBytes, bytes);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ConsumeString(string value) => Volatile.Write(ref s_sinkString, value);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ConsumeChecksum(ulong checksum) => Volatile.Write(ref s_sinkChecksum, checksum);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ulong ChecksumProtoPeer(PeerUpdate m)
+    {
+        ulong h = 14695981039346656037UL;
+        h = Mix(h, m.Asn);
+        h = MixString(h, m.RouterId);
+        h = Mix(h, m.Active ? 1UL : 0UL);
+        h = Mix(h, m.UptimeSec);
+        h = Mix(h, unchecked((ulong)(long)m.RssiDbm));
+        h = Mix(h, BitConverter.DoubleToUInt64Bits(m.CpuLoad));
+        for (int i = 0; i < m.Tags.Count; i++)
+        {
+            h = MixString(h, m.Tags[i]);
+        }
+
+        for (int i = 0; i < m.Prefixes.Count; i++)
+        {
+            h = Mix(h, m.Prefixes[i]);
+        }
+
+        if (m.Location is { } loc)
+        {
+            h = MixString(h, loc.Region);
+            h = MixString(h, loc.Datacenter);
+            h = MixString(h, loc.City);
+            h = Mix(h, loc.Rack);
+            h = Mix(h, BitConverter.SingleToUInt32Bits(loc.Latitude));
+            h = Mix(h, BitConverter.SingleToUInt32Bits(loc.Longitude));
+        }
+
+        for (int i = 0; i < m.Neighbors.Count; i++)
+        {
+            Neighbor n = m.Neighbors[i];
+            h = Mix(h, n.PeerAsn);
+            h = MixString(h, n.Router);
+            h = Mix(h, n.LatencyUs);
+            h = Mix(h, n.Established ? 1UL : 0UL);
+        }
+
+        h = Mix(h, m.Sequence);
+        return h;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ulong ChecksumAnnotatedPeer(AnnotatedPeerUpdate m)
+    {
+        ulong h = 14695981039346656037UL;
+        h = Mix(h, m.Asn);
+        h = MixString(h, m.RouterId);
+        h = Mix(h, m.Active ? 1UL : 0UL);
+        h = Mix(h, m.UptimeSec);
+        h = Mix(h, unchecked((ulong)(long)m.RssiDbm));
+        h = Mix(h, BitConverter.DoubleToUInt64Bits(m.CpuLoad));
+        for (int i = 0; i < m.Tags.Count; i++)
+        {
+            h = MixString(h, m.Tags[i]);
+        }
+
+        for (int i = 0; i < m.Prefixes.Count; i++)
+        {
+            h = Mix(h, m.Prefixes[i]);
+        }
+
+        if (m.Location is { } loc)
+        {
+            h = MixString(h, loc.Region);
+            h = MixString(h, loc.Datacenter);
+            h = MixString(h, loc.City);
+            h = Mix(h, loc.Rack);
+            h = Mix(h, BitConverter.SingleToUInt32Bits(loc.Latitude));
+            h = Mix(h, BitConverter.SingleToUInt32Bits(loc.Longitude));
+        }
+
+        for (int i = 0; i < m.Neighbors.Count; i++)
+        {
+            AnnotatedNeighbor n = m.Neighbors[i];
+            h = Mix(h, n.PeerAsn);
+            h = MixString(h, n.Router);
+            h = Mix(h, n.LatencyUs);
+            h = Mix(h, n.Established ? 1UL : 0UL);
+        }
+
+        h = Mix(h, m.Sequence);
+        return h;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ulong ChecksumMpPeer(MpPeerUpdate m)
+    {
+        ulong h = 14695981039346656037UL;
+        h = Mix(h, m.Asn);
+        h = MixString(h, m.RouterId);
+        h = Mix(h, m.Active ? 1UL : 0UL);
+        h = Mix(h, m.UptimeSec);
+        h = Mix(h, unchecked((ulong)(long)m.RssiDbm));
+        h = Mix(h, BitConverter.DoubleToUInt64Bits(m.CpuLoad));
+        for (int i = 0; i < m.Tags.Count; i++)
+        {
+            h = MixString(h, m.Tags[i]);
+        }
+
+        for (int i = 0; i < m.Prefixes.Count; i++)
+        {
+            h = Mix(h, m.Prefixes[i]);
+        }
+
+        if (m.Location is { } loc)
+        {
+            h = MixString(h, loc.Region);
+            h = MixString(h, loc.Datacenter);
+            h = MixString(h, loc.City);
+            h = Mix(h, loc.Rack);
+            h = Mix(h, BitConverter.SingleToUInt32Bits(loc.Latitude));
+            h = Mix(h, BitConverter.SingleToUInt32Bits(loc.Longitude));
+        }
+
+        for (int i = 0; i < m.Neighbors.Count; i++)
+        {
+            MpNeighbor n = m.Neighbors[i];
+            h = Mix(h, n.PeerAsn);
+            h = MixString(h, n.Router);
+            h = Mix(h, n.LatencyUs);
+            h = Mix(h, n.Established ? 1UL : 0UL);
+        }
+
+        h = Mix(h, m.Sequence);
+        return h;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ulong ChecksumJsonPeer(JsonPeerUpdate m)
+    {
+        ulong h = 14695981039346656037UL;
+        h = Mix(h, m.Asn);
+        h = MixString(h, m.RouterId);
+        h = Mix(h, m.Active ? 1UL : 0UL);
+        h = Mix(h, m.UptimeSec);
+        h = Mix(h, unchecked((ulong)(long)m.RssiDbm));
+        h = Mix(h, BitConverter.DoubleToUInt64Bits(m.CpuLoad));
+        for (int i = 0; i < m.Tags.Count; i++)
+        {
+            h = MixString(h, m.Tags[i]);
+        }
+
+        for (int i = 0; i < m.Prefixes.Count; i++)
+        {
+            h = Mix(h, m.Prefixes[i]);
+        }
+
+        if (m.Location is { } loc)
+        {
+            h = MixString(h, loc.Region);
+            h = MixString(h, loc.Datacenter);
+            h = MixString(h, loc.City);
+            h = Mix(h, loc.Rack);
+            h = Mix(h, BitConverter.SingleToUInt32Bits(loc.Latitude));
+            h = Mix(h, BitConverter.SingleToUInt32Bits(loc.Longitude));
+        }
+
+        for (int i = 0; i < m.Neighbors.Count; i++)
+        {
+            JsonNeighbor n = m.Neighbors[i];
+            h = Mix(h, n.PeerAsn);
+            h = MixString(h, n.Router);
+            h = Mix(h, n.LatencyUs);
+            h = Mix(h, n.Established ? 1UL : 0UL);
+        }
+
+        h = Mix(h, m.Sequence);
+        return h;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Mix(ulong h, ulong v) => unchecked((h ^ v) * 1099511628211UL);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong MixString(ulong h, string s)
+    {
+        h = Mix(h, (ulong)s.Length);
+        if (s.Length > 0)
+        {
+            h = Mix(h, s[0]);
+            h = Mix(h, s[^1]);
+        }
+
+        return h;
     }
 
     private sealed record ContenderSpec(
@@ -440,37 +737,84 @@ public static class Program
         Console.WriteLine();
     }
 
-    private static void VerifyRoundTrips(byte[] omnibufWire, byte[] protobufWire, byte[] msgpackWire, byte[] jsonWire)
+    private static void VerifyRoundTripsAndChecksums(byte[] omnibufWire, byte[] protobufWire, byte[] msgpackWire, byte[] jsonWire)
     {
         PeerUpdate decodedGen = PeerUpdate.ParseOmniBuf(omnibufWire);
         AnnotatedPeerUpdate decodedAnn = OmniBufSerializer.Unmarshal<AnnotatedPeerUpdate>(omnibufWire);
+        PeerUpdate decodedPb = PeerUpdate.Parser.ParseFrom(protobufWire);
+        MpPeerUpdate decodedMp = MessagePackSerializer.Deserialize<MpPeerUpdate>(msgpackWire);
+        JsonPeerUpdate decodedJson = JsonSerializer.Deserialize(jsonWire, WorkloadJsonContext.Default.JsonPeerUpdate)!;
+
+        ulong csGen = ChecksumProtoPeer(decodedGen);
+        ulong csAnn = ChecksumAnnotatedPeer(decodedAnn);
+        ulong csPb = ChecksumProtoPeer(decodedPb);
+        ulong csMp = ChecksumMpPeer(decodedMp);
+        ulong csJson = ChecksumJsonPeer(decodedJson);
+
+        if (csGen != csAnn || csGen != csPb || csGen != csMp || csGen != csJson)
+        {
+            throw new InvalidOperationException(
+                $"11-field decode checksum mismatch across codecs: gen={csGen}, ann={csAnn}, pb={csPb}, mp={csMp}, json={csJson}");
+        }
+
         string city = new OpaquePeerUpdate(omnibufWire).GetLocationCity();
-        if (decodedGen.Asn != 64512 || decodedAnn.Asn != 64512 || city != "Frankfurt")
+        if (decodedGen.Asn != 64512 || city != "Frankfurt")
         {
             throw new InvalidOperationException("OmniBuf round-trip verification failed");
         }
 
-        var opaque = new OpaquePeerUpdate(omnibufWire) { Sequence = 9876543211UL };
+        var opaque = new OpaquePeerUpdate(omnibufWire);
+        opaque.Sequence = opaque.Sequence + 1UL;
         byte[] spliced = opaque.MarshalOmniBuf();
         PeerUpdate splicedDecoded = PeerUpdate.ParseOmniBuf(spliced);
         if (splicedDecoded.Sequence != 9876543211UL || splicedDecoded.Location.City != "Frankfurt")
         {
             throw new InvalidOperationException("OpaquePeerUpdate splice verification failed");
         }
+    }
 
-        if (PeerUpdate.Parser.ParseFrom(protobufWire).Location.City != "Frankfurt")
+    private static void VerifyEmbeddedGrowthParity(
+        byte[] growOmnibufWire,
+        byte[] growProtobufWire,
+        byte[] growMsgpackWire,
+        byte[] growJsonWire,
+        string grownDc)
+    {
+        var op = new OpaquePeerUpdate(growOmnibufWire);
+        OpaqueLocation loc = op.Location!;
+        op.SetLocation(new Location
         {
-            throw new InvalidOperationException("Google.Protobuf round-trip verification failed");
-        }
+            Region = loc.Region,
+            Datacenter = grownDc,
+            City = loc.City,
+            Rack = loc.Rack,
+            Latitude = loc.Latitude,
+            Longitude = loc.Longitude,
+        });
+        PeerUpdate splicedOmni = PeerUpdate.ParseOmniBuf(op.MarshalOmniBuf());
 
-        if (MessagePackSerializer.Deserialize<MpPeerUpdate>(msgpackWire).Location?.City != "Frankfurt")
-        {
-            throw new InvalidOperationException("MessagePack-CSharp round-trip verification failed");
-        }
+        PeerUpdate pb = PeerUpdate.Parser.ParseFrom(growProtobufWire);
+        pb.Location.Datacenter = grownDc;
+        PeerUpdate roundPb = PeerUpdate.Parser.ParseFrom(pb.ToByteArray());
 
-        if (JsonSerializer.Deserialize(jsonWire, WorkloadJsonContext.Default.JsonPeerUpdate)?.Location?.City != "Frankfurt")
+        MpPeerUpdate mp = MessagePackSerializer.Deserialize<MpPeerUpdate>(growMsgpackWire);
+        mp.Location!.Datacenter = grownDc;
+        MpPeerUpdate roundMp = MessagePackSerializer.Deserialize<MpPeerUpdate>(MessagePackSerializer.Serialize(mp));
+
+        JsonPeerUpdate js = JsonSerializer.Deserialize(growJsonWire, WorkloadJsonContext.Default.JsonPeerUpdate)!;
+        js.Location!.Datacenter = grownDc;
+        JsonPeerUpdate roundJs = JsonSerializer.Deserialize(
+            JsonSerializer.SerializeToUtf8Bytes(js, WorkloadJsonContext.Default.JsonPeerUpdate),
+            WorkloadJsonContext.Default.JsonPeerUpdate)!;
+
+        ulong csOmni = ChecksumProtoPeer(splicedOmni);
+        if (splicedOmni.Neighbors.Count != 32
+            || splicedOmni.Location.Datacenter.Length != 20_480
+            || csOmni != ChecksumProtoPeer(roundPb)
+            || csOmni != ChecksumMpPeer(roundMp)
+            || csOmni != ChecksumJsonPeer(roundJs))
         {
-            throw new InvalidOperationException("System.Text.Json round-trip verification failed");
+            throw new InvalidOperationException("Embedded growth checksum parity verification failed");
         }
     }
 
@@ -567,6 +911,98 @@ public static class Program
         }
 
         return RuntimeInformation.ProcessArchitecture.ToString();
+    }
+
+    private static PeerUpdate CreateLargeNestedProtoPeer(string largeDc, string largeNeighborRouter)
+    {
+        PeerUpdate p = CreateSampleProtoPeerUpdate();
+        p.Location.Datacenter = largeDc;
+        p.Neighbors[0].Router = largeNeighborRouter;
+        return p;
+    }
+
+    private static AnnotatedPeerUpdate CreateLargeNestedAnnotatedPeer(string largeDc, string largeNeighborRouter)
+    {
+        AnnotatedPeerUpdate p = CreateSampleAnnotatedPeerUpdate();
+        p.Location!.Datacenter = largeDc;
+        p.Neighbors[0].Router = largeNeighborRouter;
+        return p;
+    }
+
+    private static MpPeerUpdate CreateLargeNestedMpPeer(string largeDc, string largeNeighborRouter)
+    {
+        MpPeerUpdate p = CreateSampleMessagePackPeerUpdate();
+        p.Location!.Datacenter = largeDc;
+        p.Neighbors[0].Router = largeNeighborRouter;
+        return p;
+    }
+
+    private static JsonPeerUpdate CreateLargeNestedJsonPeer(string largeDc, string largeNeighborRouter)
+    {
+        JsonPeerUpdate p = CreateSampleJsonPeerUpdate();
+        p.Location!.Datacenter = largeDc;
+        p.Neighbors[0].Router = largeNeighborRouter;
+        return p;
+    }
+
+    private static PeerUpdate Create32NeighborProtoPeer()
+    {
+        PeerUpdate p = CreateSampleProtoPeerUpdate();
+        Neighbor[] seed = p.Neighbors.ToArray();
+        p.Neighbors.Clear();
+        for (int rep = 0; rep < 8; rep++)
+        {
+            foreach (Neighbor n in seed)
+            {
+                p.Neighbors.Add(n.Clone());
+            }
+        }
+
+        return p;
+    }
+
+    private static MpPeerUpdate Create32NeighborMpPeer()
+    {
+        MpPeerUpdate p = CreateSampleMessagePackPeerUpdate();
+        MpNeighbor[] seed = p.Neighbors.ToArray();
+        p.Neighbors.Clear();
+        for (int rep = 0; rep < 8; rep++)
+        {
+            foreach (MpNeighbor n in seed)
+            {
+                p.Neighbors.Add(new MpNeighbor
+                {
+                    PeerAsn = n.PeerAsn,
+                    Router = n.Router,
+                    LatencyUs = n.LatencyUs,
+                    Established = n.Established,
+                });
+            }
+        }
+
+        return p;
+    }
+
+    private static JsonPeerUpdate Create32NeighborJsonPeer()
+    {
+        JsonPeerUpdate p = CreateSampleJsonPeerUpdate();
+        JsonNeighbor[] seed = p.Neighbors.ToArray();
+        p.Neighbors.Clear();
+        for (int rep = 0; rep < 8; rep++)
+        {
+            foreach (JsonNeighbor n in seed)
+            {
+                p.Neighbors.Add(new JsonNeighbor
+                {
+                    PeerAsn = n.PeerAsn,
+                    Router = n.Router,
+                    LatencyUs = n.LatencyUs,
+                    Established = n.Established,
+                });
+            }
+        }
+
+        return p;
     }
 
     private static PeerUpdate CreateSampleProtoPeerUpdate()

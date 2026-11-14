@@ -79,16 +79,34 @@ public sealed class WirePrimitivesTests
     }
 
     [Fact]
-    public void ReadSint32_Rejects64BitOverflow()
+    public void ReadSint32AndUint32_TruncatePerSpec11_1_WhileCheckedVariantsRejectOverflow()
     {
-        var enc = new OmniBufEncoder(16);
-        enc.WriteSintValue((long)int.MaxValue + 1L);
-        byte[] bytes = enc.ToArray();
+        var sintEnc = new OmniBufEncoder(16);
+        long sintOverflow = (long)int.MaxValue + 1L;
+        sintEnc.WriteSintValue(sintOverflow);
+        byte[] sintBytes = sintEnc.ToArray();
+
+        var decSint = new OmniBufDecoder(sintBytes);
+        Assert.Equal(unchecked((int)sintOverflow), decSint.ReadSint32());
 
         Assert.Throws<OmniBufException>(() =>
         {
-            var dec = new OmniBufDecoder(bytes);
-            dec.ReadSint32();
+            var dec = new OmniBufDecoder(sintBytes);
+            dec.ReadSint32Checked();
+        });
+
+        var uintEnc = new OmniBufEncoder(16);
+        ulong uintOverflow = (ulong)uint.MaxValue + 5UL;
+        uintEnc.WriteVarint(uintOverflow);
+        byte[] uintBytes = uintEnc.ToArray();
+
+        var decUint = new OmniBufDecoder(uintBytes);
+        Assert.Equal(unchecked((uint)uintOverflow), decUint.ReadUint32());
+
+        Assert.Throws<OmniBufException>(() =>
+        {
+            var dec = new OmniBufDecoder(uintBytes);
+            dec.ReadUint32Checked();
         });
     }
 

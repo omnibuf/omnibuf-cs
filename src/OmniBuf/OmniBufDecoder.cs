@@ -49,7 +49,13 @@ public ref struct OmniBufDecoder
 
     public ulong ReadUint() => ReadVarint(_data, ref _pos);
 
-    public uint ReadUint32()
+    /// <summary>
+    /// Reads an unsigned varint and truncates to the low 32 bits per Spec section 11.1.
+    /// Use <see cref="ReadUint32Checked"/> to reject values exceeding <see cref="uint.MaxValue"/>.
+    /// </summary>
+    public uint ReadUint32() => (uint)ReadVarint(_data, ref _pos);
+
+    public uint ReadUint32Checked()
     {
         ulong v = ReadVarint(_data, ref _pos);
         if (v > uint.MaxValue)
@@ -62,7 +68,13 @@ public ref struct OmniBufDecoder
 
     public long ReadSint64() => OmniBufConstants.ZigZagDecode64(ReadVarint(_data, ref _pos));
 
-    public int ReadSint32()
+    /// <summary>
+    /// Reads a ZigZag-encoded varint and truncates to 32 bits per Spec section 11.1.
+    /// Use <see cref="ReadSint32Checked"/> to reject values outside <see cref="int"/> range.
+    /// </summary>
+    public int ReadSint32() => (int)OmniBufConstants.ZigZagDecode64(ReadVarint(_data, ref _pos));
+
+    public int ReadSint32Checked()
     {
         long v = OmniBufConstants.ZigZagDecode64(ReadVarint(_data, ref _pos));
         if (v < int.MinValue || v > int.MaxValue)

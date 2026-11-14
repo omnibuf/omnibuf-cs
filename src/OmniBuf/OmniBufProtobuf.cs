@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Concurrent;
 using Google.Protobuf;
 using Google.Protobuf.Reflection;
 
@@ -9,6 +10,8 @@ namespace OmniBuf;
 /// </summary>
 public static class OmniBufProtobuf
 {
+    private static readonly ConcurrentDictionary<MessageDescriptor, bool> ValidatedDescriptors = new();
+
     public static byte[] Marshal(IMessage message, MarshalOptions options = default)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -28,22 +31,29 @@ public static class OmniBufProtobuf
     {
         ArgumentNullException.ThrowIfNull(encoder);
         ArgumentNullException.ThrowIfNull(message);
+        EnsureDescriptorSupported(message.Descriptor);
 
         if (options.SelfDescribing)
         {
-            SchemaMeta? meta = BuildSchemaMeta(message.Descriptor, depth: 0, active: null);
+            SchemaMeta? meta = BuildSchemaMeta(message.Descriptor, depth: 1, active: null, out bool cyclic);
+            if (cyclic)
+            {
+                meta = BuildValueSchemaMeta(message, depth: 1, active: null);
+            }
+
             if (meta is not null)
             {
                 SchemaMeta.WriteField0(encoder, meta, options.Deterministic);
             }
         }
 
-        EncodeMessage(encoder, message, options.Deterministic);
+        EncodeMessage(encoder, message, options.Deterministic, depth: 0);
     }
 
     public static void Unmarshal(ReadOnlySpan<byte> data, IMessage target)
     {
         ArgumentNullException.ThrowIfNull(target);
+        EnsureDescriptorSupported(target.Descriptor);
         DecodeMessage(data, target, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth, merge: false);
     }
 
@@ -55,9 +65,123 @@ public static class OmniBufProtobuf
         return msg;
     }
 
-    private static SchemaMeta? BuildSchemaMeta(MessageDescriptor? md, int depth, HashSet<string>? active)
+    private static void EnsureDescriptorSupported(MessageDescriptor md)
     {
-        if (md is null || depth > OmniBufConstants.MaxNestingDepth)
+        if (ValidatedDescriptors.ContainsKey(md))
+        {
+            return;
+        }
+
+        ValidateDescriptorGraph(md, new HashSet<string>(StringComparer.Ordinal));
+        ValidatedDescriptors[md] = true;
+    }
+
+    private static void ValidateDescriptorGraph(MessageDescriptor md, HashSet<string> visited)
+    {
+        if (!visited.Add(md.FullName))
+        {
+            return;
+        }
+
+        if (md.Extensions.UnorderedExtensions.Count > 0
+            || md.File.Extensions.UnorderedExtensions.Count > 0
+            || md.ToProto().ExtensionRange.Count > 0)
+        {
+            throw new OmniBufException($"omnibuf: Protobuf extensions on {md.FullName} are not supported");
+        }
+
+        foreach (FieldDescriptor fd in md.Fields.InFieldNumberOrder())
+        {
+            if (fd.FieldType == FieldType.Group)
+            {
+                throw new OmniBufException($"omnibuf: Protobuf group field {fd.FullName} is not supported");
+            }
+
+            if (!IsZeroDefaultValue(fd))
+            {
+                throw new OmniBufException($"omnibuf: custom non-zero default value on {fd.FullName} is not supported");
+            }
+
+            if (fd.IsMap)
+            {
+                FieldDescriptor valFd = fd.MessageType.FindFieldByNumber(2);
+                if (valFd.FieldType == FieldType.Group)
+                {
+                    throw new OmniBufException($"omnibuf: Protobuf group map value on {fd.FullName} is not supported");
+                }
+
+                if (valFd.FieldType == FieldType.Message && !TryGetWrapperFieldType(valFd.MessageType, out _))
+                {
+                    ValidateDescriptorGraph(valFd.MessageType, visited);
+                }
+            }
+            else if (fd.FieldType == FieldType.Message && !TryGetWrapperFieldType(fd.MessageType, out _))
+            {
+                ValidateDescriptorGraph(fd.MessageType, visited);
+            }
+        }
+    }
+
+    private static bool IsZeroDefaultValue(FieldDescriptor fd)
+    {
+        FieldDescriptorProto proto = fd.ToProto();
+        if (!proto.HasDefaultValue || string.IsNullOrEmpty(proto.DefaultValue))
+        {
+            return true;
+        }
+
+        string dv = proto.DefaultValue;
+        return fd.FieldType switch
+        {
+            FieldType.Bool => dv == "false",
+            FieldType.String or FieldType.Bytes => dv.Length == 0,
+            FieldType.Enum => fd.EnumType.FindValueByName(dv)?.Number == 0,
+            FieldType.Float or FieldType.Double => double.TryParse(dv, System.Globalization.CultureInfo.InvariantCulture, out double d) && d == 0d && !double.IsNegative(d),
+            _ => long.TryParse(dv, System.Globalization.CultureInfo.InvariantCulture, out long l) && l == 0L,
+        };
+    }
+
+    internal static bool TryGetWrapperFieldType(MessageDescriptor md, out FieldType innerType)
+    {
+        switch (md.FullName)
+        {
+            case "google.protobuf.DoubleValue":
+                innerType = FieldType.Double;
+                return true;
+            case "google.protobuf.FloatValue":
+                innerType = FieldType.Float;
+                return true;
+            case "google.protobuf.Int64Value":
+                innerType = FieldType.Int64;
+                return true;
+            case "google.protobuf.UInt64Value":
+                innerType = FieldType.UInt64;
+                return true;
+            case "google.protobuf.Int32Value":
+                innerType = FieldType.Int32;
+                return true;
+            case "google.protobuf.UInt32Value":
+                innerType = FieldType.UInt32;
+                return true;
+            case "google.protobuf.BoolValue":
+                innerType = FieldType.Bool;
+                return true;
+            case "google.protobuf.StringValue":
+                innerType = FieldType.String;
+                return true;
+            case "google.protobuf.BytesValue":
+                innerType = FieldType.Bytes;
+                return true;
+            default:
+                innerType = default;
+                return false;
+        }
+    }
+
+    private static SchemaMeta? BuildSchemaMeta(MessageDescriptor? md, int depth, HashSet<string>? active, out bool cyclic)
+    {
+        cyclic = false;
+        if (md is null || depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
             return null;
         }
@@ -65,6 +189,7 @@ public static class OmniBufProtobuf
         active ??= new HashSet<string>(StringComparer.Ordinal);
         if (!active.Add(md.FullName))
         {
+            cyclic = true;
             return null;
         }
 
@@ -83,28 +208,24 @@ public static class OmniBufProtobuf
                 meta.Fields[fnum] = fd.Name;
 
                 MessageDescriptor? childMd = null;
-                int childDepth = depth + 1;
                 if (fd.IsMap)
                 {
                     FieldDescriptor valFd = fd.MessageType.FindFieldByNumber(2);
                     if (valFd.FieldType == FieldType.Message)
                     {
                         childMd = valFd.MessageType;
-                        childDepth = depth + 2;
                     }
                 }
                 else if (fd.FieldType == FieldType.Message)
                 {
                     childMd = fd.MessageType;
-                    if (fd.IsRepeated)
-                    {
-                        childDepth = depth + 2;
-                    }
                 }
 
                 if (childMd is not null)
                 {
-                    SchemaMeta? childMeta = BuildSchemaMeta(childMd, childDepth, active);
+                    // Every child entry in SchemaMeta.Children adds WireMap + WireSubMsg (+2 depth).
+                    SchemaMeta? childMeta = BuildSchemaMeta(childMd, depth + 2, active, out bool childCyclic);
+                    cyclic |= childCyclic;
                     if (childMeta is not null)
                     {
                         meta.Children[fnum] = childMeta;
@@ -120,29 +241,167 @@ public static class OmniBufProtobuf
         }
     }
 
-    private static void EncodeMessage(OmniBufEncoder encoder, IMessage message, bool deterministic)
+    private static SchemaMeta? BuildValueSchemaMeta(IMessage? message, int depth, HashSet<object>? active)
     {
+        if (message is null || depth + 1 > OmniBufConstants.MaxNestingDepth)
+        {
+            return null;
+        }
+
+        active ??= new HashSet<object>(ReferenceEqualityComparer.Instance);
+        if (!active.Add(message))
+        {
+            return null;
+        }
+
+        try
+        {
+            MessageDescriptor md = message.Descriptor;
+            IList<FieldDescriptor> fields = md.Fields.InFieldNumberOrder();
+            var meta = new SchemaMeta
+            {
+                TypeName = md.Name,
+                Fields = new Dictionary<uint, string>(fields.Count),
+            };
+
+            foreach (FieldDescriptor fd in fields)
+            {
+                uint fnum = (uint)fd.FieldNumber;
+                meta.Fields[fnum] = fd.Name;
+
+                if (depth + 3 > OmniBufConstants.MaxNestingDepth)
+                {
+                    continue;
+                }
+
+                if (fd.IsMap)
+                {
+                    FieldDescriptor valFd = fd.MessageType.FindFieldByNumber(2);
+                    if (valFd.FieldType == FieldType.Message)
+                    {
+                        var dict = (IDictionary)fd.Accessor.GetValue(message)!;
+                        if (dict.Count == 0)
+                        {
+                            continue;
+                        }
+
+                        if (TryGetWrapperFieldType(valFd.MessageType, out _))
+                        {
+                            SchemaMeta? wrapMeta = BuildSchemaMeta(valFd.MessageType, depth + 2, null, out _);
+                            if (wrapMeta is not null)
+                            {
+                                meta.Children[fnum] = wrapMeta;
+                            }
+                        }
+                        else
+                        {
+                            SchemaMeta? merged = null;
+                            foreach (DictionaryEntry entry in dict)
+                            {
+                                if (entry.Value is IMessage subMsg)
+                                {
+                                    merged = SchemaMeta.Merge(merged, BuildValueSchemaMeta(subMsg, depth + 2, active));
+                                }
+                            }
+
+                            if (merged is not null)
+                            {
+                                meta.Children[fnum] = merged;
+                            }
+                        }
+                    }
+                }
+                else if (fd.IsRepeated && fd.FieldType == FieldType.Message)
+                {
+                    var list = (IList)fd.Accessor.GetValue(message)!;
+                    if (list.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    if (TryGetWrapperFieldType(fd.MessageType, out _))
+                    {
+                        SchemaMeta? wrapMeta = BuildSchemaMeta(fd.MessageType, depth + 2, null, out _);
+                        if (wrapMeta is not null)
+                        {
+                            meta.Children[fnum] = wrapMeta;
+                        }
+                    }
+                    else
+                    {
+                        SchemaMeta? merged = null;
+                        for (int i = 0; i < list.Count; i++)
+                        {
+                            if (list[i] is IMessage elemMsg)
+                            {
+                                merged = SchemaMeta.Merge(merged, BuildValueSchemaMeta(elemMsg, depth + 2, active));
+                            }
+                        }
+
+                        if (merged is not null)
+                        {
+                            meta.Children[fnum] = merged;
+                        }
+                    }
+                }
+                else if (fd.FieldType == FieldType.Message)
+                {
+                    object? val = fd.Accessor.GetValue(message);
+                    if (val is null)
+                    {
+                        continue;
+                    }
+
+                    SchemaMeta? childMeta = TryGetWrapperFieldType(fd.MessageType, out _)
+                        ? BuildSchemaMeta(fd.MessageType, depth + 2, null, out _)
+                        : BuildValueSchemaMeta(val as IMessage, depth + 2, active);
+                    if (childMeta is not null)
+                    {
+                        meta.Children[fnum] = childMeta;
+                    }
+                }
+            }
+
+            return meta;
+        }
+        finally
+        {
+            active.Remove(message);
+        }
+    }
+
+    private static void EncodeMessage(OmniBufEncoder encoder, IMessage message, bool deterministic, int depth)
+    {
+        if (depth > OmniBufConstants.MaxNestingDepth)
+        {
+            throw new OmniBufException($"omnibuf: encode nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+        }
+
         IList<FieldDescriptor> fields = message.Descriptor.Fields.InFieldNumberOrder();
         for (int i = 0; i < fields.Count; i++)
         {
             FieldDescriptor fd = fields[i];
             uint fnum = (uint)fd.FieldNumber;
 
-            if (fd.HasPresence && !fd.Accessor.HasValue(message))
+            if (fd.FieldType == FieldType.Group)
             {
-                continue;
+                throw new OmniBufException($"omnibuf: Protobuf group field {fd.FullName} is not supported");
             }
-
-            object? val = fd.Accessor.GetValue(message);
 
             if (fd.IsMap)
             {
+                if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                {
+                    throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                }
+
+                object? mapObj = fd.Accessor.GetValue(message);
                 FieldDescriptor keyFd = fd.MessageType.FindFieldByNumber(1);
                 FieldDescriptor valFd = fd.MessageType.FindFieldByNumber(2);
                 OmniBufWireType keyWt = ScalarWireType(keyFd.FieldType);
                 OmniBufWireType valWt = ScalarWireType(valFd.FieldType);
 
-                var dict = (IDictionary)val!;
+                var dict = (IDictionary)mapObj!;
                 int count = dict.Count;
                 encoder.BeginMapField(fnum, keyWt, valWt, count);
                 if (count > 0)
@@ -155,7 +414,7 @@ public static class OmniBufProtobuf
                         foreach (object k in keys)
                         {
                             WriteScalarPayload(encoder, keyFd.FieldType, k);
-                            WriteMapValuePayload(encoder, valFd, dict[k], deterministic);
+                            WriteMapValuePayload(encoder, valFd, dict[k], deterministic, depth + 2);
                         }
                     }
                     else
@@ -163,7 +422,7 @@ public static class OmniBufProtobuf
                         foreach (DictionaryEntry entry in dict)
                         {
                             WriteScalarPayload(encoder, keyFd.FieldType, entry.Key);
-                            WriteMapValuePayload(encoder, valFd, entry.Value, deterministic);
+                            WriteMapValuePayload(encoder, valFd, entry.Value, deterministic, depth + 2);
                         }
                     }
                 }
@@ -174,23 +433,46 @@ public static class OmniBufProtobuf
 
             if (fd.IsRepeated)
             {
+                if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                {
+                    throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                }
+
+                object? listObj = fd.Accessor.GetValue(message);
                 OmniBufWireType elemWt = ScalarWireType(fd.FieldType);
-                var list = (IList)val!;
+                var list = (IList)listObj!;
                 int count = list.Count;
                 encoder.BeginArrayField(fnum, elemWt, count);
-                for (int j = 0; j < count; j++)
+                if (elemWt == OmniBufWireType.SubMsg)
                 {
-                    if (elemWt == OmniBufWireType.SubMsg)
+                    bool isWrapper = TryGetWrapperFieldType(fd.MessageType, out FieldType wrapperFt);
+                    for (int j = 0; j < count; j++)
                     {
-                        encoder.BeginContainer();
-                        if (list[j] is IMessage subMsg)
+                        if (depth + 2 > OmniBufConstants.MaxNestingDepth)
                         {
-                            EncodeMessage(encoder, subMsg, deterministic);
+                            throw new OmniBufException($"omnibuf: encode nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                        }
+
+                        encoder.BeginContainer();
+                        object? elem = list[j];
+                        if (isWrapper)
+                        {
+                            if (elem is not null)
+                            {
+                                WriteWrapperScalarField(encoder, wrapperFt, elem);
+                            }
+                        }
+                        else if (elem is IMessage subMsg)
+                        {
+                            EncodeMessage(encoder, subMsg, deterministic, depth + 2);
                         }
 
                         encoder.EndContainer();
                     }
-                    else
+                }
+                else
+                {
+                    for (int j = 0; j < count; j++)
                     {
                         WriteScalarPayload(encoder, fd.FieldType, list[j]);
                     }
@@ -202,17 +484,44 @@ public static class OmniBufProtobuf
 
             if (fd.FieldType == FieldType.Message)
             {
-                if (val is not IMessage subMsg)
+                object? msgVal = fd.Accessor.GetValue(message);
+                if (msgVal is null)
                 {
                     continue;
                 }
 
+                if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                {
+                    throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                }
+
                 encoder.BeginSubMsgField(fnum);
-                EncodeMessage(encoder, subMsg, deterministic);
+                if (TryGetWrapperFieldType(fd.MessageType, out FieldType wrapperFt))
+                {
+                    WriteWrapperScalarField(encoder, wrapperFt, msgVal);
+                }
+                else
+                {
+                    EncodeMessage(encoder, (IMessage)msgVal, deterministic, depth + 1);
+                }
+
                 encoder.EndSubMsg();
                 continue;
             }
 
+            if (fd.ContainingOneof is { IsSynthetic: false } realOneof)
+            {
+                if (realOneof.Accessor.GetCaseFieldDescriptor(message) != fd)
+                {
+                    continue;
+                }
+            }
+            else if (fd.HasPresence && !fd.Accessor.HasValue(message))
+            {
+                continue;
+            }
+
+            object? val = fd.Accessor.GetValue(message);
             if (fd.FieldType == FieldType.Bool)
             {
                 encoder.WriteBoolField(fnum, val is true);
@@ -225,14 +534,26 @@ public static class OmniBufProtobuf
         }
     }
 
-    private static void WriteMapValuePayload(OmniBufEncoder encoder, FieldDescriptor valFd, object? value, bool deterministic)
+    private static void WriteMapValuePayload(OmniBufEncoder encoder, FieldDescriptor valFd, object? value, bool deterministic, int childDepth)
     {
         if (valFd.FieldType == FieldType.Message)
         {
-            encoder.BeginContainer();
-            if (value is IMessage subMsg)
+            if (childDepth > OmniBufConstants.MaxNestingDepth)
             {
-                EncodeMessage(encoder, subMsg, deterministic);
+                throw new OmniBufException($"omnibuf: encode nesting depth {childDepth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            }
+
+            encoder.BeginContainer();
+            if (TryGetWrapperFieldType(valFd.MessageType, out FieldType wrapperFt))
+            {
+                if (value is not null)
+                {
+                    WriteWrapperScalarField(encoder, wrapperFt, value);
+                }
+            }
+            else if (value is IMessage subMsg)
+            {
+                EncodeMessage(encoder, subMsg, deterministic, childDepth);
             }
 
             encoder.EndContainer();
@@ -242,6 +563,54 @@ public static class OmniBufProtobuf
             WriteScalarPayload(encoder, valFd.FieldType, value);
         }
     }
+
+    private static void WriteWrapperScalarField(OmniBufEncoder encoder, FieldType innerFt, object unwrappedValue)
+    {
+        if (innerFt == FieldType.Bool)
+        {
+            encoder.WriteBoolField(1, unwrappedValue is true);
+            return;
+        }
+
+        encoder.WriteTag(1, ScalarWireType(innerFt));
+        WriteScalarPayload(encoder, innerFt, unwrappedValue);
+    }
+
+    private static object DecodeWrapperSubMsg(
+        ReadOnlySpan<byte> subBytes,
+        FieldType innerFt,
+        object initialValue,
+        int depth,
+        int maxDepth)
+    {
+        return innerFt switch
+        {
+            FieldType.Double => OmniBufWrappers.DecodeDouble(subBytes, initialValue is double d ? d : 0d, depth, maxDepth),
+            FieldType.Float => OmniBufWrappers.DecodeFloat(subBytes, initialValue is float f ? f : 0f, depth, maxDepth),
+            FieldType.Int64 => OmniBufWrappers.DecodeInt64(subBytes, initialValue is long i64 ? i64 : 0L, depth, maxDepth),
+            FieldType.UInt64 => OmniBufWrappers.DecodeUInt64(subBytes, initialValue is ulong u64 ? u64 : 0UL, depth, maxDepth),
+            FieldType.Int32 => OmniBufWrappers.DecodeInt32(subBytes, initialValue is int i32 ? i32 : 0, depth, maxDepth),
+            FieldType.UInt32 => OmniBufWrappers.DecodeUInt32(subBytes, initialValue is uint u32 ? u32 : 0u, depth, maxDepth),
+            FieldType.Bool => OmniBufWrappers.DecodeBool(subBytes, initialValue is true, depth, maxDepth),
+            FieldType.String => OmniBufWrappers.DecodeString(subBytes, initialValue as string ?? string.Empty, depth, maxDepth),
+            FieldType.Bytes => OmniBufWrappers.DecodeBytes(subBytes, initialValue as ByteString ?? ByteString.Empty, depth, maxDepth),
+            _ => throw new OmniBufException($"omnibuf: unsupported wrapper scalar type {innerFt}"),
+        };
+    }
+
+    private static object DefaultWrapperScalar(FieldType innerFt) => innerFt switch
+    {
+        FieldType.Double => 0d,
+        FieldType.Float => 0f,
+        FieldType.Int64 => 0L,
+        FieldType.UInt64 => 0UL,
+        FieldType.Int32 => 0,
+        FieldType.UInt32 => 0u,
+        FieldType.Bool => false,
+        FieldType.String => string.Empty,
+        FieldType.Bytes => ByteString.Empty,
+        _ => throw new OmniBufException($"omnibuf: unsupported wrapper scalar type {innerFt}"),
+    };
 
     private static void DecodeMessage(
         ReadOnlySpan<byte> data,
@@ -256,6 +625,17 @@ public static class OmniBufProtobuf
         }
 
         MessageDescriptor md = target.Descriptor;
+        if (!merge)
+        {
+            foreach (OneofDescriptor oneof in md.Oneofs)
+            {
+                if (!oneof.IsSynthetic)
+                {
+                    oneof.Accessor.Clear(target);
+                }
+            }
+        }
+
         var seen = new HashSet<int>();
         int pos = 0;
 
@@ -274,6 +654,11 @@ public static class OmniBufProtobuf
             {
                 OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
                 continue;
+            }
+
+            if (fd.FieldType == FieldType.Group)
+            {
+                throw new OmniBufException($"omnibuf: Protobuf group field {fd.FullName} is not supported");
             }
 
             if (fd.IsMap)
@@ -309,6 +694,8 @@ public static class OmniBufProtobuf
                     dict.Clear();
                 }
 
+                FieldType resolvedMapWrapperFt = default;
+                bool isValWrapper = valFd.FieldType == FieldType.Message && TryGetWrapperFieldType(valFd.MessageType, out resolvedMapWrapperFt);
                 for (int i = 0; i < count; i++)
                 {
                     object key = ReadScalarPayload(body, ref p, keyFd);
@@ -316,9 +703,16 @@ public static class OmniBufProtobuf
                     if (valFd.FieldType == FieldType.Message)
                     {
                         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);
-                        IMessage childMsg = valFd.MessageType.Parser.ParseFrom(ByteString.Empty);
-                        DecodeMessage(sub, childMsg, depth + 2, maxDepth, merge: false);
-                        val = childMsg;
+                        if (isValWrapper)
+                        {
+                            val = DecodeWrapperSubMsg(sub, resolvedMapWrapperFt, DefaultWrapperScalar(resolvedMapWrapperFt), depth + 2, maxDepth);
+                        }
+                        else
+                        {
+                            IMessage childMsg = valFd.MessageType.Parser.ParseFrom(ByteString.Empty);
+                            DecodeMessage(sub, childMsg, depth + 2, maxDepth, merge: false);
+                            val = childMsg;
+                        }
                     }
                     else
                     {
@@ -364,14 +758,23 @@ public static class OmniBufProtobuf
                     list.Clear();
                 }
 
+                FieldType resolvedElemWrapperFt = default;
+                bool isElemWrapper = elemWt == OmniBufWireType.SubMsg && TryGetWrapperFieldType(fd.MessageType, out resolvedElemWrapperFt);
                 for (int i = 0; i < count; i++)
                 {
                     if (elemWt == OmniBufWireType.SubMsg)
                     {
                         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);
-                        IMessage elemMsg = fd.MessageType.Parser.ParseFrom(ByteString.Empty);
-                        DecodeMessage(sub, elemMsg, depth + 2, maxDepth, merge: false);
-                        list.Add(elemMsg);
+                        if (isElemWrapper)
+                        {
+                            list.Add(DecodeWrapperSubMsg(sub, resolvedElemWrapperFt, DefaultWrapperScalar(resolvedElemWrapperFt), depth + 2, maxDepth));
+                        }
+                        else
+                        {
+                            IMessage elemMsg = fd.MessageType.Parser.ParseFrom(ByteString.Empty);
+                            DecodeMessage(sub, elemMsg, depth + 2, maxDepth, merge: false);
+                            list.Add(elemMsg);
+                        }
                     }
                     else
                     {
@@ -411,6 +814,15 @@ public static class OmniBufProtobuf
             if (fd.FieldType == FieldType.Message)
             {
                 ReadOnlySpan<byte> subBytes = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
+                if (TryGetWrapperFieldType(fd.MessageType, out FieldType wrapperFt))
+                {
+                    object? prevVal = fieldAlreadySeen ? fd.Accessor.GetValue(target) : null;
+                    object initVal = prevVal ?? DefaultWrapperScalar(wrapperFt);
+                    object decodedWrapperVal = DecodeWrapperSubMsg(subBytes, wrapperFt, initVal, depth + 1, maxDepth);
+                    fd.Accessor.SetValue(target, decodedWrapperVal);
+                    continue;
+                }
+
                 var subMsg = fd.Accessor.GetValue(target) as IMessage;
                 if (subMsg is null || !fieldAlreadySeen)
                 {
@@ -434,6 +846,11 @@ public static class OmniBufProtobuf
         {
             foreach (FieldDescriptor fd in md.Fields.InFieldNumberOrder())
             {
+                if (fd.ContainingOneof is { IsSynthetic: false })
+                {
+                    continue;
+                }
+
                 if (!seen.Contains(fd.FieldNumber))
                 {
                     fd.Accessor.Clear(target);
@@ -587,9 +1004,9 @@ public static class OmniBufProtobuf
         }
     }
 
-    private static void SortMapKeys(object[] keys, FieldType keyFt)
+    private static void SortMapKeys(object[] keys, FieldType keyType)
     {
-        Array.Sort(keys, (a, b) => keyFt switch
+        Array.Sort(keys, (a, b) => keyType switch
         {
             FieldType.String => StringComparer.Ordinal.Compare((string)a, (string)b),
             FieldType.Bool => ((bool)a).CompareTo((bool)b),

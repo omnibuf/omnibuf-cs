@@ -6,7 +6,7 @@ using System.Reflection;
 namespace OmniBuf;
 
 /// <summary>
-/// High-performance attribute-driven serializer for C# classes and records annotated with <see cref="OmniBufFieldAttribute"/>.
+/// High-performance attribute-driven serializer for C# classes, structs, and records annotated with <see cref="OmniBufFieldAttribute"/>.
 /// Compiles strongly typed property accessors and constructors once per type.
 /// </summary>
 public static class OmniBufSerializer
@@ -38,14 +38,19 @@ public static class OmniBufSerializer
         MessageCodec codec = GetOrCreateCodec(typeof(T));
         if (options.SelfDescribing)
         {
-            SchemaMeta? meta = codec.BuildSchemaMeta(depth: 0, active: null);
+            SchemaMeta? meta = codec.BuildSchemaMeta(depth: 1, active: null, out bool cyclic);
+            if (cyclic)
+            {
+                meta = codec.BuildValueSchemaMeta(value, depth: 1, active: null);
+            }
+
             if (meta is not null)
             {
                 SchemaMeta.WriteField0(encoder, meta, options.Deterministic);
             }
         }
 
-        codec.EncodeObject(encoder, value, options.Deterministic);
+        codec.EncodeObject(encoder, value, options.Deterministic, depth: 0);
     }
 
     public static T Unmarshal<T>(ReadOnlySpan<byte> data)
@@ -83,8 +88,16 @@ public static class OmniBufSerializer
                 Codecs[type] = existing;
             }
 
-            existing.Initialize(GetOrCreateStub);
-            return existing;
+            try
+            {
+                existing.Initialize(GetOrCreateStub);
+                return existing;
+            }
+            catch
+            {
+                Codecs.TryRemove(type, out _);
+                throw;
+            }
         }
     }
 
@@ -98,19 +111,71 @@ public static class OmniBufSerializer
 
         if (!stub.IsInitialized && !stub.IsInitializing)
         {
-            stub.Initialize(GetOrCreateStub);
+            try
+            {
+                stub.Initialize(GetOrCreateStub);
+            }
+            catch
+            {
+                Codecs.TryRemove(type, out _);
+                throw;
+            }
         }
 
         return stub;
     }
 
+    private static bool IsDisallowedMessageType(Type t)
+    {
+        if (t.IsPrimitive
+            || t.IsEnum
+            || t.IsInterface
+            || t.IsArray
+            || t.IsAbstract
+            || t.IsPointer
+            || t.IsByRef
+            || t == typeof(string)
+            || t == typeof(object)
+            || t == typeof(decimal)
+            || t == typeof(Guid)
+            || t == typeof(DateTime)
+            || t == typeof(DateTimeOffset)
+            || t == typeof(TimeSpan)
+            || t == typeof(DateOnly)
+            || t == typeof(TimeOnly)
+            || t == typeof(Half)
+            || t == typeof(Int128)
+            || t == typeof(UInt128)
+            || t == typeof(Uri)
+            || typeof(IEnumerable).IsAssignableFrom(t)
+            || typeof(Delegate).IsAssignableFrom(t))
+        {
+            return true;
+        }
+
+        if (Nullable.GetUnderlyingType(t) is not null)
+        {
+            return true;
+        }
+
+        string? ns = t.Namespace;
+        if (ns is not null && (ns == "System" || ns.StartsWith("System.", StringComparison.Ordinal)))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
     private enum FieldCategory
     {
         Scalar,
+        NullableScalar,
         SubMsg,
         Array,
         List,
         Map,
+        NestedContainer,
     }
 
     private enum ScalarKind
@@ -129,6 +194,32 @@ public static class OmniBufSerializer
         Float64,
         String,
         Bytes,
+    }
+
+    private enum ValueNodeKind
+    {
+        Scalar,
+        SubMsg,
+        List,
+        Array,
+        Map,
+    }
+
+    private sealed class ValueNode
+    {
+        public required ValueNodeKind Kind { get; init; }
+        public required OmniBufWireType WireType { get; init; }
+        public required Type ClrType { get; init; }
+        public ScalarKind Scalar { get; init; }
+        public Type? EnumType { get; init; }
+        public MessageCodec? SubCodec { get; init; }
+        public ValueNode? ElemNode { get; init; }
+        public Func<IList>? ListFactory { get; init; }
+        public ScalarKind MapKeyScalar { get; init; }
+        public OmniBufWireType MapKeyWireType { get; init; }
+        public Type? MapKeyEnumType { get; init; }
+        public ValueNode? MapValNode { get; init; }
+        public Func<IDictionary>? MapFactory { get; init; }
     }
 
     private delegate void FastInPlaceDecodeDelegate(
@@ -154,19 +245,25 @@ public static class OmniBufSerializer
         public required Func<object, object?> Getter { get; init; }
         public Action<object, object?>? Setter { get; init; }
         public ScalarKind Scalar { get; init; }
+        public Type? EnumType { get; init; }
+        public bool IsNullableValueType { get; init; }
         public OmniBufWireType ElemWireType { get; init; }
         public ScalarKind ElemScalar { get; init; }
+        public Type? ElemEnumType { get; init; }
         public Type? ElemType { get; init; }
         public MessageCodec? SubCodec { get; init; }
         public OmniBufWireType MapKeyWireType { get; init; }
         public ScalarKind MapKeyScalar { get; init; }
+        public Type? MapKeyEnumType { get; init; }
         public Type? MapKeyType { get; init; }
         public OmniBufWireType MapValWireType { get; init; }
         public ScalarKind MapValScalar { get; init; }
+        public Type? MapValEnumType { get; init; }
         public Type? MapValType { get; init; }
         public Func<IList>? ListFactory { get; init; }
         public Func<IDictionary>? MapFactory { get; init; }
-        public Action<OmniBufEncoder, object, bool>? FastEncoder { get; set; }
+        public ValueNode? ContainerNode { get; init; }
+        public Action<OmniBufEncoder, object, bool, int>? FastEncoder { get; set; }
         public FastInPlaceDecodeDelegate? FastDecoder { get; set; }
         public Action<object>? FastResetter { get; set; }
     }
@@ -197,6 +294,11 @@ public static class OmniBufSerializer
             if (IsInitialized)
             {
                 return;
+            }
+
+            if (IsDisallowedMessageType(_type))
+            {
+                throw new OmniBufException($"omnibuf: type {_type.FullName} cannot be serialized as an OmniBuf message");
             }
 
             IsInitializing = true;
@@ -239,6 +341,12 @@ public static class OmniBufSerializer
                     plans.Add(plan);
                 }
 
+                if (plans.Count == 0 && msgAttr is null)
+                {
+                    throw new OmniBufException(
+                        $"omnibuf: type {_type.FullName} has no [OmniBufField] properties (apply [OmniBufMessage] for an intentional empty message)");
+                }
+
                 plans.Sort((a, b) => a.FieldNum.CompareTo(b.FieldNum));
                 for (int i = 0; i < plans.Count; i++)
                 {
@@ -256,18 +364,24 @@ public static class OmniBufSerializer
                         Getter = p.Getter,
                         Setter = p.Setter,
                         Scalar = p.Scalar,
+                        EnumType = p.EnumType,
+                        IsNullableValueType = p.IsNullableValueType,
                         ElemWireType = p.ElemWireType,
                         ElemScalar = p.ElemScalar,
+                        ElemEnumType = p.ElemEnumType,
                         ElemType = p.ElemType,
                         SubCodec = p.SubCodec,
                         MapKeyWireType = p.MapKeyWireType,
                         MapKeyScalar = p.MapKeyScalar,
+                        MapKeyEnumType = p.MapKeyEnumType,
                         MapKeyType = p.MapKeyType,
                         MapValWireType = p.MapValWireType,
                         MapValScalar = p.MapValScalar,
+                        MapValEnumType = p.MapValEnumType,
                         MapValType = p.MapValType,
                         ListFactory = p.ListFactory,
                         MapFactory = p.MapFactory,
+                        ContainerNode = p.ContainerNode,
                     };
                 }
 
@@ -311,7 +425,7 @@ public static class OmniBufSerializer
                     for (int i = 0; i < cParams.Length; i++)
                     {
                         string pName = cParams[i].Name ?? string.Empty;
-                        int idx = Array.FindIndex(_fields, f => string.Equals(f.PropertyType.Name, cParams[i].ParameterType.Name, StringComparison.Ordinal)
+                        int idx = Array.FindIndex(_fields, f => f.PropertyType == cParams[i].ParameterType
                             && string.Equals(FindPropName(_type, f.FieldNum, ctorParamAttrs), pName, StringComparison.OrdinalIgnoreCase));
                         _ctorParamFieldOrdinals[i] = idx;
                     }
@@ -406,9 +520,10 @@ public static class OmniBufSerializer
             return best;
         }
 
-        public SchemaMeta? BuildSchemaMeta(int depth, HashSet<Type>? active)
+        public SchemaMeta? BuildSchemaMeta(int depth, HashSet<Type>? active, out bool cyclic)
         {
-            if (depth > OmniBufConstants.MaxNestingDepth)
+            cyclic = false;
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 return null;
             }
@@ -416,6 +531,7 @@ public static class OmniBufSerializer
             active ??= new HashSet<Type>();
             if (!active.Add(_type))
             {
+                cyclic = true;
                 return null;
             }
 
@@ -430,10 +546,11 @@ public static class OmniBufSerializer
                 foreach (FieldPlan f in _fields)
                 {
                     meta.Fields[f.FieldNum] = f.SchemaName;
-                    if (f.SubCodec is not null)
+                    MessageCodec? childCodec = f.SubCodec ?? FindLeafSubCodec(f.ContainerNode);
+                    if (childCodec is not null)
                     {
-                        int childDepth = f.Category == FieldCategory.SubMsg ? depth + 1 : depth + 2;
-                        SchemaMeta? childMeta = f.SubCodec.BuildSchemaMeta(childDepth, active);
+                        SchemaMeta? childMeta = childCodec.BuildSchemaMeta(depth + 2, active, out bool childCyclic);
+                        cyclic |= childCyclic;
                         if (childMeta is not null)
                         {
                             meta.Children[f.FieldNum] = childMeta;
@@ -449,11 +566,147 @@ public static class OmniBufSerializer
             }
         }
 
-        public void EncodeObject(OmniBufEncoder encoder, object instance, bool deterministic)
+        public SchemaMeta? BuildValueSchemaMeta(object? instance, int depth, HashSet<object>? active)
         {
+            if (instance is null || depth + 1 > OmniBufConstants.MaxNestingDepth)
+            {
+                return null;
+            }
+
+            bool trackedRef = !_type.IsValueType;
+            if (trackedRef)
+            {
+                active ??= new HashSet<object>(ReferenceEqualityComparer.Instance);
+                if (!active.Add(instance))
+                {
+                    return null;
+                }
+            }
+
+            try
+            {
+                var meta = new SchemaMeta
+                {
+                    TypeName = _typeName,
+                    Fields = new Dictionary<uint, string>(_fields.Length),
+                };
+
+                foreach (FieldPlan f in _fields)
+                {
+                    meta.Fields[f.FieldNum] = f.SchemaName;
+                    if (depth + 3 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        continue;
+                    }
+
+                    MessageCodec? childCodec = f.SubCodec ?? FindLeafSubCodec(f.ContainerNode);
+                    if (childCodec is null)
+                    {
+                        continue;
+                    }
+
+                    object? fieldVal = f.Getter(instance);
+                    if (fieldVal is null)
+                    {
+                        continue;
+                    }
+
+                    SchemaMeta? childMeta = f.Category switch
+                    {
+                        FieldCategory.SubMsg => childCodec.BuildValueSchemaMeta(fieldVal, depth + 2, active),
+                        FieldCategory.Array or FieldCategory.List => CollectListSchemaMeta((IEnumerable)fieldVal, childCodec, depth + 2, active),
+                        FieldCategory.Map => CollectDictSchemaMeta((IDictionary)fieldVal, childCodec, depth + 2, active),
+                        FieldCategory.NestedContainer => CollectNestedContainerSchemaMeta(fieldVal, f.ContainerNode!, childCodec, depth + 2, active),
+                        _ => null,
+                    };
+
+                    if (childMeta is not null)
+                    {
+                        meta.Children[f.FieldNum] = childMeta;
+                    }
+                }
+
+                return meta;
+            }
+            finally
+            {
+                if (trackedRef && active is not null)
+                {
+                    active.Remove(instance);
+                }
+            }
+        }
+
+        private static SchemaMeta? CollectListSchemaMeta(IEnumerable list, MessageCodec leafCodec, int childDepth, HashSet<object>? active)
+        {
+            SchemaMeta? merged = null;
+            foreach (object? item in list)
+            {
+                if (item is not null)
+                {
+                    merged = SchemaMeta.Merge(merged, leafCodec.BuildValueSchemaMeta(item, childDepth, active));
+                }
+            }
+
+            return merged;
+        }
+
+        private static SchemaMeta? CollectDictSchemaMeta(IDictionary dict, MessageCodec leafCodec, int childDepth, HashSet<object>? active)
+        {
+            SchemaMeta? merged = null;
+            foreach (DictionaryEntry entry in dict)
+            {
+                if (entry.Value is not null)
+                {
+                    merged = SchemaMeta.Merge(merged, leafCodec.BuildValueSchemaMeta(entry.Value, childDepth, active));
+                }
+            }
+
+            return merged;
+        }
+
+        private static SchemaMeta? CollectNestedContainerSchemaMeta(object val, ValueNode node, MessageCodec leafCodec, int childDepth, HashSet<object>? active)
+        {
+            if (node.Kind == ValueNodeKind.SubMsg)
+            {
+                return leafCodec.BuildValueSchemaMeta(val, childDepth, active);
+            }
+
+            SchemaMeta? merged = null;
+            if (node.Kind is ValueNodeKind.Array or ValueNodeKind.List && val is IEnumerable enumerable)
+            {
+                foreach (object? item in enumerable)
+                {
+                    if (item is not null)
+                    {
+                        merged = SchemaMeta.Merge(merged, CollectNestedContainerSchemaMeta(item, node.ElemNode!, leafCodec, childDepth, active));
+                    }
+                }
+            }
+            else if (node.Kind == ValueNodeKind.Map && val is IDictionary dict)
+            {
+                foreach (DictionaryEntry entry in dict)
+                {
+                    if (entry.Value is not null)
+                    {
+                        merged = SchemaMeta.Merge(merged, CollectNestedContainerSchemaMeta(entry.Value, node.MapValNode!, leafCodec, childDepth, active));
+                    }
+                }
+            }
+
+            return merged;
+        }
+
+        public void EncodeObject(OmniBufEncoder encoder, object instance, bool deterministic, int depth)
+        {
+            if (depth > OmniBufConstants.MaxNestingDepth)
+            {
+                throw new OmniBufException($"omnibuf: encode nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            }
+
             for (int i = 0; i < _fields.Length; i++)
             {
-                _fields[i].FastEncoder!(encoder, instance, deterministic);
+                _fields[i].FastEncoder!(encoder, instance, deterministic, depth);
             }
         }
 
@@ -471,10 +724,17 @@ public static class OmniBufSerializer
 
         public object DecodeMerge(ReadOnlySpan<byte> data, object existing, int depth, int maxDepth)
         {
-            if (_defaultCtor is not null)
+            if (_defaultCtor is not null && !_type.IsValueType)
             {
                 DecodeInto(data, existing, depth, maxDepth, merge: true);
                 return existing;
+            }
+
+            if (_defaultCtor is not null && _type.IsValueType)
+            {
+                object copy = existing;
+                DecodeInto(data, copy, depth, maxDepth, merge: true);
+                return copy;
             }
 
             return DecodeViaValues(data, existing, depth, maxDepth);
@@ -649,6 +909,21 @@ public static class OmniBufSerializer
         }
     }
 
+    private static MessageCodec? FindLeafSubCodec(ValueNode? node)
+    {
+        while (node is not null)
+        {
+            if (node.Kind == ValueNodeKind.SubMsg)
+            {
+                return node.SubCodec;
+            }
+
+            node = node.ElemNode ?? node.MapValNode;
+        }
+
+        return null;
+    }
+
     private static FieldPlan BuildFieldPlan(
         int ordinal,
         PropertyInfo prop,
@@ -660,7 +935,51 @@ public static class OmniBufSerializer
         Func<object, object?> getter = CompileGetter(prop);
         Action<object, object?>? setter = CompileSetter(prop);
 
-        if (TryClassifyScalar(propType, attr.HasExplicitWire ? attr.Wire : null, out ScalarKind scalar, out OmniBufWireType scalarWt))
+        if (Nullable.GetUnderlyingType(propType) is { } nullableInner)
+        {
+            if (TryClassifyScalar(nullableInner, attr.HasExplicitWire ? attr.Wire : null, out ScalarKind nScalar, out OmniBufWireType nWt, out Type? nEnumType))
+            {
+                return new FieldPlan
+                {
+                    Ordinal = ordinal,
+                    FieldNum = attr.FieldNumber,
+                    SchemaName = schemaName,
+                    Property = prop,
+                    PropertyType = propType,
+                    Category = FieldCategory.NullableScalar,
+                    WireType = nWt,
+                    OmitEmpty = false,
+                    Getter = getter,
+                    Setter = setter,
+                    Scalar = nScalar,
+                    EnumType = nEnumType,
+                    IsNullableValueType = true,
+                };
+            }
+
+            if (attr.HasExplicitWire && attr.Wire != OmniBufWireType.SubMsg)
+            {
+                throw new OmniBufException($"omnibuf: invalid Wire override {attr.Wire} on SubMsg property {prop.DeclaringType?.Name}.{prop.Name}");
+            }
+
+            return new FieldPlan
+            {
+                Ordinal = ordinal,
+                FieldNum = attr.FieldNumber,
+                SchemaName = schemaName,
+                Property = prop,
+                PropertyType = propType,
+                Category = FieldCategory.SubMsg,
+                WireType = OmniBufWireType.SubMsg,
+                OmitEmpty = attr.OmitEmpty,
+                Getter = getter,
+                Setter = setter,
+                IsNullableValueType = true,
+                SubCodec = resolveSubCodec(nullableInner),
+            };
+        }
+
+        if (TryClassifyScalar(propType, attr.HasExplicitWire ? attr.Wire : null, out ScalarKind scalar, out OmniBufWireType scalarWt, out Type? enumType))
         {
             return new FieldPlan
             {
@@ -675,14 +994,20 @@ public static class OmniBufSerializer
                 Getter = getter,
                 Setter = setter,
                 Scalar = scalar,
+                EnumType = enumType,
             };
         }
 
         if (propType.IsArray && propType != typeof(byte[]))
         {
+            if (propType.GetArrayRank() != 1)
+            {
+                throw new OmniBufException($"omnibuf: multi-dimensional array {prop.DeclaringType?.Name}.{prop.Name} is not supported");
+            }
+
             Type elemType = propType.GetElementType()!;
             OmniBufWireType? explicitElemWt = attr.HasExplicitValueWire ? attr.ValueWire : (attr.HasExplicitWire && attr.Wire != OmniBufWireType.Array ? attr.Wire : null);
-            if (TryClassifyScalar(elemType, explicitElemWt, out ScalarKind elemScalar, out OmniBufWireType elemWt))
+            if (TryClassifyScalar(elemType, explicitElemWt, out ScalarKind elemScalar, out OmniBufWireType elemWt, out Type? elemEnumType))
             {
                 return new FieldPlan
                 {
@@ -698,7 +1023,33 @@ public static class OmniBufSerializer
                     Setter = setter,
                     ElemWireType = elemWt,
                     ElemScalar = elemScalar,
+                    ElemEnumType = elemEnumType,
                     ElemType = elemType,
+                };
+            }
+
+            if (explicitElemWt is not null && explicitElemWt != OmniBufWireType.SubMsg && explicitElemWt != OmniBufWireType.Array && explicitElemWt != OmniBufWireType.Map)
+            {
+                throw new OmniBufException($"omnibuf: invalid element Wire override {explicitElemWt} on {prop.DeclaringType?.Name}.{prop.Name}");
+            }
+
+            if (IsContainerClrType(elemType))
+            {
+                ValueNode containerNode = BuildValueNode(propType, null, explicitElemWt, resolveSubCodec);
+                return new FieldPlan
+                {
+                    Ordinal = ordinal,
+                    FieldNum = attr.FieldNumber,
+                    SchemaName = schemaName,
+                    Property = prop,
+                    PropertyType = propType,
+                    Category = FieldCategory.NestedContainer,
+                    WireType = OmniBufWireType.Array,
+                    OmitEmpty = attr.OmitEmpty,
+                    Getter = getter,
+                    Setter = setter,
+                    ElemType = elemType,
+                    ContainerNode = containerNode,
                 };
             }
 
@@ -731,7 +1082,7 @@ public static class OmniBufSerializer
                 Func<IList> listFactory = Expression.Lambda<Func<IList>>(Expression.Convert(Expression.New(concreteListType), typeof(IList))).Compile();
                 OmniBufWireType? explicitElemWt = attr.HasExplicitValueWire ? attr.ValueWire : (attr.HasExplicitWire && attr.Wire != OmniBufWireType.Array ? attr.Wire : null);
 
-                if (TryClassifyScalar(elemType, explicitElemWt, out ScalarKind elemScalar, out OmniBufWireType elemWt))
+                if (TryClassifyScalar(elemType, explicitElemWt, out ScalarKind elemScalar, out OmniBufWireType elemWt, out Type? elemEnumType))
                 {
                     return new FieldPlan
                     {
@@ -747,8 +1098,35 @@ public static class OmniBufSerializer
                         Setter = setter,
                         ElemWireType = elemWt,
                         ElemScalar = elemScalar,
+                        ElemEnumType = elemEnumType,
                         ElemType = elemType,
                         ListFactory = listFactory,
+                    };
+                }
+
+                if (explicitElemWt is not null && explicitElemWt != OmniBufWireType.SubMsg && explicitElemWt != OmniBufWireType.Array && explicitElemWt != OmniBufWireType.Map)
+                {
+                    throw new OmniBufException($"omnibuf: invalid element Wire override {explicitElemWt} on {prop.DeclaringType?.Name}.{prop.Name}");
+                }
+
+                if (IsContainerClrType(elemType))
+                {
+                    ValueNode containerNode = BuildValueNode(propType, null, explicitElemWt, resolveSubCodec);
+                    return new FieldPlan
+                    {
+                        Ordinal = ordinal,
+                        FieldNum = attr.FieldNumber,
+                        SchemaName = schemaName,
+                        Property = prop,
+                        PropertyType = propType,
+                        Category = FieldCategory.NestedContainer,
+                        WireType = OmniBufWireType.Array,
+                        OmitEmpty = attr.OmitEmpty,
+                        Getter = getter,
+                        Setter = setter,
+                        ElemType = elemType,
+                        ListFactory = listFactory,
+                        ContainerNode = containerNode,
                     };
                 }
 
@@ -774,19 +1152,25 @@ public static class OmniBufSerializer
 
             if (genDef == typeof(Dictionary<,>) || genDef == typeof(IDictionary<,>) || genDef == typeof(IReadOnlyDictionary<,>))
             {
+                if (attr.HasExplicitWire && attr.Wire != OmniBufWireType.Map)
+                {
+                    throw new OmniBufException($"omnibuf: invalid Wire override {attr.Wire} on map property {prop.DeclaringType?.Name}.{prop.Name}");
+                }
+
                 Type[] args = propType.GetGenericArguments();
                 Type keyType = args[0];
                 Type valType = args[1];
                 Type concreteMapType = typeof(Dictionary<,>).MakeGenericType(keyType, valType);
                 Func<IDictionary> mapFactory = Expression.Lambda<Func<IDictionary>>(Expression.Convert(Expression.New(concreteMapType), typeof(IDictionary))).Compile();
 
-                if (!TryClassifyScalar(keyType, attr.HasExplicitKeyWire ? attr.KeyWire : null, out ScalarKind keyScalar, out OmniBufWireType keyWt)
+                if (!TryClassifyScalar(keyType, attr.HasExplicitKeyWire ? attr.KeyWire : null, out ScalarKind keyScalar, out OmniBufWireType keyWt, out Type? keyEnumType)
                     || !OmniBufConstants.IsValidMapKeyType(keyWt))
                 {
                     throw new OmniBufException($"omnibuf: unsupported map key type {keyType.Name} on {prop.Name}");
                 }
 
-                if (TryClassifyScalar(valType, attr.HasExplicitValueWire ? attr.ValueWire : null, out ScalarKind valScalar, out OmniBufWireType valWt))
+                OmniBufWireType? explicitValWt = attr.HasExplicitValueWire ? attr.ValueWire : null;
+                if (TryClassifyScalar(valType, explicitValWt, out ScalarKind valScalar, out OmniBufWireType valWt, out Type? valEnumType))
                 {
                     return new FieldPlan
                     {
@@ -802,11 +1186,38 @@ public static class OmniBufSerializer
                         Setter = setter,
                         MapKeyWireType = keyWt,
                         MapKeyScalar = keyScalar,
+                        MapKeyEnumType = keyEnumType,
                         MapKeyType = keyType,
                         MapValWireType = valWt,
                         MapValScalar = valScalar,
+                        MapValEnumType = valEnumType,
                         MapValType = valType,
                         MapFactory = mapFactory,
+                    };
+                }
+
+                if (explicitValWt is not null && explicitValWt != OmniBufWireType.SubMsg && explicitValWt != OmniBufWireType.Array && explicitValWt != OmniBufWireType.Map)
+                {
+                    throw new OmniBufException($"omnibuf: invalid ValueWire override {explicitValWt} on {prop.DeclaringType?.Name}.{prop.Name}");
+                }
+
+                if (IsContainerClrType(valType))
+                {
+                    ValueNode containerNode = BuildValueNode(propType, attr.HasExplicitKeyWire ? attr.KeyWire : null, explicitValWt, resolveSubCodec);
+                    return new FieldPlan
+                    {
+                        Ordinal = ordinal,
+                        FieldNum = attr.FieldNumber,
+                        SchemaName = schemaName,
+                        Property = prop,
+                        PropertyType = propType,
+                        Category = FieldCategory.NestedContainer,
+                        WireType = OmniBufWireType.Map,
+                        OmitEmpty = attr.OmitEmpty,
+                        Getter = getter,
+                        Setter = setter,
+                        MapFactory = mapFactory,
+                        ContainerNode = containerNode,
                     };
                 }
 
@@ -825,6 +1236,7 @@ public static class OmniBufSerializer
                     Setter = setter,
                     MapKeyWireType = keyWt,
                     MapKeyScalar = keyScalar,
+                    MapKeyEnumType = keyEnumType,
                     MapKeyType = keyType,
                     MapValWireType = OmniBufWireType.SubMsg,
                     MapValType = valType,
@@ -834,7 +1246,11 @@ public static class OmniBufSerializer
             }
         }
 
-        Type subMsgType = Nullable.GetUnderlyingType(propType) ?? propType;
+        if (attr.HasExplicitWire && attr.Wire != OmniBufWireType.SubMsg)
+        {
+            throw new OmniBufException($"omnibuf: invalid Wire override {attr.Wire} on SubMsg property {prop.DeclaringType?.Name}.{prop.Name}");
+        }
+
         return new FieldPlan
         {
             Ordinal = ordinal,
@@ -847,18 +1263,147 @@ public static class OmniBufSerializer
             OmitEmpty = attr.OmitEmpty,
             Getter = getter,
             Setter = setter,
-            SubCodec = resolveSubCodec(subMsgType),
+            SubCodec = resolveSubCodec(propType),
+        };
+    }
+
+    private static bool IsContainerClrType(Type t)
+    {
+        if (t.IsArray && t != typeof(byte[]))
+        {
+            return true;
+        }
+
+        if (t.IsGenericType)
+        {
+            Type g = t.GetGenericTypeDefinition();
+            return g == typeof(List<>) || g == typeof(IList<>) || g == typeof(IReadOnlyList<>)
+                || g == typeof(Dictionary<,>) || g == typeof(IDictionary<,>) || g == typeof(IReadOnlyDictionary<,>);
+        }
+
+        return false;
+    }
+
+    private static ValueNode BuildValueNode(
+        Type t,
+        OmniBufWireType? keyExplicitWire,
+        OmniBufWireType? valOrElemExplicitWire,
+        Func<Type, MessageCodec> resolveSubCodec)
+    {
+        if (TryClassifyScalar(t, valOrElemExplicitWire, out ScalarKind scalar, out OmniBufWireType scalarWt, out Type? enumType))
+        {
+            return new ValueNode
+            {
+                Kind = ValueNodeKind.Scalar,
+                WireType = scalarWt,
+                ClrType = t,
+                Scalar = scalar,
+                EnumType = enumType,
+            };
+        }
+
+        if (t.IsArray && t != typeof(byte[]))
+        {
+            if (t.GetArrayRank() != 1)
+            {
+                throw new OmniBufException($"omnibuf: multi-dimensional array {t.Name} is not supported");
+            }
+
+            Type elemType = t.GetElementType()!;
+            OmniBufWireType? innerOverride = valOrElemExplicitWire is not null && valOrElemExplicitWire != OmniBufWireType.Array ? valOrElemExplicitWire : null;
+            ValueNode elemNode = BuildValueNode(elemType, null, innerOverride, resolveSubCodec);
+            return new ValueNode
+            {
+                Kind = ValueNodeKind.Array,
+                WireType = OmniBufWireType.Array,
+                ClrType = t,
+                ElemNode = elemNode,
+            };
+        }
+
+        if (t.IsGenericType)
+        {
+            Type g = t.GetGenericTypeDefinition();
+            if (g == typeof(List<>) || g == typeof(IList<>) || g == typeof(IReadOnlyList<>))
+            {
+                Type elemType = t.GetGenericArguments()[0];
+                Type concreteList = typeof(List<>).MakeGenericType(elemType);
+                Func<IList> listFactory = Expression.Lambda<Func<IList>>(Expression.Convert(Expression.New(concreteList), typeof(IList))).Compile();
+                OmniBufWireType? innerOverride = valOrElemExplicitWire is not null && valOrElemExplicitWire != OmniBufWireType.Array ? valOrElemExplicitWire : null;
+                ValueNode elemNode = BuildValueNode(elemType, null, innerOverride, resolveSubCodec);
+                return new ValueNode
+                {
+                    Kind = ValueNodeKind.List,
+                    WireType = OmniBufWireType.Array,
+                    ClrType = t,
+                    ElemNode = elemNode,
+                    ListFactory = listFactory,
+                };
+            }
+
+            if (g == typeof(Dictionary<,>) || g == typeof(IDictionary<,>) || g == typeof(IReadOnlyDictionary<,>))
+            {
+                Type[] args = t.GetGenericArguments();
+                Type keyType = args[0];
+                Type valType = args[1];
+                if (!TryClassifyScalar(keyType, keyExplicitWire, out ScalarKind keyScalar, out OmniBufWireType keyWt, out Type? keyEnumType)
+                    || !OmniBufConstants.IsValidMapKeyType(keyWt))
+                {
+                    throw new OmniBufException($"omnibuf: unsupported map key type {keyType.Name}");
+                }
+
+                Type concreteMap = typeof(Dictionary<,>).MakeGenericType(keyType, valType);
+                Func<IDictionary> mapFactory = Expression.Lambda<Func<IDictionary>>(Expression.Convert(Expression.New(concreteMap), typeof(IDictionary))).Compile();
+                OmniBufWireType? innerValOverride = valOrElemExplicitWire is not null && valOrElemExplicitWire != OmniBufWireType.Map ? valOrElemExplicitWire : null;
+                ValueNode valNode = BuildValueNode(valType, null, innerValOverride, resolveSubCodec);
+                return new ValueNode
+                {
+                    Kind = ValueNodeKind.Map,
+                    WireType = OmniBufWireType.Map,
+                    ClrType = t,
+                    MapKeyScalar = keyScalar,
+                    MapKeyWireType = keyWt,
+                    MapKeyEnumType = keyEnumType,
+                    MapValNode = valNode,
+                    MapFactory = mapFactory,
+                };
+            }
+        }
+
+        return new ValueNode
+        {
+            Kind = ValueNodeKind.SubMsg,
+            WireType = OmniBufWireType.SubMsg,
+            ClrType = t,
+            SubCodec = resolveSubCodec(t),
         };
     }
 
     private static bool TryClassifyScalar(
-        Type t,
+        Type origType,
         OmniBufWireType? explicitWire,
         out ScalarKind kind,
-        out OmniBufWireType wireType)
+        out OmniBufWireType wireType,
+        out Type? enumType)
     {
+        Type t = origType;
+        if (t.IsEnum)
+        {
+            enumType = t;
+            t = Enum.GetUnderlyingType(t);
+        }
+        else
+        {
+            enumType = null;
+        }
+
         if (t == typeof(bool))
         {
+            if (explicitWire is { } ew && ew is not (OmniBufWireType.BoolFalse or OmniBufWireType.BoolTrue))
+            {
+                throw new OmniBufException($"omnibuf: Wire override {ew} is not valid for bool");
+            }
+
             kind = ScalarKind.Bool;
             wireType = OmniBufWireType.BoolFalse;
             return true;
@@ -866,62 +1411,115 @@ public static class OmniBufSerializer
 
         if (t == typeof(byte))
         {
+            OmniBufWireType wt = explicitWire ?? OmniBufWireType.Uint;
+            if (wt is not (OmniBufWireType.Uint or OmniBufWireType.Sint))
+            {
+                throw new OmniBufException($"omnibuf: Wire override {wt} is not valid for {origType.Name}");
+            }
+
             kind = ScalarKind.Byte;
-            wireType = explicitWire ?? OmniBufWireType.Uint;
+            wireType = wt;
             return true;
         }
 
         if (t == typeof(ushort))
         {
+            OmniBufWireType wt = explicitWire ?? OmniBufWireType.Uint;
+            if (wt is not (OmniBufWireType.Uint or OmniBufWireType.Sint))
+            {
+                throw new OmniBufException($"omnibuf: Wire override {wt} is not valid for {origType.Name}");
+            }
+
             kind = ScalarKind.UInt16;
-            wireType = explicitWire ?? OmniBufWireType.Uint;
+            wireType = wt;
             return true;
         }
 
         if (t == typeof(uint))
         {
+            OmniBufWireType wt = explicitWire ?? OmniBufWireType.Uint;
+            if (wt is not (OmniBufWireType.Uint or OmniBufWireType.Sint or OmniBufWireType.Fixed32 or OmniBufWireType.Sfixed32))
+            {
+                throw new OmniBufException($"omnibuf: Wire override {wt} is not valid for {origType.Name}");
+            }
+
             kind = ScalarKind.UInt32;
-            wireType = explicitWire ?? OmniBufWireType.Uint;
+            wireType = wt;
             return true;
         }
 
         if (t == typeof(ulong))
         {
+            OmniBufWireType wt = explicitWire ?? OmniBufWireType.Uint;
+            if (wt is not (OmniBufWireType.Uint or OmniBufWireType.Sint or OmniBufWireType.Fixed64 or OmniBufWireType.Sfixed64))
+            {
+                throw new OmniBufException($"omnibuf: Wire override {wt} is not valid for {origType.Name}");
+            }
+
             kind = ScalarKind.UInt64;
-            wireType = explicitWire ?? OmniBufWireType.Uint;
+            wireType = wt;
             return true;
         }
 
         if (t == typeof(sbyte))
         {
+            OmniBufWireType wt = explicitWire ?? OmniBufWireType.Sint;
+            if (wt is not (OmniBufWireType.Sint or OmniBufWireType.Uint))
+            {
+                throw new OmniBufException($"omnibuf: Wire override {wt} is not valid for {origType.Name}");
+            }
+
             kind = ScalarKind.SByte;
-            wireType = explicitWire ?? OmniBufWireType.Sint;
+            wireType = wt;
             return true;
         }
 
         if (t == typeof(short))
         {
+            OmniBufWireType wt = explicitWire ?? OmniBufWireType.Sint;
+            if (wt is not (OmniBufWireType.Sint or OmniBufWireType.Uint))
+            {
+                throw new OmniBufException($"omnibuf: Wire override {wt} is not valid for {origType.Name}");
+            }
+
             kind = ScalarKind.Int16;
-            wireType = explicitWire ?? OmniBufWireType.Sint;
+            wireType = wt;
             return true;
         }
 
         if (t == typeof(int))
         {
+            OmniBufWireType wt = explicitWire ?? OmniBufWireType.Sint;
+            if (wt is not (OmniBufWireType.Sint or OmniBufWireType.Uint or OmniBufWireType.Sfixed32 or OmniBufWireType.Fixed32))
+            {
+                throw new OmniBufException($"omnibuf: Wire override {wt} is not valid for {origType.Name}");
+            }
+
             kind = ScalarKind.Int32;
-            wireType = explicitWire ?? OmniBufWireType.Sint;
+            wireType = wt;
             return true;
         }
 
         if (t == typeof(long))
         {
+            OmniBufWireType wt = explicitWire ?? OmniBufWireType.Sint;
+            if (wt is not (OmniBufWireType.Sint or OmniBufWireType.Uint or OmniBufWireType.Sfixed64 or OmniBufWireType.Fixed64))
+            {
+                throw new OmniBufException($"omnibuf: Wire override {wt} is not valid for {origType.Name}");
+            }
+
             kind = ScalarKind.Int64;
-            wireType = explicitWire ?? OmniBufWireType.Sint;
+            wireType = wt;
             return true;
         }
 
         if (t == typeof(float))
         {
+            if (explicitWire is { } ew && ew != OmniBufWireType.Float32)
+            {
+                throw new OmniBufException($"omnibuf: Wire override {ew} is not valid for float");
+            }
+
             kind = ScalarKind.Float32;
             wireType = OmniBufWireType.Float32;
             return true;
@@ -929,6 +1527,11 @@ public static class OmniBufSerializer
 
         if (t == typeof(double))
         {
+            if (explicitWire is { } ew && ew != OmniBufWireType.Float64)
+            {
+                throw new OmniBufException($"omnibuf: Wire override {ew} is not valid for double");
+            }
+
             kind = ScalarKind.Float64;
             wireType = OmniBufWireType.Float64;
             return true;
@@ -936,6 +1539,11 @@ public static class OmniBufSerializer
 
         if (t == typeof(string))
         {
+            if (explicitWire is { } ew && ew != OmniBufWireType.String)
+            {
+                throw new OmniBufException($"omnibuf: Wire override {ew} is not valid for string");
+            }
+
             kind = ScalarKind.String;
             wireType = OmniBufWireType.String;
             return true;
@@ -943,17 +1551,23 @@ public static class OmniBufSerializer
 
         if (t == typeof(byte[]))
         {
+            if (explicitWire is { } ew && ew != OmniBufWireType.Bytes)
+            {
+                throw new OmniBufException($"omnibuf: Wire override {ew} is not valid for byte[]");
+            }
+
             kind = ScalarKind.Bytes;
             wireType = OmniBufWireType.Bytes;
             return true;
         }
 
+        enumType = null;
         kind = ScalarKind.None;
         wireType = default;
         return false;
     }
 
-    private static Action<OmniBufEncoder, object, bool> BuildFastFieldEncoder(FieldPlan plan)
+    private static Action<OmniBufEncoder, object, bool, int> BuildFastFieldEncoder(FieldPlan plan)
     {
         uint fnum = plan.FieldNum;
         bool omitEmpty = plan.OmitEmpty;
@@ -963,8 +1577,27 @@ public static class OmniBufSerializer
             case FieldCategory.Scalar:
                 return BuildScalarFieldEncoder(plan, fnum, omitEmpty);
 
+            case FieldCategory.NullableScalar:
+                return (enc, obj, _, _) =>
+                {
+                    object? val = plan.Getter(obj);
+                    if (val is null)
+                    {
+                        return;
+                    }
+
+                    if (plan.Scalar == ScalarKind.Bool)
+                    {
+                        enc.WriteBoolField(fnum, val is true);
+                        return;
+                    }
+
+                    enc.WriteTag(fnum, plan.WireType);
+                    WriteScalarPayload(enc, plan.Scalar, plan.WireType, val);
+                };
+
             case FieldCategory.SubMsg:
-                return (enc, obj, det) =>
+                return (enc, obj, det, depth) =>
                 {
                     object? sub = plan.Getter(obj);
                     if (sub is null)
@@ -973,12 +1606,12 @@ public static class OmniBufSerializer
                     }
 
                     enc.BeginSubMsgField(fnum);
-                    plan.SubCodec!.EncodeObject(enc, sub, det);
+                    plan.SubCodec!.EncodeObject(enc, sub, det, depth + 1);
                     enc.EndSubMsg();
                 };
 
             case FieldCategory.List:
-                if (TryBuildTypedListFieldEncoder(plan, fnum, omitEmpty, out Action<OmniBufEncoder, object, bool>? fastListEnc))
+                if (TryBuildTypedListFieldEncoder(plan, fnum, omitEmpty, out Action<OmniBufEncoder, object, bool, int>? fastListEnc))
                 {
                     return fastListEnc!;
                 }
@@ -986,13 +1619,18 @@ public static class OmniBufSerializer
                 goto case FieldCategory.Array;
 
             case FieldCategory.Array:
-                return (enc, obj, det) =>
+                return (enc, obj, det, depth) =>
                 {
                     var list = plan.Getter(obj) as IList;
                     int count = list?.Count ?? 0;
                     if (omitEmpty && count == 0)
                     {
                         return;
+                    }
+
+                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
 
                     enc.BeginArrayField(fnum, plan.ElemWireType, count);
@@ -1007,7 +1645,7 @@ public static class OmniBufSerializer
                                 object? elem = list[i];
                                 if (elem is not null)
                                 {
-                                    subCodec.EncodeObject(enc, elem, det);
+                                    subCodec.EncodeObject(enc, elem, det, depth + 2);
                                 }
 
                                 enc.EndContainer();
@@ -1026,13 +1664,18 @@ public static class OmniBufSerializer
                 };
 
             case FieldCategory.Map:
-                return (enc, obj, det) =>
+                return (enc, obj, det, depth) =>
                 {
                     var dict = plan.Getter(obj) as IDictionary;
                     int count = dict?.Count ?? 0;
                     if (omitEmpty && count == 0)
                     {
                         return;
+                    }
+
+                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
 
                     enc.BeginMapField(fnum, plan.MapKeyWireType, plan.MapValWireType, count);
@@ -1046,7 +1689,7 @@ public static class OmniBufSerializer
                             foreach (object k in keys)
                             {
                                 WriteScalarPayload(enc, plan.MapKeyScalar, plan.MapKeyWireType, k);
-                                WriteMapValuePayload(enc, plan, dict[k], det);
+                                WriteMapValuePayload(enc, plan, dict[k], det, depth + 2);
                             }
                         }
                         else
@@ -1054,7 +1697,7 @@ public static class OmniBufSerializer
                             foreach (DictionaryEntry entry in dict)
                             {
                                 WriteScalarPayload(enc, plan.MapKeyScalar, plan.MapKeyWireType, entry.Key);
-                                WriteMapValuePayload(enc, plan, entry.Value, det);
+                                WriteMapValuePayload(enc, plan, entry.Value, det, depth + 2);
                             }
                         }
                     }
@@ -1062,12 +1705,211 @@ public static class OmniBufSerializer
                     enc.EndMap();
                 };
 
+            case FieldCategory.NestedContainer:
+                return (enc, obj, det, depth) =>
+                {
+                    object? container = plan.Getter(obj);
+                    int count = container switch
+                    {
+                        IList l => l.Count,
+                        IDictionary d => d.Count,
+                        _ => 0,
+                    };
+                    if (omitEmpty && count == 0)
+                    {
+                        return;
+                    }
+
+                    enc.WriteTag(fnum, plan.WireType);
+                    EncodeValueNode(enc, plan.ContainerNode!, container, det, depth + 1);
+                };
+
             default:
                 throw new OmniBufException($"omnibuf: unsupported field category {plan.Category}");
         }
     }
 
-    private static Action<OmniBufEncoder, object, bool> BuildScalarFieldEncoder(FieldPlan plan, uint fnum, bool omitEmpty)
+    private static void EncodeValueNode(OmniBufEncoder enc, ValueNode node, object? val, bool det, int depth)
+    {
+        if (depth > OmniBufConstants.MaxNestingDepth)
+        {
+            throw new OmniBufException($"omnibuf: container encode depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+        }
+
+        switch (node.Kind)
+        {
+            case ValueNodeKind.Scalar:
+                WriteScalarPayload(enc, node.Scalar, node.WireType, val);
+                break;
+
+            case ValueNodeKind.SubMsg:
+                enc.BeginContainer();
+                if (val is not null)
+                {
+                    node.SubCodec!.EncodeObject(enc, val, det, depth);
+                }
+
+                enc.EndContainer();
+                break;
+
+            case ValueNodeKind.List:
+            case ValueNodeKind.Array:
+                {
+                    var list = val as IList;
+                    int count = list?.Count ?? 0;
+                    ValueNode elemNode = node.ElemNode!;
+                    enc.BeginArrayElement(elemNode.WireType, count);
+                    if (list is not null)
+                    {
+                        int nextDepth = elemNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
+                        for (int i = 0; i < count; i++)
+                        {
+                            EncodeValueNode(enc, elemNode, list[i], det, nextDepth);
+                        }
+                    }
+
+                    enc.EndArray();
+                    break;
+                }
+
+            case ValueNodeKind.Map:
+                {
+                    var dict = val as IDictionary;
+                    int count = dict?.Count ?? 0;
+                    ValueNode valNode = node.MapValNode!;
+                    enc.BeginMapElement(node.MapKeyWireType, valNode.WireType, count);
+                    if (dict is not null && count > 0)
+                    {
+                        int nextDepth = valNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
+                        if (det && count > 1)
+                        {
+                            var keys = new object[count];
+                            dict.Keys.CopyTo(keys, 0);
+                            SortMapKeys(keys, node.MapKeyScalar);
+                            foreach (object k in keys)
+                            {
+                                WriteScalarPayload(enc, node.MapKeyScalar, node.MapKeyWireType, k);
+                                EncodeValueNode(enc, valNode, dict[k], det, nextDepth);
+                            }
+                        }
+                        else
+                        {
+                            foreach (DictionaryEntry entry in dict)
+                            {
+                                WriteScalarPayload(enc, node.MapKeyScalar, node.MapKeyWireType, entry.Key);
+                                EncodeValueNode(enc, valNode, entry.Value, det, nextDepth);
+                            }
+                        }
+                    }
+
+                    enc.EndMap();
+                    break;
+                }
+        }
+    }
+
+    private static object DecodeValueNode(ReadOnlySpan<byte> data, ref int pos, ValueNode node, int depth, int maxDepth)
+    {
+        if (depth > maxDepth)
+        {
+            throw new OmniBufException($"omnibuf: container decode depth {depth} exceeds maximum {maxDepth}");
+        }
+
+        switch (node.Kind)
+        {
+            case ValueNodeKind.Scalar:
+                return ReadScalarPayload(data, ref pos, node.Scalar, node.WireType, node.EnumType);
+
+            case ValueNodeKind.SubMsg:
+                {
+                    ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
+                    return node.SubCodec!.DecodeNew(sub, depth, maxDepth);
+                }
+
+            case ValueNodeKind.List:
+                {
+                    ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);
+                    ValueNode elemNode = node.ElemNode!;
+                    if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out int count, out int p)
+                        || elemWt != elemNode.WireType)
+                    {
+                        throw new OmniBufException("omnibuf: invalid nested WireArray header");
+                    }
+
+                    IList list = node.ListFactory!();
+                    int nextDepth = elemNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
+                    for (int i = 0; i < count; i++)
+                    {
+                        list.Add(DecodeValueNode(body, ref p, elemNode, nextDepth, maxDepth));
+                    }
+
+                    if (p != body.Length)
+                    {
+                        throw new OmniBufException("omnibuf: trailing bytes in nested WireArray");
+                    }
+
+                    return list;
+                }
+
+            case ValueNodeKind.Array:
+                {
+                    ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);
+                    ValueNode elemNode = node.ElemNode!;
+                    if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out int count, out int p)
+                        || elemWt != elemNode.WireType)
+                    {
+                        throw new OmniBufException("omnibuf: invalid nested WireArray header");
+                    }
+
+                    Array arr = Array.CreateInstance(elemNode.ClrType, count);
+                    int nextDepth = elemNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
+                    for (int i = 0; i < count; i++)
+                    {
+                        arr.SetValue(DecodeValueNode(body, ref p, elemNode, nextDepth, maxDepth), i);
+                    }
+
+                    if (p != body.Length)
+                    {
+                        throw new OmniBufException("omnibuf: trailing bytes in nested WireArray");
+                    }
+
+                    return arr;
+                }
+
+            case ValueNodeKind.Map:
+                {
+                    ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 3);
+                    ValueNode valNode = node.MapValNode!;
+                    if (!OmniBufDecoder.TryParseMapHeader(body, out OmniBufWireType kWt, out OmniBufWireType vWt, out int count, out int p)
+                        || kWt != node.MapKeyWireType
+                        || vWt != valNode.WireType)
+                    {
+                        throw new OmniBufException("omnibuf: invalid nested WireMap header");
+                    }
+
+                    IDictionary map = node.MapFactory!();
+                    int nextDepth = valNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
+                    for (int i = 0; i < count; i++)
+                    {
+                        object k = ReadScalarPayload(body, ref p, node.MapKeyScalar, node.MapKeyWireType, node.MapKeyEnumType);
+                        object v = DecodeValueNode(body, ref p, valNode, nextDepth, maxDepth);
+                        map[k] = v;
+                    }
+
+                    if (p != body.Length)
+                    {
+                        throw new OmniBufException("omnibuf: trailing bytes in nested WireMap");
+                    }
+
+                    return map;
+                }
+
+            default:
+                throw new OmniBufException($"omnibuf: unsupported container node {node.Kind}");
+        }
+    }
+
+    private static Action<OmniBufEncoder, object, bool, int> BuildScalarFieldEncoder(FieldPlan plan, uint fnum, bool omitEmpty)
     {
         if (!plan.Property.DeclaringType!.IsValueType)
         {
@@ -1076,8 +1918,8 @@ public static class OmniBufSerializer
             {
                 case ScalarKind.Bool:
                     {
-                        Func<object, bool> get = CompileTypedGetter<bool>(plan.Property);
-                        return (enc, obj, _) =>
+                        Func<object, bool> get = CompileScalarAsGetter<bool>(plan.Property);
+                        return (enc, obj, _, _) =>
                         {
                             bool v = get(obj);
                             if (omitEmpty && !v)
@@ -1091,8 +1933,22 @@ public static class OmniBufSerializer
 
                 case ScalarKind.Byte:
                     {
-                        Func<object, byte> get = CompileTypedGetter<byte>(plan.Property);
-                        return (enc, obj, _) =>
+                        Func<object, byte> get = CompileScalarAsGetter<byte>(plan.Property);
+                        if (wt == OmniBufWireType.Sint)
+                        {
+                            return (enc, obj, _, _) =>
+                            {
+                                byte v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteSintField(fnum, v);
+                            };
+                        }
+
+                        return (enc, obj, _, _) =>
                         {
                             byte v = get(obj);
                             if (omitEmpty && v == 0)
@@ -1106,8 +1962,22 @@ public static class OmniBufSerializer
 
                 case ScalarKind.UInt16:
                     {
-                        Func<object, ushort> get = CompileTypedGetter<ushort>(plan.Property);
-                        return (enc, obj, _) =>
+                        Func<object, ushort> get = CompileScalarAsGetter<ushort>(plan.Property);
+                        if (wt == OmniBufWireType.Sint)
+                        {
+                            return (enc, obj, _, _) =>
+                            {
+                                ushort v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteSintField(fnum, v);
+                            };
+                        }
+
+                        return (enc, obj, _, _) =>
                         {
                             ushort v = get(obj);
                             if (omitEmpty && v == 0)
@@ -1121,10 +1991,10 @@ public static class OmniBufSerializer
 
                 case ScalarKind.UInt32:
                     {
-                        Func<object, uint> get = CompileTypedGetter<uint>(plan.Property);
-                        if (wt == OmniBufWireType.Fixed32)
+                        Func<object, uint> get = CompileScalarAsGetter<uint>(plan.Property);
+                        return wt switch
                         {
-                            return (enc, obj, _) =>
+                            OmniBufWireType.Fixed32 => (enc, obj, _, _) =>
                             {
                                 uint v = get(obj);
                                 if (omitEmpty && v == 0)
@@ -1133,27 +2003,50 @@ public static class OmniBufSerializer
                                 }
 
                                 enc.WriteFixed32Field(fnum, v);
-                            };
-                        }
-
-                        return (enc, obj, _) =>
-                        {
-                            uint v = get(obj);
-                            if (omitEmpty && v == 0)
-                            {
-                                return;
                             }
+                            ,
+                            OmniBufWireType.Sfixed32 => (enc, obj, _, _) =>
+                            {
+                                uint v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
 
-                            enc.WriteUintField(fnum, v);
+                                enc.WriteSfixed32Field(fnum, unchecked((int)v));
+                            }
+                            ,
+                            OmniBufWireType.Sint => (enc, obj, _, _) =>
+                            {
+                                uint v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteSintField(fnum, v);
+                            }
+                            ,
+                            _ => (enc, obj, _, _) =>
+                            {
+                                uint v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteUintField(fnum, v);
+                            }
+                            ,
                         };
                     }
 
                 case ScalarKind.UInt64:
                     {
-                        Func<object, ulong> get = CompileTypedGetter<ulong>(plan.Property);
-                        if (wt == OmniBufWireType.Fixed64)
+                        Func<object, ulong> get = CompileScalarAsGetter<ulong>(plan.Property);
+                        return wt switch
                         {
-                            return (enc, obj, _) =>
+                            OmniBufWireType.Fixed64 => (enc, obj, _, _) =>
                             {
                                 ulong v = get(obj);
                                 if (omitEmpty && v == 0)
@@ -1162,25 +2055,62 @@ public static class OmniBufSerializer
                                 }
 
                                 enc.WriteFixed64Field(fnum, v);
-                            };
-                        }
-
-                        return (enc, obj, _) =>
-                        {
-                            ulong v = get(obj);
-                            if (omitEmpty && v == 0)
-                            {
-                                return;
                             }
+                            ,
+                            OmniBufWireType.Sfixed64 => (enc, obj, _, _) =>
+                            {
+                                ulong v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
 
-                            enc.WriteUintField(fnum, v);
+                                enc.WriteSfixed64Field(fnum, unchecked((long)v));
+                            }
+                            ,
+                            OmniBufWireType.Sint => (enc, obj, _, _) =>
+                            {
+                                ulong v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteSintField(fnum, unchecked((long)v));
+                            }
+                            ,
+                            _ => (enc, obj, _, _) =>
+                            {
+                                ulong v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteUintField(fnum, v);
+                            }
+                            ,
                         };
                     }
 
                 case ScalarKind.SByte:
                     {
-                        Func<object, sbyte> get = CompileTypedGetter<sbyte>(plan.Property);
-                        return (enc, obj, _) =>
+                        Func<object, sbyte> get = CompileScalarAsGetter<sbyte>(plan.Property);
+                        if (wt == OmniBufWireType.Uint)
+                        {
+                            return (enc, obj, _, _) =>
+                            {
+                                sbyte v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteUintField(fnum, unchecked((byte)v));
+                            };
+                        }
+
+                        return (enc, obj, _, _) =>
                         {
                             sbyte v = get(obj);
                             if (omitEmpty && v == 0)
@@ -1194,8 +2124,22 @@ public static class OmniBufSerializer
 
                 case ScalarKind.Int16:
                     {
-                        Func<object, short> get = CompileTypedGetter<short>(plan.Property);
-                        return (enc, obj, _) =>
+                        Func<object, short> get = CompileScalarAsGetter<short>(plan.Property);
+                        if (wt == OmniBufWireType.Uint)
+                        {
+                            return (enc, obj, _, _) =>
+                            {
+                                short v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteUintField(fnum, unchecked((ushort)v));
+                            };
+                        }
+
+                        return (enc, obj, _, _) =>
                         {
                             short v = get(obj);
                             if (omitEmpty && v == 0)
@@ -1209,10 +2153,10 @@ public static class OmniBufSerializer
 
                 case ScalarKind.Int32:
                     {
-                        Func<object, int> get = CompileTypedGetter<int>(plan.Property);
-                        if (wt == OmniBufWireType.Sfixed32)
+                        Func<object, int> get = CompileScalarAsGetter<int>(plan.Property);
+                        return wt switch
                         {
-                            return (enc, obj, _) =>
+                            OmniBufWireType.Sfixed32 => (enc, obj, _, _) =>
                             {
                                 int v = get(obj);
                                 if (omitEmpty && v == 0)
@@ -1221,27 +2165,50 @@ public static class OmniBufSerializer
                                 }
 
                                 enc.WriteSfixed32Field(fnum, v);
-                            };
-                        }
-
-                        return (enc, obj, _) =>
-                        {
-                            int v = get(obj);
-                            if (omitEmpty && v == 0)
-                            {
-                                return;
                             }
+                            ,
+                            OmniBufWireType.Fixed32 => (enc, obj, _, _) =>
+                            {
+                                int v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
 
-                            enc.WriteSintField(fnum, v);
+                                enc.WriteFixed32Field(fnum, unchecked((uint)v));
+                            }
+                            ,
+                            OmniBufWireType.Uint => (enc, obj, _, _) =>
+                            {
+                                int v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteUintField(fnum, unchecked((uint)v));
+                            }
+                            ,
+                            _ => (enc, obj, _, _) =>
+                            {
+                                int v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteSintField(fnum, v);
+                            }
+                            ,
                         };
                     }
 
                 case ScalarKind.Int64:
                     {
-                        Func<object, long> get = CompileTypedGetter<long>(plan.Property);
-                        if (wt == OmniBufWireType.Sfixed64)
+                        Func<object, long> get = CompileScalarAsGetter<long>(plan.Property);
+                        return wt switch
                         {
-                            return (enc, obj, _) =>
+                            OmniBufWireType.Sfixed64 => (enc, obj, _, _) =>
                             {
                                 long v = get(obj);
                                 if (omitEmpty && v == 0)
@@ -1250,25 +2217,48 @@ public static class OmniBufSerializer
                                 }
 
                                 enc.WriteSfixed64Field(fnum, v);
-                            };
-                        }
-
-                        return (enc, obj, _) =>
-                        {
-                            long v = get(obj);
-                            if (omitEmpty && v == 0)
-                            {
-                                return;
                             }
+                            ,
+                            OmniBufWireType.Fixed64 => (enc, obj, _, _) =>
+                            {
+                                long v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
 
-                            enc.WriteSintField(fnum, v);
+                                enc.WriteFixed64Field(fnum, unchecked((ulong)v));
+                            }
+                            ,
+                            OmniBufWireType.Uint => (enc, obj, _, _) =>
+                            {
+                                long v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteUintField(fnum, unchecked((ulong)v));
+                            }
+                            ,
+                            _ => (enc, obj, _, _) =>
+                            {
+                                long v = get(obj);
+                                if (omitEmpty && v == 0)
+                                {
+                                    return;
+                                }
+
+                                enc.WriteSintField(fnum, v);
+                            }
+                            ,
                         };
                     }
 
                 case ScalarKind.Float32:
                     {
                         Func<object, float> get = CompileTypedGetter<float>(plan.Property);
-                        return (enc, obj, _) =>
+                        return (enc, obj, _, _) =>
                         {
                             float v = get(obj);
                             if (omitEmpty && BitConverter.SingleToUInt32Bits(v) == 0)
@@ -1283,7 +2273,7 @@ public static class OmniBufSerializer
                 case ScalarKind.Float64:
                     {
                         Func<object, double> get = CompileTypedGetter<double>(plan.Property);
-                        return (enc, obj, _) =>
+                        return (enc, obj, _, _) =>
                         {
                             double v = get(obj);
                             if (omitEmpty && BitConverter.DoubleToUInt64Bits(v) == 0)
@@ -1298,7 +2288,7 @@ public static class OmniBufSerializer
                 case ScalarKind.String:
                     {
                         Func<object, string?> get = CompileTypedGetter<string?>(plan.Property);
-                        return (enc, obj, _) =>
+                        return (enc, obj, _, _) =>
                         {
                             string? v = get(obj);
                             if (omitEmpty && string.IsNullOrEmpty(v))
@@ -1313,7 +2303,7 @@ public static class OmniBufSerializer
                 case ScalarKind.Bytes:
                     {
                         Func<object, byte[]?> get = CompileTypedGetter<byte[]?>(plan.Property);
-                        return (enc, obj, _) =>
+                        return (enc, obj, _, _) =>
                         {
                             byte[]? v = get(obj);
                             if (omitEmpty && (v is null || v.Length == 0))
@@ -1327,7 +2317,7 @@ public static class OmniBufSerializer
             }
         }
 
-        return (enc, obj, _) =>
+        return (enc, obj, _, _) =>
         {
             object? val = plan.Getter(obj);
             if (omitEmpty && IsScalarDefault(plan.Scalar, val))
@@ -1350,10 +2340,10 @@ public static class OmniBufSerializer
         FieldPlan plan,
         uint fnum,
         bool omitEmpty,
-        out Action<OmniBufEncoder, object, bool>? encoder)
+        out Action<OmniBufEncoder, object, bool, int>? encoder)
     {
         encoder = null;
-        if (plan.Property.DeclaringType!.IsValueType || plan.ElemType is null)
+        if (plan.Property.DeclaringType!.IsValueType || plan.ElemType is null || plan.ElemEnumType is not null)
         {
             return false;
         }
@@ -1369,7 +2359,7 @@ public static class OmniBufSerializer
             MethodInfo helper = typeof(OmniBufSerializer)
                 .GetMethod(nameof(BuildSubMsgListEncoderGeneric), BindingFlags.NonPublic | BindingFlags.Static)!
                 .MakeGenericMethod(plan.ElemType);
-            encoder = (Action<OmniBufEncoder, object, bool>)helper.Invoke(null, new object[] { plan, fnum, omitEmpty })!;
+            encoder = (Action<OmniBufEncoder, object, bool, int>)helper.Invoke(null, new object[] { plan, fnum, omitEmpty })!;
             return true;
         }
 
@@ -1378,13 +2368,18 @@ public static class OmniBufSerializer
             case ScalarKind.String:
                 {
                     Func<object, List<string>?> get = CompileTypedGetter<List<string>?>(plan.Property);
-                    encoder = (enc, obj, _) =>
+                    encoder = (enc, obj, _, depth) =>
                     {
                         List<string>? list = get(obj);
                         int count = list?.Count ?? 0;
                         if (omitEmpty && count == 0)
                         {
                             return;
+                        }
+
+                        if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                        {
+                            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                         }
 
                         enc.BeginArrayField(fnum, OmniBufWireType.String, count);
@@ -1404,13 +2399,18 @@ public static class OmniBufSerializer
             case ScalarKind.UInt32 when plan.ElemWireType == OmniBufWireType.Uint:
                 {
                     Func<object, List<uint>?> get = CompileTypedGetter<List<uint>?>(plan.Property);
-                    encoder = (enc, obj, _) =>
+                    encoder = (enc, obj, _, depth) =>
                     {
                         List<uint>? list = get(obj);
                         int count = list?.Count ?? 0;
                         if (omitEmpty && count == 0)
                         {
                             return;
+                        }
+
+                        if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                        {
+                            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                         }
 
                         enc.BeginArrayField(fnum, OmniBufWireType.Uint, count);
@@ -1430,13 +2430,18 @@ public static class OmniBufSerializer
             case ScalarKind.Int32 when plan.ElemWireType == OmniBufWireType.Sint:
                 {
                     Func<object, List<int>?> get = CompileTypedGetter<List<int>?>(plan.Property);
-                    encoder = (enc, obj, _) =>
+                    encoder = (enc, obj, _, depth) =>
                     {
                         List<int>? list = get(obj);
                         int count = list?.Count ?? 0;
                         if (omitEmpty && count == 0)
                         {
                             return;
+                        }
+
+                        if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                        {
+                            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                         }
 
                         enc.BeginArrayField(fnum, OmniBufWireType.Sint, count);
@@ -1457,18 +2462,23 @@ public static class OmniBufSerializer
         return false;
     }
 
-    private static Action<OmniBufEncoder, object, bool> BuildSubMsgListEncoderGeneric<TElem>(FieldPlan plan, uint fnum, bool omitEmpty)
+    private static Action<OmniBufEncoder, object, bool, int> BuildSubMsgListEncoderGeneric<TElem>(FieldPlan plan, uint fnum, bool omitEmpty)
         where TElem : class
     {
         Func<object, List<TElem>?> get = CompileTypedGetter<List<TElem>?>(plan.Property);
         MessageCodec subCodec = plan.SubCodec!;
-        return (enc, obj, det) =>
+        return (enc, obj, det, depth) =>
         {
             List<TElem>? list = get(obj);
             int count = list?.Count ?? 0;
             if (omitEmpty && count == 0)
             {
                 return;
+            }
+
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+            {
+                throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
 
             enc.BeginArrayField(fnum, OmniBufWireType.SubMsg, count);
@@ -1480,7 +2490,7 @@ public static class OmniBufSerializer
                     TElem? elem = list[i];
                     if (elem is not null)
                     {
-                        subCodec.EncodeObject(enc, elem, det);
+                        subCodec.EncodeObject(enc, elem, det, depth + 2);
                     }
 
                     enc.EndContainer();
@@ -1494,14 +2504,14 @@ public static class OmniBufSerializer
     private static bool IsScalarDefault(ScalarKind kind, object? val) => kind switch
     {
         ScalarKind.Bool => val is not true,
-        ScalarKind.Byte => val is null || (byte)val == 0,
-        ScalarKind.UInt16 => val is null || (ushort)val == 0,
-        ScalarKind.UInt32 => val is null || (uint)val == 0,
-        ScalarKind.UInt64 => val is null || (ulong)val == 0,
-        ScalarKind.SByte => val is null || (sbyte)val == 0,
-        ScalarKind.Int16 => val is null || (short)val == 0,
-        ScalarKind.Int32 => val is null || (int)val == 0,
-        ScalarKind.Int64 => val is null || (long)val == 0,
+        ScalarKind.Byte => val is null || UnboxByte(val) == 0,
+        ScalarKind.UInt16 => val is null || UnboxUInt16(val) == 0,
+        ScalarKind.UInt32 => val is null || UnboxUInt32(val) == 0,
+        ScalarKind.UInt64 => val is null || UnboxUInt64(val) == 0,
+        ScalarKind.SByte => val is null || UnboxSByte(val) == 0,
+        ScalarKind.Int16 => val is null || UnboxInt16(val) == 0,
+        ScalarKind.Int32 => val is null || UnboxInt32(val) == 0,
+        ScalarKind.Int64 => val is null || UnboxInt64(val) == 0,
         ScalarKind.Float32 => val is null || BitConverter.SingleToUInt32Bits((float)val) == 0,
         ScalarKind.Float64 => val is null || BitConverter.DoubleToUInt64Bits((double)val) == 0,
         ScalarKind.String => string.IsNullOrEmpty(val as string),
@@ -1509,14 +2519,23 @@ public static class OmniBufSerializer
         _ => val is null,
     };
 
-    private static void WriteMapValuePayload(OmniBufEncoder enc, FieldPlan plan, object? val, bool det)
+    private static byte UnboxByte(object? val) => val is null ? (byte)0 : (val is byte b ? b : Convert.ToByte(val));
+    private static ushort UnboxUInt16(object? val) => val is null ? (ushort)0 : (val is ushort u ? u : Convert.ToUInt16(val));
+    private static uint UnboxUInt32(object? val) => val is null ? 0u : (val is uint u ? u : Convert.ToUInt32(val));
+    private static ulong UnboxUInt64(object? val) => val is null ? 0UL : (val is ulong u ? u : Convert.ToUInt64(val));
+    private static sbyte UnboxSByte(object? val) => val is null ? (sbyte)0 : (val is sbyte s ? s : Convert.ToSByte(val));
+    private static short UnboxInt16(object? val) => val is null ? (short)0 : (val is short s ? s : Convert.ToInt16(val));
+    private static int UnboxInt32(object? val) => val is null ? 0 : (val is int i ? i : Convert.ToInt32(val));
+    private static long UnboxInt64(object? val) => val is null ? 0L : (val is long l ? l : Convert.ToInt64(val));
+
+    private static void WriteMapValuePayload(OmniBufEncoder enc, FieldPlan plan, object? val, bool det, int childDepth)
     {
         if (plan.MapValWireType == OmniBufWireType.SubMsg)
         {
             enc.BeginContainer();
             if (val is not null)
             {
-                plan.SubCodec!.EncodeObject(enc, val, det);
+                plan.SubCodec!.EncodeObject(enc, val, det, childDepth);
             }
 
             enc.EndContainer();
@@ -1536,23 +2555,52 @@ public static class OmniBufSerializer
                 break;
 
             case ScalarKind.Byte:
-                enc.WriteUintValue(val is byte b ? b : 0UL);
-                break;
-
-            case ScalarKind.UInt16:
-                enc.WriteUintValue(val is ushort u16 ? u16 : 0UL);
-                break;
-
-            case ScalarKind.UInt32:
                 {
-                    uint u32 = val is uint u ? u : 0u;
-                    if (wt == OmniBufWireType.Fixed32)
+                    byte b = UnboxByte(val);
+                    if (wt == OmniBufWireType.Sint)
                     {
-                        enc.WriteFixed32Value(u32);
+                        enc.WriteSintValue(b);
                     }
                     else
                     {
-                        enc.WriteUintValue(u32);
+                        enc.WriteUintValue(b);
+                    }
+
+                    break;
+                }
+
+            case ScalarKind.UInt16:
+                {
+                    ushort u16 = UnboxUInt16(val);
+                    if (wt == OmniBufWireType.Sint)
+                    {
+                        enc.WriteSintValue(u16);
+                    }
+                    else
+                    {
+                        enc.WriteUintValue(u16);
+                    }
+
+                    break;
+                }
+
+            case ScalarKind.UInt32:
+                {
+                    uint u32 = UnboxUInt32(val);
+                    switch (wt)
+                    {
+                        case OmniBufWireType.Fixed32:
+                            enc.WriteFixed32Value(u32);
+                            break;
+                        case OmniBufWireType.Sfixed32:
+                            enc.WriteSfixed32Value(unchecked((int)u32));
+                            break;
+                        case OmniBufWireType.Sint:
+                            enc.WriteSintValue(u32);
+                            break;
+                        default:
+                            enc.WriteUintValue(u32);
+                            break;
                     }
 
                     break;
@@ -1560,37 +2608,73 @@ public static class OmniBufSerializer
 
             case ScalarKind.UInt64:
                 {
-                    ulong u64 = val is ulong u ? u : 0UL;
-                    if (wt == OmniBufWireType.Fixed64)
+                    ulong u64 = UnboxUInt64(val);
+                    switch (wt)
                     {
-                        enc.WriteFixed64Value(u64);
-                    }
-                    else
-                    {
-                        enc.WriteUintValue(u64);
+                        case OmniBufWireType.Fixed64:
+                            enc.WriteFixed64Value(u64);
+                            break;
+                        case OmniBufWireType.Sfixed64:
+                            enc.WriteSfixed64Value(unchecked((long)u64));
+                            break;
+                        case OmniBufWireType.Sint:
+                            enc.WriteSintValue(unchecked((long)u64));
+                            break;
+                        default:
+                            enc.WriteUintValue(u64);
+                            break;
                     }
 
                     break;
                 }
 
             case ScalarKind.SByte:
-                enc.WriteSintValue(val is sbyte sb ? sb : 0L);
-                break;
-
-            case ScalarKind.Int16:
-                enc.WriteSintValue(val is short i16 ? i16 : 0L);
-                break;
-
-            case ScalarKind.Int32:
                 {
-                    int i32 = val is int i ? i : 0;
-                    if (wt == OmniBufWireType.Sfixed32)
+                    sbyte sb = UnboxSByte(val);
+                    if (wt == OmniBufWireType.Uint)
                     {
-                        enc.WriteSfixed32Value(i32);
+                        enc.WriteUintValue(unchecked((byte)sb));
                     }
                     else
                     {
-                        enc.WriteSintValue(i32);
+                        enc.WriteSintValue(sb);
+                    }
+
+                    break;
+                }
+
+            case ScalarKind.Int16:
+                {
+                    short i16 = UnboxInt16(val);
+                    if (wt == OmniBufWireType.Uint)
+                    {
+                        enc.WriteUintValue(unchecked((ushort)i16));
+                    }
+                    else
+                    {
+                        enc.WriteSintValue(i16);
+                    }
+
+                    break;
+                }
+
+            case ScalarKind.Int32:
+                {
+                    int i32 = UnboxInt32(val);
+                    switch (wt)
+                    {
+                        case OmniBufWireType.Sfixed32:
+                            enc.WriteSfixed32Value(i32);
+                            break;
+                        case OmniBufWireType.Fixed32:
+                            enc.WriteFixed32Value(unchecked((uint)i32));
+                            break;
+                        case OmniBufWireType.Uint:
+                            enc.WriteUintValue(unchecked((uint)i32));
+                            break;
+                        default:
+                            enc.WriteSintValue(i32);
+                            break;
                     }
 
                     break;
@@ -1598,14 +2682,21 @@ public static class OmniBufSerializer
 
             case ScalarKind.Int64:
                 {
-                    long i64 = val is long i ? i : 0L;
-                    if (wt == OmniBufWireType.Sfixed64)
+                    long i64 = UnboxInt64(val);
+                    switch (wt)
                     {
-                        enc.WriteSfixed64Value(i64);
-                    }
-                    else
-                    {
-                        enc.WriteSintValue(i64);
+                        case OmniBufWireType.Sfixed64:
+                            enc.WriteSfixed64Value(i64);
+                            break;
+                        case OmniBufWireType.Fixed64:
+                            enc.WriteFixed64Value(unchecked((ulong)i64));
+                            break;
+                        case OmniBufWireType.Uint:
+                            enc.WriteUintValue(unchecked((ulong)i64));
+                            break;
+                        default:
+                            enc.WriteSintValue(i64);
+                            break;
                     }
 
                     break;
@@ -1646,6 +2737,7 @@ public static class OmniBufSerializer
         switch (plan.Category)
         {
             case FieldCategory.Scalar:
+            case FieldCategory.NullableScalar:
                 {
                     if (plan.Scalar == ScalarKind.Bool)
                     {
@@ -1656,7 +2748,8 @@ public static class OmniBufSerializer
                         }
 
                         markedSeen = true;
-                        return wt == OmniBufWireType.BoolTrue;
+                        bool bVal = wt == OmniBufWireType.BoolTrue;
+                        return plan.EnumType is not null ? Enum.ToObject(plan.EnumType, bVal ? 1 : 0) : bVal;
                     }
 
                     if (wt != plan.WireType)
@@ -1666,7 +2759,7 @@ public static class OmniBufSerializer
                     }
 
                     markedSeen = true;
-                    return ReadScalarPayload(data, ref pos, plan.Scalar, plan.WireType);
+                    return ReadScalarPayload(data, ref pos, plan.Scalar, plan.WireType, plan.EnumType);
                 }
 
             case FieldCategory.SubMsg:
@@ -1679,14 +2772,9 @@ public static class OmniBufSerializer
 
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
                     markedSeen = true;
-                    if (alreadySeen && existing is not null && !plan.PropertyType.IsValueType && plan.SubCodec is not null)
+                    if (alreadySeen && existing is not null && (!plan.PropertyType.IsValueType || plan.IsNullableValueType) && plan.SubCodec is not null)
                     {
                         return plan.SubCodec.DecodeMerge(sub, existing, depth + 1, maxDepth);
-                    }
-
-                    if (!alreadySeen && existing is not null && !plan.PropertyType.IsValueType && plan.SubCodec is not null)
-                    {
-                        return plan.SubCodec.DecodeNew(sub, depth + 1, maxDepth);
                     }
 
                     return plan.SubCodec!.DecodeNew(sub, depth + 1, maxDepth);
@@ -1744,7 +2832,7 @@ public static class OmniBufSerializer
                         {
                             object elem = plan.ElemWireType == OmniBufWireType.SubMsg
                                 ? plan.SubCodec!.DecodeNew(OmniBufDecoder.ReadLenSlice(body, ref p, 0), depth + 2, maxDepth)
-                                : ReadScalarPayload(body, ref p, plan.ElemScalar, plan.ElemWireType);
+                                : ReadScalarPayload(body, ref p, plan.ElemScalar, plan.ElemWireType, plan.ElemEnumType);
                             nextArr.SetValue(elem, prevLen + i);
                         }
 
@@ -1787,10 +2875,10 @@ public static class OmniBufSerializer
 
                     for (int i = 0; i < count; i++)
                     {
-                        object key = ReadScalarPayload(body, ref p, plan.MapKeyScalar, plan.MapKeyWireType);
+                        object key = ReadScalarPayload(body, ref p, plan.MapKeyScalar, plan.MapKeyWireType, plan.MapKeyEnumType);
                         object val = plan.MapValWireType == OmniBufWireType.SubMsg
                             ? plan.SubCodec!.DecodeNew(OmniBufDecoder.ReadLenSlice(body, ref p, 0), depth + 2, maxDepth)
-                            : ReadScalarPayload(body, ref p, plan.MapValScalar, plan.MapValWireType);
+                            : ReadScalarPayload(body, ref p, plan.MapValScalar, plan.MapValWireType, plan.MapValEnumType);
                         map[key] = val;
                     }
 
@@ -1800,6 +2888,52 @@ public static class OmniBufSerializer
                     }
 
                     return map;
+                }
+
+            case FieldCategory.NestedContainer:
+                {
+                    if (wt != plan.WireType)
+                    {
+                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                        return existing;
+                    }
+
+                    markedSeen = true;
+                    object decoded = DecodeValueNode(data, ref pos, plan.ContainerNode!, depth + 1, maxDepth);
+                    if (!alreadySeen || existing is null)
+                    {
+                        return decoded;
+                    }
+
+                    if (plan.ContainerNode!.Kind == ValueNodeKind.List && existing is IList prevList && decoded is IList nextList)
+                    {
+                        foreach (object? item in nextList)
+                        {
+                            prevList.Add(item);
+                        }
+
+                        return prevList;
+                    }
+
+                    if (plan.ContainerNode.Kind == ValueNodeKind.Array && existing is Array prevArr && decoded is Array nextArr)
+                    {
+                        Array merged = Array.CreateInstance(plan.ElemType!, prevArr.Length + nextArr.Length);
+                        Array.Copy(prevArr, merged, prevArr.Length);
+                        Array.Copy(nextArr, 0, merged, prevArr.Length, nextArr.Length);
+                        return merged;
+                    }
+
+                    if (plan.ContainerNode.Kind == ValueNodeKind.Map && existing is IDictionary prevMap && decoded is IDictionary nextMap)
+                    {
+                        foreach (DictionaryEntry kv in nextMap)
+                        {
+                            prevMap[kv.Key] = kv.Value;
+                        }
+
+                        return prevMap;
+                    }
+
+                    return decoded;
                 }
 
             default:
@@ -1829,11 +2963,22 @@ public static class OmniBufSerializer
 
         for (int i = 0; i < count; i++)
         {
-            list.Add(ReadScalarPayload(body, ref p, plan.ElemScalar, plan.ElemWireType));
+            list.Add(ReadScalarPayload(body, ref p, plan.ElemScalar, plan.ElemWireType, plan.ElemEnumType));
         }
     }
 
-    private static object ReadScalarPayload(ReadOnlySpan<byte> data, ref int pos, ScalarKind kind, OmniBufWireType wt)
+    private static object ReadScalarPayload(
+        ReadOnlySpan<byte> data,
+        ref int pos,
+        ScalarKind kind,
+        OmniBufWireType wt,
+        Type? enumType = null)
+    {
+        object raw = ReadUnderlyingScalarPayload(data, ref pos, kind, wt);
+        return enumType is not null ? Enum.ToObject(enumType, raw) : raw;
+    }
+
+    private static object ReadUnderlyingScalarPayload(ReadOnlySpan<byte> data, ref int pos, ScalarKind kind, OmniBufWireType wt)
     {
         switch (kind)
         {
@@ -1842,6 +2987,17 @@ public static class OmniBufSerializer
 
             case ScalarKind.Byte:
                 {
+                    if (wt == OmniBufWireType.Sint)
+                    {
+                        long s = OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos));
+                        if (s < 0 || s > byte.MaxValue)
+                        {
+                            throw new OmniBufException($"omnibuf: uint8 overflow ({s})");
+                        }
+
+                        return (byte)s;
+                    }
+
                     ulong v = OmniBufDecoder.ReadVarint(data, ref pos);
                     if (v > byte.MaxValue)
                     {
@@ -1853,6 +3009,17 @@ public static class OmniBufSerializer
 
             case ScalarKind.UInt16:
                 {
+                    if (wt == OmniBufWireType.Sint)
+                    {
+                        long s = OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos));
+                        if (s < 0 || s > ushort.MaxValue)
+                        {
+                            throw new OmniBufException($"omnibuf: uint16 overflow ({s})");
+                        }
+
+                        return (ushort)s;
+                    }
+
                     ulong v = OmniBufDecoder.ReadVarint(data, ref pos);
                     if (v > ushort.MaxValue)
                     {
@@ -1863,22 +3030,34 @@ public static class OmniBufSerializer
                 }
 
             case ScalarKind.UInt32:
+                return wt switch
                 {
-                    if (wt == OmniBufWireType.Fixed32)
-                    {
-                        return OmniBufDecoder.ReadFixed32(data, ref pos);
-                    }
-
-                    return (uint)OmniBufDecoder.ReadVarint(data, ref pos);
-                }
+                    OmniBufWireType.Fixed32 or OmniBufWireType.Sfixed32 => OmniBufDecoder.ReadFixed32(data, ref pos),
+                    OmniBufWireType.Sint => unchecked((uint)OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos))),
+                    _ => (uint)OmniBufDecoder.ReadVarint(data, ref pos),
+                };
 
             case ScalarKind.UInt64:
-                return wt == OmniBufWireType.Fixed64
-                    ? OmniBufDecoder.ReadFixed64(data, ref pos)
-                    : OmniBufDecoder.ReadVarint(data, ref pos);
+                return wt switch
+                {
+                    OmniBufWireType.Fixed64 or OmniBufWireType.Sfixed64 => OmniBufDecoder.ReadFixed64(data, ref pos),
+                    OmniBufWireType.Sint => unchecked((ulong)OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos))),
+                    _ => OmniBufDecoder.ReadVarint(data, ref pos),
+                };
 
             case ScalarKind.SByte:
                 {
+                    if (wt == OmniBufWireType.Uint)
+                    {
+                        ulong u = OmniBufDecoder.ReadVarint(data, ref pos);
+                        if (u > byte.MaxValue)
+                        {
+                            throw new OmniBufException($"omnibuf: int8 overflow ({u})");
+                        }
+
+                        return unchecked((sbyte)(byte)u);
+                    }
+
                     long v = OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos));
                     if (v < sbyte.MinValue || v > sbyte.MaxValue)
                     {
@@ -1890,6 +3069,17 @@ public static class OmniBufSerializer
 
             case ScalarKind.Int16:
                 {
+                    if (wt == OmniBufWireType.Uint)
+                    {
+                        ulong u = OmniBufDecoder.ReadVarint(data, ref pos);
+                        if (u > ushort.MaxValue)
+                        {
+                            throw new OmniBufException($"omnibuf: int16 overflow ({u})");
+                        }
+
+                        return unchecked((short)(ushort)u);
+                    }
+
                     long v = OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos));
                     if (v < short.MinValue || v > short.MaxValue)
                     {
@@ -1900,14 +3090,20 @@ public static class OmniBufSerializer
                 }
 
             case ScalarKind.Int32:
-                return wt == OmniBufWireType.Sfixed32
-                    ? (int)OmniBufDecoder.ReadFixed32(data, ref pos)
-                    : (int)OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos));
+                return wt switch
+                {
+                    OmniBufWireType.Sfixed32 or OmniBufWireType.Fixed32 => unchecked((int)OmniBufDecoder.ReadFixed32(data, ref pos)),
+                    OmniBufWireType.Uint => unchecked((int)(uint)OmniBufDecoder.ReadVarint(data, ref pos)),
+                    _ => (int)OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos)),
+                };
 
             case ScalarKind.Int64:
-                return wt == OmniBufWireType.Sfixed64
-                    ? (long)OmniBufDecoder.ReadFixed64(data, ref pos)
-                    : OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos));
+                return wt switch
+                {
+                    OmniBufWireType.Sfixed64 or OmniBufWireType.Fixed64 => unchecked((long)OmniBufDecoder.ReadFixed64(data, ref pos)),
+                    OmniBufWireType.Uint => unchecked((long)OmniBufDecoder.ReadVarint(data, ref pos)),
+                    _ => OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos)),
+                };
 
             case ScalarKind.Float32:
                 return BitConverter.UInt32BitsToSingle(OmniBufDecoder.ReadFixed32(data, ref pos));
@@ -1928,6 +3124,8 @@ public static class OmniBufSerializer
 
     private static object? CreateDefaultFieldValue(FieldPlan plan) => plan.Category switch
     {
+        FieldCategory.NullableScalar => null,
+        FieldCategory.Scalar when plan.EnumType is not null => Enum.ToObject(plan.EnumType, 0),
         FieldCategory.Scalar => plan.Scalar switch
         {
             ScalarKind.Bool => false,
@@ -1945,10 +3143,17 @@ public static class OmniBufSerializer
             ScalarKind.Bytes => Array.Empty<byte>(),
             _ => null,
         },
-        FieldCategory.SubMsg => plan.PropertyType.IsValueType ? Activator.CreateInstance(plan.PropertyType) : null,
+        FieldCategory.SubMsg => plan.IsNullableValueType ? null : (plan.PropertyType.IsValueType ? Activator.CreateInstance(plan.PropertyType) : null),
         FieldCategory.List => plan.ListFactory!(),
         FieldCategory.Array => Array.CreateInstance(plan.ElemType!, 0),
         FieldCategory.Map => plan.MapFactory!(),
+        FieldCategory.NestedContainer => plan.ContainerNode!.Kind switch
+        {
+            ValueNodeKind.List => plan.ContainerNode.ListFactory!(),
+            ValueNodeKind.Array => Array.CreateInstance(plan.ElemType!, 0),
+            ValueNodeKind.Map => plan.ContainerNode.MapFactory!(),
+            _ => null,
+        },
         _ => null,
     };
 
@@ -1958,14 +3163,14 @@ public static class OmniBufSerializer
         {
             ScalarKind.String => StringComparer.Ordinal.Compare((string)a, (string)b),
             ScalarKind.Bool => ((bool)a).CompareTo((bool)b),
-            ScalarKind.Byte => ((byte)a).CompareTo((byte)b),
-            ScalarKind.UInt16 => ((ushort)a).CompareTo((ushort)b),
-            ScalarKind.UInt32 => ((uint)a).CompareTo((uint)b),
-            ScalarKind.UInt64 => ((ulong)a).CompareTo((ulong)b),
-            ScalarKind.SByte => ((sbyte)a).CompareTo((sbyte)b),
-            ScalarKind.Int16 => ((short)a).CompareTo((short)b),
-            ScalarKind.Int32 => ((int)a).CompareTo((int)b),
-            ScalarKind.Int64 => ((long)a).CompareTo((long)b),
+            ScalarKind.Byte => UnboxByte(a).CompareTo(UnboxByte(b)),
+            ScalarKind.UInt16 => UnboxUInt16(a).CompareTo(UnboxUInt16(b)),
+            ScalarKind.UInt32 => UnboxUInt32(a).CompareTo(UnboxUInt32(b)),
+            ScalarKind.UInt64 => UnboxUInt64(a).CompareTo(UnboxUInt64(b)),
+            ScalarKind.SByte => UnboxSByte(a).CompareTo(UnboxSByte(b)),
+            ScalarKind.Int16 => UnboxInt16(a).CompareTo(UnboxInt16(b)),
+            ScalarKind.Int32 => UnboxInt32(a).CompareTo(UnboxInt32(b)),
+            ScalarKind.Int64 => UnboxInt64(a).CompareTo(UnboxInt64(b)),
             _ => Comparer.DefaultInvariant.Compare(a, b),
         });
     }
@@ -2023,6 +3228,19 @@ public static class OmniBufSerializer
         return Expression.Lambda<Func<object, TProp>>(access, objParam).Compile();
     }
 
+    private static Func<object, TScalar> CompileScalarAsGetter<TScalar>(PropertyInfo prop)
+    {
+        ParameterExpression objParam = Expression.Parameter(typeof(object), "obj");
+        UnaryExpression castObj = Expression.Convert(objParam, prop.DeclaringType!);
+        Expression access = Expression.Property(castObj, prop);
+        if (access.Type != typeof(TScalar))
+        {
+            access = Expression.Convert(access, typeof(TScalar));
+        }
+
+        return Expression.Lambda<Func<object, TScalar>>(access, objParam).Compile();
+    }
+
     private static Action<object, TProp> CompileTypedSetter<TProp>(PropertyInfo prop)
     {
         MethodInfo setMethod = prop.GetSetMethod()!;
@@ -2031,6 +3249,19 @@ public static class OmniBufSerializer
         UnaryExpression castObj = Expression.Convert(objParam, prop.DeclaringType!);
         MethodCallExpression call = Expression.Call(castObj, setMethod, valParam);
         return Expression.Lambda<Action<object, TProp>>(call, objParam, valParam).Compile();
+    }
+
+    private static Action<object, TScalar> CompileScalarFromSetter<TScalar>(PropertyInfo prop)
+    {
+        MethodInfo setMethod = prop.GetSetMethod()!;
+        ParameterExpression objParam = Expression.Parameter(typeof(object), "obj");
+        ParameterExpression valParam = Expression.Parameter(typeof(TScalar), "val");
+        UnaryExpression castObj = Expression.Convert(objParam, prop.DeclaringType!);
+        Expression arg = prop.PropertyType == typeof(TScalar)
+            ? valParam
+            : Expression.Convert(valParam, prop.PropertyType);
+        MethodCallExpression call = Expression.Call(castObj, setMethod, arg);
+        return Expression.Lambda<Action<object, TScalar>>(call, objParam, valParam).Compile();
     }
 
     private static FastInPlaceDecodeDelegate? BuildFastInPlaceDecoder(FieldPlan plan)
@@ -2080,7 +3311,7 @@ public static class OmniBufSerializer
                     };
                 }
 
-            case FieldCategory.List when plan.ElemType is not null && plan.PropertyType == typeof(List<>).MakeGenericType(plan.ElemType):
+            case FieldCategory.List when plan.ElemType is not null && plan.ElemEnumType is null && plan.PropertyType == typeof(List<>).MakeGenericType(plan.ElemType):
                 return BuildFastTypedListDecoder(plan);
 
             default:
@@ -2095,7 +3326,7 @@ public static class OmniBufSerializer
         {
             case ScalarKind.Bool:
                 {
-                    Action<object, bool> set = CompileTypedSetter<bool>(plan.Property);
+                    Action<object, bool> set = CompileScalarFromSetter<bool>(plan.Property);
                     return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.BoolFalse && wt != OmniBufWireType.BoolTrue)
@@ -2111,7 +3342,7 @@ public static class OmniBufSerializer
 
             case ScalarKind.Byte:
                 {
-                    Action<object, byte> set = CompileTypedSetter<byte>(plan.Property);
+                    Action<object, byte> set = CompileScalarFromSetter<byte>(plan.Property);
                     return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
                     {
                         if (wt != expectedWt)
@@ -2120,20 +3351,15 @@ public static class OmniBufSerializer
                             return;
                         }
 
-                        ulong v = OmniBufDecoder.ReadVarint(data, ref pos);
-                        if (v > byte.MaxValue)
-                        {
-                            throw new OmniBufException($"omnibuf: uint8 overflow ({v})");
-                        }
-
+                        byte b = (byte)ReadUnderlyingScalarPayload(data, ref pos, ScalarKind.Byte, expectedWt);
                         markedSeen = true;
-                        set(target, (byte)v);
+                        set(target, b);
                     };
                 }
 
             case ScalarKind.UInt16:
                 {
-                    Action<object, ushort> set = CompileTypedSetter<ushort>(plan.Property);
+                    Action<object, ushort> set = CompileScalarFromSetter<ushort>(plan.Property);
                     return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
                     {
                         if (wt != expectedWt)
@@ -2142,25 +3368,20 @@ public static class OmniBufSerializer
                             return;
                         }
 
-                        ulong v = OmniBufDecoder.ReadVarint(data, ref pos);
-                        if (v > ushort.MaxValue)
-                        {
-                            throw new OmniBufException($"omnibuf: uint16 overflow ({v})");
-                        }
-
+                        ushort u = (ushort)ReadUnderlyingScalarPayload(data, ref pos, ScalarKind.UInt16, expectedWt);
                         markedSeen = true;
-                        set(target, (ushort)v);
+                        set(target, u);
                     };
                 }
 
             case ScalarKind.UInt32:
                 {
-                    Action<object, uint> set = CompileTypedSetter<uint>(plan.Property);
-                    if (expectedWt == OmniBufWireType.Fixed32)
+                    Action<object, uint> set = CompileScalarFromSetter<uint>(plan.Property);
+                    if (expectedWt is OmniBufWireType.Fixed32 or OmniBufWireType.Sfixed32)
                     {
                         return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
                         {
-                            if (wt != OmniBufWireType.Fixed32)
+                            if (wt != expectedWt)
                             {
                                 OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
                                 return;
@@ -2168,6 +3389,21 @@ public static class OmniBufSerializer
 
                             markedSeen = true;
                             set(target, OmniBufDecoder.ReadFixed32(data, ref pos));
+                        };
+                    }
+
+                    if (expectedWt == OmniBufWireType.Sint)
+                    {
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        {
+                            if (wt != OmniBufWireType.Sint)
+                            {
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                return;
+                            }
+
+                            markedSeen = true;
+                            set(target, unchecked((uint)OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos))));
                         };
                     }
 
@@ -2186,12 +3422,12 @@ public static class OmniBufSerializer
 
             case ScalarKind.UInt64:
                 {
-                    Action<object, ulong> set = CompileTypedSetter<ulong>(plan.Property);
-                    if (expectedWt == OmniBufWireType.Fixed64)
+                    Action<object, ulong> set = CompileScalarFromSetter<ulong>(plan.Property);
+                    if (expectedWt is OmniBufWireType.Fixed64 or OmniBufWireType.Sfixed64)
                     {
                         return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
                         {
-                            if (wt != OmniBufWireType.Fixed64)
+                            if (wt != expectedWt)
                             {
                                 OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
                                 return;
@@ -2199,6 +3435,21 @@ public static class OmniBufSerializer
 
                             markedSeen = true;
                             set(target, OmniBufDecoder.ReadFixed64(data, ref pos));
+                        };
+                    }
+
+                    if (expectedWt == OmniBufWireType.Sint)
+                    {
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        {
+                            if (wt != OmniBufWireType.Sint)
+                            {
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                return;
+                            }
+
+                            markedSeen = true;
+                            set(target, unchecked((ulong)OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos))));
                         };
                     }
 
@@ -2217,7 +3468,7 @@ public static class OmniBufSerializer
 
             case ScalarKind.SByte:
                 {
-                    Action<object, sbyte> set = CompileTypedSetter<sbyte>(plan.Property);
+                    Action<object, sbyte> set = CompileScalarFromSetter<sbyte>(plan.Property);
                     return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
                     {
                         if (wt != expectedWt)
@@ -2226,20 +3477,15 @@ public static class OmniBufSerializer
                             return;
                         }
 
-                        long v = OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos));
-                        if (v < sbyte.MinValue || v > sbyte.MaxValue)
-                        {
-                            throw new OmniBufException($"omnibuf: int8 overflow ({v})");
-                        }
-
+                        sbyte s = (sbyte)ReadUnderlyingScalarPayload(data, ref pos, ScalarKind.SByte, expectedWt);
                         markedSeen = true;
-                        set(target, (sbyte)v);
+                        set(target, s);
                     };
                 }
 
             case ScalarKind.Int16:
                 {
-                    Action<object, short> set = CompileTypedSetter<short>(plan.Property);
+                    Action<object, short> set = CompileScalarFromSetter<short>(plan.Property);
                     return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
                     {
                         if (wt != expectedWt)
@@ -2248,32 +3494,42 @@ public static class OmniBufSerializer
                             return;
                         }
 
-                        long v = OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos));
-                        if (v < short.MinValue || v > short.MaxValue)
-                        {
-                            throw new OmniBufException($"omnibuf: int16 overflow ({v})");
-                        }
-
+                        short s = (short)ReadUnderlyingScalarPayload(data, ref pos, ScalarKind.Int16, expectedWt);
                         markedSeen = true;
-                        set(target, (short)v);
+                        set(target, s);
                     };
                 }
 
             case ScalarKind.Int32:
                 {
-                    Action<object, int> set = CompileTypedSetter<int>(plan.Property);
-                    if (expectedWt == OmniBufWireType.Sfixed32)
+                    Action<object, int> set = CompileScalarFromSetter<int>(plan.Property);
+                    if (expectedWt is OmniBufWireType.Sfixed32 or OmniBufWireType.Fixed32)
                     {
                         return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
                         {
-                            if (wt != OmniBufWireType.Sfixed32)
+                            if (wt != expectedWt)
                             {
                                 OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
                                 return;
                             }
 
                             markedSeen = true;
-                            set(target, (int)OmniBufDecoder.ReadFixed32(data, ref pos));
+                            set(target, unchecked((int)OmniBufDecoder.ReadFixed32(data, ref pos)));
+                        };
+                    }
+
+                    if (expectedWt == OmniBufWireType.Uint)
+                    {
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        {
+                            if (wt != OmniBufWireType.Uint)
+                            {
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                return;
+                            }
+
+                            markedSeen = true;
+                            set(target, unchecked((int)(uint)OmniBufDecoder.ReadVarint(data, ref pos)));
                         };
                     }
 
@@ -2292,19 +3548,34 @@ public static class OmniBufSerializer
 
             case ScalarKind.Int64:
                 {
-                    Action<object, long> set = CompileTypedSetter<long>(plan.Property);
-                    if (expectedWt == OmniBufWireType.Sfixed64)
+                    Action<object, long> set = CompileScalarFromSetter<long>(plan.Property);
+                    if (expectedWt is OmniBufWireType.Sfixed64 or OmniBufWireType.Fixed64)
                     {
                         return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
                         {
-                            if (wt != OmniBufWireType.Sfixed64)
+                            if (wt != expectedWt)
                             {
                                 OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
                                 return;
                             }
 
                             markedSeen = true;
-                            set(target, (long)OmniBufDecoder.ReadFixed64(data, ref pos));
+                            set(target, unchecked((long)OmniBufDecoder.ReadFixed64(data, ref pos)));
+                        };
+                    }
+
+                    if (expectedWt == OmniBufWireType.Uint)
+                    {
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        {
+                            if (wt != OmniBufWireType.Uint)
+                            {
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                return;
+                            }
+
+                            markedSeen = true;
+                            set(target, unchecked((long)OmniBufDecoder.ReadVarint(data, ref pos)));
                         };
                     }
 
@@ -2501,6 +3772,55 @@ public static class OmniBufSerializer
                     };
                 }
 
+            case ScalarKind.Int32 when plan.ElemWireType == OmniBufWireType.Sint:
+                {
+                    Func<object, List<int>?> get = CompileTypedGetter<List<int>?>(plan.Property);
+                    Action<object, List<int>?> set = CompileTypedSetter<List<int>?>(plan.Property);
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, int maxDepth, ref bool markedSeen) =>
+                    {
+                        if (wt != OmniBufWireType.Array)
+                        {
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            return;
+                        }
+
+                        if (depth + 1 > maxDepth)
+                        {
+                            throw new OmniBufException($"omnibuf: WireArray depth {depth + 1} exceeds maximum {maxDepth}");
+                        }
+
+                        ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);
+                        if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out int count, out int p)
+                            || elemWt != OmniBufWireType.Sint)
+                        {
+                            throw new OmniBufException($"omnibuf: invalid WireArray header on field #{fnum}");
+                        }
+
+                        markedSeen = true;
+                        List<int>? list = get(target);
+                        if (list is null)
+                        {
+                            list = new List<int>(count);
+                            set(target, list);
+                        }
+                        else if (!alreadySeen)
+                        {
+                            list.Clear();
+                        }
+
+                        list.EnsureCapacity(list.Count + count);
+                        for (int i = 0; i < count; i++)
+                        {
+                            list.Add((int)OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(body, ref p)));
+                        }
+
+                        if (p != body.Length)
+                        {
+                            throw new OmniBufException("omnibuf: trailing bytes in WireArray");
+                        }
+                    };
+                }
+
             default:
                 return null;
         }
@@ -2605,18 +3925,24 @@ public static class OmniBufSerializer
 
         switch (plan.Category)
         {
+            case FieldCategory.NullableScalar:
+                {
+                    Action<object, object?> set = plan.Setter;
+                    return target => set(target, null);
+                }
+
             case FieldCategory.Scalar:
                 return plan.Scalar switch
                 {
-                    ScalarKind.Bool => BuildTypedScalarResetter(plan.Property, false),
-                    ScalarKind.Byte => BuildTypedScalarResetter<byte>(plan.Property, 0),
-                    ScalarKind.UInt16 => BuildTypedScalarResetter<ushort>(plan.Property, 0),
-                    ScalarKind.UInt32 => BuildTypedScalarResetter(plan.Property, 0u),
-                    ScalarKind.UInt64 => BuildTypedScalarResetter(plan.Property, 0UL),
-                    ScalarKind.SByte => BuildTypedScalarResetter<sbyte>(plan.Property, 0),
-                    ScalarKind.Int16 => BuildTypedScalarResetter<short>(plan.Property, 0),
-                    ScalarKind.Int32 => BuildTypedScalarResetter(plan.Property, 0),
-                    ScalarKind.Int64 => BuildTypedScalarResetter(plan.Property, 0L),
+                    ScalarKind.Bool => BuildScalarFromResetter(plan.Property, false),
+                    ScalarKind.Byte => BuildScalarFromResetter<byte>(plan.Property, 0),
+                    ScalarKind.UInt16 => BuildScalarFromResetter<ushort>(plan.Property, 0),
+                    ScalarKind.UInt32 => BuildScalarFromResetter(plan.Property, 0u),
+                    ScalarKind.UInt64 => BuildScalarFromResetter(plan.Property, 0UL),
+                    ScalarKind.SByte => BuildScalarFromResetter<sbyte>(plan.Property, 0),
+                    ScalarKind.Int16 => BuildScalarFromResetter<short>(plan.Property, 0),
+                    ScalarKind.Int32 => BuildScalarFromResetter(plan.Property, 0),
+                    ScalarKind.Int64 => BuildScalarFromResetter(plan.Property, 0L),
                     ScalarKind.Float32 => BuildTypedScalarResetter(plan.Property, 0f),
                     ScalarKind.Float64 => BuildTypedScalarResetter(plan.Property, 0d),
                     ScalarKind.String => BuildTypedScalarResetter<string?>(plan.Property, string.Empty),
@@ -2624,7 +3950,7 @@ public static class OmniBufSerializer
                     _ => null,
                 };
 
-            case FieldCategory.SubMsg when !plan.PropertyType.IsValueType:
+            case FieldCategory.SubMsg when !plan.PropertyType.IsValueType || plan.IsNullableValueType:
                 {
                     Action<object, object?> set = plan.Setter;
                     return target => set(target, null);
@@ -2674,6 +4000,12 @@ public static class OmniBufSerializer
     private static Action<object> BuildTypedScalarResetter<TProp>(PropertyInfo prop, TProp defaultVal)
     {
         Action<object, TProp> set = CompileTypedSetter<TProp>(prop);
+        return target => set(target, defaultVal);
+    }
+
+    private static Action<object> BuildScalarFromResetter<TScalar>(PropertyInfo prop, TScalar defaultVal)
+    {
+        Action<object, TScalar> set = CompileScalarFromSetter<TScalar>(prop);
         return target => set(target, defaultVal);
     }
 

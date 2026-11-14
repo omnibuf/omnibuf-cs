@@ -3,9 +3,19 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>OmniBuf.ProtocGen</RootNamespace>
     <AssemblyName>protoc-gen-omnibuf-cs</AssemblyName>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>protoc-gen-omnibuf-cs</ToolCommandName>
+    <PackageId>OmniBuf.ProtocGen</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>OmniBuf Contributors</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <Description>Protobuf compiler plugin generating OmniBuf C# codecs and Opaque header-hop views.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/sudorandom/omnibuf</RepositoryUrl>
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <PackageReference Include="Google.Protobuf" Version="3.35.1" />
   </ItemGroup>
 </Project>

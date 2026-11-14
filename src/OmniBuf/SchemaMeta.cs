@@ -17,12 +17,17 @@ public sealed class SchemaMeta
         ArgumentNullException.ThrowIfNull(meta);
 
         encoder.BeginField0SubMsg();
-        WriteBody(encoder, meta, deterministic);
+        WriteBody(encoder, meta, deterministic, depth: 1);
         encoder.EndSubMsg();
     }
 
-    private static void WriteBody(OmniBufEncoder encoder, SchemaMeta meta, bool deterministic)
+    private static void WriteBody(OmniBufEncoder encoder, SchemaMeta meta, bool deterministic, int depth)
     {
+        if (depth > OmniBufConstants.MaxNestingDepth)
+        {
+            throw new OmniBufException($"omnibuf: SchemaMeta nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+        }
+
         if (!string.IsNullOrEmpty(meta.TypeName))
         {
             encoder.WriteStringField(1, meta.TypeName);
@@ -30,6 +35,11 @@ public sealed class SchemaMeta
 
         if (meta.Fields.Count > 0)
         {
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+            {
+                throw new OmniBufException($"omnibuf: SchemaMeta fields map depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            }
+
             encoder.BeginMapField(2, OmniBufWireType.Uint, OmniBufWireType.String, meta.Fields.Count);
             if (deterministic && meta.Fields.Count > 1)
             {
@@ -65,6 +75,11 @@ public sealed class SchemaMeta
 
         if (meta.Children.Count > 0)
         {
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+            {
+                throw new OmniBufException($"omnibuf: SchemaMeta children map depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            }
+
             encoder.BeginMapField(3, OmniBufWireType.Uint, OmniBufWireType.SubMsg, meta.Children.Count);
             if (deterministic && meta.Children.Count > 1)
             {
@@ -79,7 +94,7 @@ public sealed class SchemaMeta
 
                     encoder.WriteUintValue(k);
                     encoder.BeginContainer();
-                    WriteBody(encoder, meta.Children[k], deterministic);
+                    WriteBody(encoder, meta.Children[k], deterministic, depth + 2);
                     encoder.EndContainer();
                 }
             }
@@ -94,7 +109,7 @@ public sealed class SchemaMeta
 
                     encoder.WriteUintValue(kv.Key);
                     encoder.BeginContainer();
-                    WriteBody(encoder, kv.Value, deterministic);
+                    WriteBody(encoder, kv.Value, deterministic, depth + 2);
                     encoder.EndContainer();
                 }
             }
@@ -242,6 +257,7 @@ public sealed class SchemaMeta
                             throw new OmniBufException("omnibuf: invalid SchemaMeta children map header");
                         }
 
+                        var mapChildren = new Dictionary<uint, SchemaMeta>(Math.Min(count, 256));
                         for (int i = 0; i < count; i++)
                         {
                             ulong k = OmniBufDecoder.ReadVarint(body, ref p);
@@ -251,15 +267,19 @@ public sealed class SchemaMeta
                             }
 
                             ReadOnlySpan<byte> childBytes = OmniBufDecoder.ReadLenSlice(body, ref p, 0);
-                            SchemaMeta childMeta = Decode(childBytes, depth + 1, maxDepth);
-                            uint key = (uint)k;
-                            meta.Children.TryGetValue(key, out SchemaMeta? existing);
-                            meta.Children[key] = Merge(existing, childMeta)!;
+                            SchemaMeta childMeta = Decode(childBytes, depth + 2, maxDepth);
+                            mapChildren[(uint)k] = childMeta;
                         }
 
                         if (p != body.Length)
                         {
                             throw new OmniBufException("omnibuf: trailing bytes in SchemaMeta children map");
+                        }
+
+                        foreach (KeyValuePair<uint, SchemaMeta> kv in mapChildren)
+                        {
+                            meta.Children.TryGetValue(kv.Key, out SchemaMeta? existing);
+                            meta.Children[kv.Key] = Merge(existing, kv.Value)!;
                         }
 
                         break;
