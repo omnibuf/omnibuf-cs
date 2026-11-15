@@ -1,8 +1,10 @@
 # OmniBuf for C# (.NET 8)
 
 [![CI](https://github.com/omnibuf/omnibuf-cs/actions/workflows/ci.yml/badge.svg)](https://github.com/omnibuf/omnibuf-cs/actions/workflows/ci.yml)
+[![Wire Spec: v0.1](https://img.shields.io/badge/spec-v0.1-111111?style=flat&labelColor=111111&color=FF4F18)](https://omnibuf.com/spec)
+[![Website](https://img.shields.io/badge/website-omnibuf.com-111111?style=flat&labelColor=111111&color=D4FF33)](https://omnibuf.com/cs)
 
-Idiomatic .NET 8 implementation of the OmniBuf wire format. Built around `ReadOnlySpan<byte>`, `Span<byte>`, `BitOperations.TrailingZeroCount`, and `BinaryPrimitives`.
+Idiomatic .NET 8 implementation of **[OmniBuf Wire Specification v0.1](https://omnibuf.com/spec)**. Built around `ReadOnlySpan<byte>`, `Span<byte>`, `BitOperations.TrailingZeroCount`, and `BinaryPrimitives`.
 
 OmniBuf pairs self-delimiting 16-type wire headers with branch-light TZCNT Prefix-Varints and single-pass forward container backpatching. Decoders hop across top-level and nested headers in O(1) per skipped field. Selective reads and binary field splices avoid materializing unrelated fields.
 
