@@ -138,3 +138,12 @@ just ci           # Full CI gate: fmt-check, buf lint, -warnaserror build, tests
 ## License
 
 MIT
+
+## Reflection and deployment
+
+The attribute serializer discovers properties and constructors through reflection
+and compiles expression delegates at runtime. Trimming and NativeAOT deployments
+must preserve the required metadata and validate their published application.
+Generated codecs provide explicit field access and avoid the attribute
+serializer's reflection requirements. Property accessors and constructors are
+trusted application code and can execute during serialization.
