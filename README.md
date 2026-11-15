@@ -137,7 +137,7 @@ just ci           # Full CI gate: fmt-check, buf lint, -warnaserror build, tests
 
 ## License
 
-MIT
+Released under the [Apache 2.0 License](./LICENSE).
 
 ## Reflection and deployment
 

@@ -5,7 +5,7 @@
     <PackageId>OmniBuf</PackageId>
     <Version>0.1.0</Version>
     <Authors>OmniBuf Contributors</Authors>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <Description>Self-delimiting, SIMD-friendly binary serialization format for .NET 8.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://omnibuf.com/cs</PackageProjectUrl>
