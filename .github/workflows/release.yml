@@ -1,0 +1,61 @@
+name: Release & Publish to NuGet.org
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build, Verify & Publish to NuGet.org
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install tools via mise
+        uses: jdx/mise-action@v5
+        with:
+          install: true
+
+      - name: Install conformance-runner
+        run: |
+          mise use -g go@1.27
+          GOBIN="$HOME/.local/bin" mise exec -- go install github.com/omnibuf/omnibuf-go/cmd/conformance-runner@71dad83aadd7dc65401d662521d34cfaeb1011ab
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run full CI suite
+        run: just ci
+
+      - name: Pack OmniBuf and OmniBuf.ProtocGen
+        run: |
+          RAW_TAG="${GITHUB_REF_NAME:-}"
+          VERSION="${RAW_TAG#v}"
+          VERSION_ARG=()
+          if [[ -n "$VERSION" && "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            VERSION_ARG=("-p:Version=${VERSION}")
+          fi
+          dotnet pack src/OmniBuf/OmniBuf.csproj -c Release -warnaserror -o ./nupkgs "${VERSION_ARG[@]}"
+          dotnet pack src/ProtocGenOmniBufCs/ProtocGenOmniBufCs.csproj -c Release -warnaserror -o ./nupkgs "${VERSION_ARG[@]}"
+          ls -la ./nupkgs
+
+      - name: Authenticate with NuGet.org via OIDC Trusted Publishing
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: sudorandom
+
+      - name: Publish packages to NuGet.org
+        run: |
+          dotnet nuget push "./nupkgs/*.nupkg" \
+            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate

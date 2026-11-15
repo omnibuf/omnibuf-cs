@@ -8,7 +8,10 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <Description>Self-delimiting, SIMD-friendly binary serialization format for .NET 8.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <RepositoryUrl>https://github.com/sudorandom/omnibuf</RepositoryUrl>
+    <PackageProjectUrl>https://omnibuf.com/cs</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/omnibuf/omnibuf-cs</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>omnibuf;protobuf;serialization;binary;wire-format</PackageTags>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
   </PropertyGroup>
 

@@ -11,7 +11,10 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <Description>Protobuf compiler plugin generating OmniBuf C# codecs and Opaque header-hop views.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <RepositoryUrl>https://github.com/sudorandom/omnibuf</RepositoryUrl>
+    <PackageProjectUrl>https://omnibuf.com/cs</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/omnibuf/omnibuf-cs</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>omnibuf;protobuf;protoc;codegen;buf</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
