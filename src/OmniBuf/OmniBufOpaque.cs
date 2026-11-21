@@ -29,7 +29,9 @@ public static class OmniBufOpaque
         uint targetField,
         ushort expectedMask,
         out ReadOnlySpan<byte> valueSlice,
-        out OmniBufWireType wireType)
+        out OmniBufWireType wireType,
+        int depth = 0,
+        int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         valueSlice = default;
         wireType = default;
@@ -49,7 +51,7 @@ public static class OmniBufOpaque
             var wt = (OmniBufWireType)(tag & 0x0Fu);
             if (fnum == 0)
             {
-                SchemaMeta.ValidateField0(packet, ref pos, wt, 0, OmniBufConstants.MaxNestingDepth);
+                SchemaMeta.ValidateField0(packet, ref pos, wt, depth, maxDepth);
                 continue;
             }
 
@@ -560,7 +562,7 @@ public static class OmniBufOpaque
             if (fnum == subMsgField && wt == OmniBufWireType.SubMsg)
             {
                 ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(packet, ref pos, 0);
-                if (LocateFieldMask(sub, targetField, 1 << (byte)OmniBufWireType.String, out ReadOnlySpan<byte> strField, out _))
+                if (LocateFieldMask(sub, targetField, 1 << (byte)OmniBufWireType.String, out ReadOnlySpan<byte> strField, out _, depth: 1, maxDepth: OmniBufConstants.MaxNestingDepth))
                 {
                     int sp = 0;
                     lastBytes = OmniBufDecoder.ReadLenSlice(strField, ref sp, 0);
@@ -875,7 +877,9 @@ public static class OmniBufOpaque
         HashSet<uint>? dirtyOverflow,
         TState state,
         Action<TState, OmniBufEncoder, uint> appendDirtyField,
-        bool stripField0 = false)
+        bool stripField0 = false,
+        int depth = 0,
+        int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         ArgumentNullException.ThrowIfNull(enc);
         ArgumentNullException.ThrowIfNull(appendDirtyField);
@@ -902,7 +906,7 @@ public static class OmniBufOpaque
             var wt = (OmniBufWireType)(tag & 0x0Fu);
             if (fnum == 0)
             {
-                SchemaMeta.ValidateField0(packet, ref pos, wt, 0, OmniBufConstants.MaxNestingDepth);
+                SchemaMeta.ValidateField0(packet, ref pos, wt, depth, maxDepth);
             }
             else if (!OmniBufDecoder.TryFastSkipValue(packet, ref pos, wt))
             {

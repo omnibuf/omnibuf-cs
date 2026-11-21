@@ -1816,6 +1816,11 @@ public static class OmniBufSerializer
                         return;
                     }
 
+                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                    }
+
                     enc.BeginSubMsgField(fnum);
                     plan.SubCodec!.EncodeObject(enc, sub, det, depth + 1);
                     enc.EndSubMsg();
@@ -1842,6 +1847,11 @@ public static class OmniBufSerializer
                     if (omitEmpty && IsContainerEmpty(container, plan.ContainerNode!))
                     {
                         return;
+                    }
+
+                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
 
                     enc.WriteTag(fnum, plan.WireType);
@@ -2355,8 +2365,26 @@ public static class OmniBufSerializer
                         throw new OmniBufException("omnibuf: invalid nested WireArray header");
                     }
 
-                    Array arr = Array.CreateInstance(elemNode.ClrType, count);
                     int nextDepth = elemNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
+                    if (count > 4096 && OmniBufConstants.FixedElementWidth(elemWt) == 0)
+                    {
+                        IList staged = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elemNode.ClrType), 4096)!;
+                        for (int i = 0; i < count; i++)
+                        {
+                            staged.Add(DecodeValueNode(body, ref p, elemNode, nextDepth, maxDepth));
+                        }
+
+                        if (p != body.Length)
+                        {
+                            throw new OmniBufException("omnibuf: trailing bytes in nested WireArray");
+                        }
+
+                        Array stagedArr = Array.CreateInstance(elemNode.ClrType, staged.Count);
+                        staged.CopyTo(stagedArr, 0);
+                        return stagedArr;
+                    }
+
+                    Array arr = Array.CreateInstance(elemNode.ClrType, count);
                     for (int i = 0; i < count; i++)
                     {
                         arr.SetValue(DecodeValueNode(body, ref p, elemNode, nextDepth, maxDepth), i);
@@ -3276,7 +3304,7 @@ public static class OmniBufSerializer
 
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
                     markedSeen = true;
-                    if (alreadySeen && existing is not null && (!plan.PropertyType.IsValueType || plan.IsNullableValueType) && plan.SubCodec is not null)
+                    if (alreadySeen && existing is not null && plan.SubCodec is not null)
                     {
                         return plan.SubCodec.DecodeMerge(sub, existing, depth + 1, maxDepth);
                     }

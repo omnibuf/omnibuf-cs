@@ -2819,7 +2819,7 @@ public sealed partial class OuterEnvelope
                 }
                 else
                 {
-                    OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+                    OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
                 }
             }
 
@@ -3203,40 +3203,15 @@ public sealed class OpaqueOuterEnvelope
         PropagateChildDirty();
         if (_dirty is { } d)
         {
-            bool anyDirty = false;
-            if (IsDirty(35u))
-            {
-                if (d.present_CInt) return 35u;
-                anyDirty = true;
-            }
-            if (IsDirty(36u))
-            {
-                if (d.present_CStr) return 36u;
-                anyDirty = true;
-            }
-            if (IsDirty(37u))
-            {
-                if (d.present_CBool) return 37u;
-                anyDirty = true;
-            }
-            if (IsDirty(38u))
-            {
-                if (d.present_CStatus) return 38u;
-                anyDirty = true;
-            }
-            if (IsDirty(39u))
-            {
-                if (d.present_CMsg) return 39u;
-                anyDirty = true;
-            }
-            if (IsDirty(40u))
-            {
-                if (d.present_CWrap) return 40u;
-                anyDirty = true;
-            }
-            if (anyDirty) return 0u;
+            if (IsDirty(35u) && d.present_CInt) return 35u;
+            if (IsDirty(36u) && d.present_CStr) return 36u;
+            if (IsDirty(37u) && d.present_CBool) return 37u;
+            if (IsDirty(38u) && d.present_CStatus) return 38u;
+            if (IsDirty(39u) && d.present_CMsg) return 39u;
+            if (IsDirty(40u) && d.present_CWrap) return 40u;
         }
-        return OmniBufOpaque.LocateActiveOneof(_raw, s_oneof_Choice_fields, s_oneof_Choice_masks);
+        uint rawActive = OmniBufOpaque.LocateActiveOneof(_raw, s_oneof_Choice_fields, s_oneof_Choice_masks);
+        return rawActive == 0u || IsDirty(rawActive) ? 0u : rawActive;
     }
 
     public void ClearChoice()
@@ -3261,20 +3236,11 @@ public sealed class OpaqueOuterEnvelope
         PropagateChildDirty();
         if (_dirty is { } d)
         {
-            bool anyDirty = false;
-            if (IsDirty(48u))
-            {
-                if (d.present_Clone_) return 48u;
-                anyDirty = true;
-            }
-            if (IsDirty(49u))
-            {
-                if (d.present_MergeFrom_) return 49u;
-                anyDirty = true;
-            }
-            if (anyDirty) return 0u;
+            if (IsDirty(48u) && d.present_Clone_) return 48u;
+            if (IsDirty(49u) && d.present_MergeFrom_) return 49u;
         }
-        return OmniBufOpaque.LocateActiveOneof(_raw, s_oneof_CollisionChoice_fields, s_oneof_CollisionChoice_masks);
+        uint rawActive = OmniBufOpaque.LocateActiveOneof(_raw, s_oneof_CollisionChoice_fields, s_oneof_CollisionChoice_masks);
+        return rawActive == 0u || IsDirty(rawActive) ? 0u : rawActive;
     }
 
     public void ClearCollisionChoice()
@@ -3784,8 +3750,10 @@ public sealed class OpaqueOuterEnvelope
     public bool HasCInt => GetActiveChoiceField() == 35u;
     public void ClearCInt()
     {
-        EnsureDirty().present_CInt = false;
-        MarkDirty(35u);
+        if (GetActiveChoiceField() == 35u)
+        {
+            ClearChoice();
+        }
     }
 
     public string CStr
@@ -3812,8 +3780,10 @@ public sealed class OpaqueOuterEnvelope
     public bool HasCStr => GetActiveChoiceField() == 36u;
     public void ClearCStr()
     {
-        EnsureDirty().present_CStr = false;
-        MarkDirty(36u);
+        if (GetActiveChoiceField() == 36u)
+        {
+            ClearChoice();
+        }
     }
 
     public bool CBool
@@ -3840,8 +3810,10 @@ public sealed class OpaqueOuterEnvelope
     public bool HasCBool => GetActiveChoiceField() == 37u;
     public void ClearCBool()
     {
-        EnsureDirty().present_CBool = false;
-        MarkDirty(37u);
+        if (GetActiveChoiceField() == 37u)
+        {
+            ClearChoice();
+        }
     }
 
     public global::Omnibuf.Conformance.AdvancedStatus CStatus
@@ -3868,8 +3840,10 @@ public sealed class OpaqueOuterEnvelope
     public bool HasCStatus => GetActiveChoiceField() == 38u;
     public void ClearCStatus()
     {
-        EnsureDirty().present_CStatus = false;
-        MarkDirty(38u);
+        if (GetActiveChoiceField() == 38u)
+        {
+            ClearChoice();
+        }
     }
 
     public global::Omnibuf.Conformance.OuterEnvelope.Types.OpaqueInnerPayload? CMsg
@@ -4007,8 +3981,10 @@ public sealed class OpaqueOuterEnvelope
     public bool HasClone_ => GetActiveCollisionChoiceField() == 48u;
     public void ClearClone_()
     {
-        EnsureDirty().present_Clone_ = false;
-        MarkDirty(48u);
+        if (GetActiveCollisionChoiceField() == 48u)
+        {
+            ClearCollisionChoice();
+        }
     }
 
     public int MergeFrom_
@@ -4027,8 +4003,10 @@ public sealed class OpaqueOuterEnvelope
     public bool HasMergeFrom_ => GetActiveCollisionChoiceField() == 49u;
     public void ClearMergeFrom_()
     {
-        EnsureDirty().present_MergeFrom_ = false;
-        MarkDirty(49u);
+        if (GetActiveCollisionChoiceField() == 49u)
+        {
+            ClearCollisionChoice();
+        }
     }
 
     public global::Omnibuf.Conformance.OuterEnvelope.Types.OpaqueInnerPayload? SingleInner
@@ -4156,7 +4134,7 @@ public sealed class OpaqueOuterEnvelope
         }
         else
         {
-            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
         }
     }
 
@@ -5082,6 +5060,10 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.f_OptInner is not null)
                 {
+                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                    }
                     encoder.BeginSubMsgField(34u);
                     d.f_OptInner!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
@@ -5124,6 +5106,10 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_CMsg && d.f_CMsg is not null)
                 {
+                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                    }
                     encoder.BeginSubMsgField(39u);
                     d.f_CMsg!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
@@ -5202,6 +5188,10 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.f_SingleInner is not null)
                 {
+                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                    }
                     encoder.BeginSubMsgField(50u);
                     d.f_SingleInner!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
@@ -5227,6 +5217,10 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.f_F90Sub is not null)
                 {
+                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                    }
                     encoder.BeginSubMsgField(90u);
                     d.f_F90Sub!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
@@ -6019,7 +6013,7 @@ public sealed class OpaqueProtoTreeNode
         }
         else
         {
-            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
         }
     }
 
@@ -6162,6 +6156,10 @@ public sealed class OpaqueProtoTreeNode
             {
                 if (d.f_Primary is not null)
                 {
+                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                    }
                     encoder.BeginSubMsgField(3u);
                     d.f_Primary!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
@@ -8214,7 +8212,7 @@ public sealed class OpaqueWideMessage
         }
         else
         {
-            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
         }
     }
 

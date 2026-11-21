@@ -100,7 +100,22 @@ public static class OmniBufProtobuf
             return;
         }
 
-        if (md.ToProto().ExtensionRange.Count > 0)
+        FileDescriptorProto fileProto = md.File.ToProto();
+        if (string.Equals(fileProto.Syntax, "editions", StringComparison.Ordinal))
+        {
+            throw new OmniBufException($"omnibuf: Protobuf editions syntax in {md.File.Name} is not supported");
+        }
+
+        foreach (FieldDescriptorProto ext in fileProto.Extension)
+        {
+            if (!IsDescriptorOptionsExtendee(ext.Extendee))
+            {
+                throw new OmniBufException($"omnibuf: Protobuf extensions in {md.File.Name} are not supported");
+            }
+        }
+
+        DescriptorProto msgProto = md.ToProto();
+        if (msgProto.Extension.Count > 0 || msgProto.ExtensionRange.Count > 0)
         {
             throw new OmniBufException($"omnibuf: Protobuf extensions on {md.FullName} are not supported");
         }
@@ -136,6 +151,26 @@ public static class OmniBufProtobuf
             }
         }
     }
+
+    private static bool IsDescriptorOptionsExtendee(string extendee) =>
+        extendee is ".google.protobuf.FileOptions"
+            or ".google.protobuf.MessageOptions"
+            or ".google.protobuf.FieldOptions"
+            or ".google.protobuf.OneofOptions"
+            or ".google.protobuf.EnumOptions"
+            or ".google.protobuf.EnumValueOptions"
+            or ".google.protobuf.ServiceOptions"
+            or ".google.protobuf.MethodOptions"
+            or ".google.protobuf.ExtensionRangeOptions"
+            or "google.protobuf.FileOptions"
+            or "google.protobuf.MessageOptions"
+            or "google.protobuf.FieldOptions"
+            or "google.protobuf.OneofOptions"
+            or "google.protobuf.EnumOptions"
+            or "google.protobuf.EnumValueOptions"
+            or "google.protobuf.ServiceOptions"
+            or "google.protobuf.MethodOptions"
+            or "google.protobuf.ExtensionRangeOptions";
 
     private static bool IsZeroDefaultValue(FieldDescriptor fd)
     {

@@ -317,9 +317,14 @@ public sealed class OmniBufEncoder
     {
         ReadOnlySpan<char> remChars = s.AsSpan(asciiWritten);
         long worstCaseNeeded = 9L + asciiWritten + (long)remChars.Length * 3;
+        byte[] prevBuf = _buf;
         if ((long)_pos + worstCaseNeeded <= Array.MaxLength)
         {
             EnsureSpace((int)worstCaseNeeded);
+            if (!ReferenceEquals(_buf, prevBuf) && asciiWritten > 0)
+            {
+                prevBuf.AsSpan(_pos + headerLen, asciiWritten).CopyTo(_buf.AsSpan(_pos + headerLen, asciiWritten));
+            }
         }
         else
         {
@@ -332,11 +337,12 @@ public sealed class OmniBufEncoder
             }
 
             EnsureSpace((int)exactTotal);
-            if (exactHeaderLen != headerLen && asciiWritten > 0)
+            if (asciiWritten > 0 && (!ReferenceEquals(_buf, prevBuf) || exactHeaderLen != headerLen))
             {
-                _buf.AsSpan(_pos + headerLen, asciiWritten).CopyTo(_buf.AsSpan(_pos + exactHeaderLen, asciiWritten));
-                headerLen = exactHeaderLen;
+                prevBuf.AsSpan(_pos + headerLen, asciiWritten).CopyTo(_buf.AsSpan(_pos + exactHeaderLen, asciiWritten));
             }
+
+            headerLen = exactHeaderLen;
         }
 
         OperationStatus status = Utf8.FromUtf16(

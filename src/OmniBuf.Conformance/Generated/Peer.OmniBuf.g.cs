@@ -413,7 +413,7 @@ public sealed class OpaqueLocation
         }
         else
         {
-            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
         }
     }
 
@@ -946,7 +946,7 @@ public sealed class OpaqueNeighbor
         }
         else
         {
-            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
         }
     }
 
@@ -1915,7 +1915,7 @@ public sealed class OpaquePeerUpdate
         }
         else
         {
-            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
         }
     }
 
@@ -2116,6 +2116,10 @@ public sealed class OpaquePeerUpdate
             {
                 if (d.f_Location is not null)
                 {
+                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                    }
                     encoder.BeginSubMsgField(9u);
                     d.f_Location!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();

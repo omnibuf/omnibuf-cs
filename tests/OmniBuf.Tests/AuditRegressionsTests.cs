@@ -247,6 +247,28 @@ public sealed class AuditRegressionsTests
         public List<DepthChainNode?> Children { get; set; } = new();
     }
 
+    // --- Audit 2026-11 regression models ---
+    [OmniBufMessage(TypeName = "InnerMutableStruct")]
+    private struct InnerMutableStruct
+    {
+        [OmniBufField(1)]
+        public uint A { get; set; }
+
+        [OmniBufField(2)]
+        public string B { get; set; }
+    }
+
+    [OmniBufMessage(TypeName = "OuterWithStructRecord")]
+    private sealed record OuterWithStructRecord(
+        [property: OmniBufField(1)] InnerMutableStruct Inner);
+
+    [OmniBufMessage(TypeName = "NestedStringArrayModel")]
+    private sealed class NestedStringArrayModel
+    {
+        [OmniBufField(1)]
+        public string[][] Matrix { get; set; } = Array.Empty<string[]>();
+    }
+
     [Fact]
     public void CS1_InPlaceUnmarshalIntoPositionalRecord_ThrowsOmniBufExceptionInsteadOfNullReferenceException()
     {
@@ -493,6 +515,185 @@ public sealed class AuditRegressionsTests
         }
 
         Assert.Throws<OmniBufException>(() => OmniBufSerializer.Marshal(root));
+    }
+
+    [Fact]
+    public void Audit1_WriteNonAsciiStringTail_PreservesAsciiPrefixOnBufferGrow()
+    {
+        // Initial capacity 32; write 16 bytes so remaining space is 16.
+        // String has 10 ASCII chars + 3 3-byte UTF-8 chars (13 chars total).
+        // minNeeded = 1 + 13 = 14 <= 16 (no grow before Ascii.FromUtf16).
+        // worstCaseNeeded = 9 + 10 + 9 = 28 > 16 (forces grow in WriteNonAsciiStringTail).
+        var enc = new OmniBufEncoder(32);
+        enc.WriteFixed64Value(0x0102030405060708UL);
+        enc.WriteFixed64Value(0x1112131415161718UL);
+        const string expected = "abcdefghij\u20AC\u20AC\u20AC";
+        enc.WriteStringValue(expected);
+
+        byte[] buf = enc.ToArray();
+        int pos = 16;
+        string actual = OmniBufDecoder.ReadString(buf, ref pos);
+        Assert.Equal(expected, actual);
+        Assert.Equal(buf.Length, pos);
+    }
+
+    [Fact]
+    public void Audit2_NonNullableStructSubMsg_MergesAcrossConcatenatedOccurrences()
+    {
+        var enc = new OmniBufEncoder(64);
+        enc.BeginSubMsgField(1u);
+        enc.WriteUintField(1u, 42UL);
+        enc.EndSubMsg();
+        enc.BeginSubMsgField(1u);
+        enc.WriteStringField(2u, "merged");
+        enc.EndSubMsg();
+
+        OuterWithStructRecord parsed = OmniBufSerializer.Unmarshal<OuterWithStructRecord>(enc.ToArray());
+        Assert.Equal(42u, parsed.Inner.A);
+        Assert.Equal("merged", parsed.Inner.B);
+    }
+
+    [Fact]
+    public void Audit3_OpaqueOneof_ClearInactiveMemberDoesNotDesyncActiveSibling()
+    {
+        var orig = new OuterEnvelope { CInt = 99 };
+        byte[] wire = orig.MarshalOmniBuf();
+
+        var opaque = new OpaqueOuterEnvelope(wire);
+        Assert.True(opaque.HasCInt);
+        Assert.Equal(99, opaque.CInt);
+
+        opaque.ClearCStr();
+        Assert.True(opaque.HasCInt);
+        Assert.Equal(99, opaque.CInt);
+        Assert.False(opaque.HasCStr);
+
+        OuterEnvelope roundTripped = OuterEnvelope.ParseOmniBuf(opaque.MarshalOmniBuf());
+        Assert.Equal(OuterEnvelope.ChoiceOneofCase.CInt, roundTripped.ChoiceCase);
+        Assert.Equal(99, roundTripped.CInt);
+
+        opaque.ClearCInt();
+        Assert.False(opaque.HasCInt);
+        Assert.False(opaque.HasCStr);
+        OuterEnvelope cleared = OuterEnvelope.ParseOmniBuf(opaque.MarshalOmniBuf());
+        Assert.Equal(OuterEnvelope.ChoiceOneofCase.None, cleared.ChoiceCase);
+    }
+
+    [Fact]
+    public void Audit4_WrappersReadElemAndOpaqueHelpers_EnforceMaxNestingDepth()
+    {
+        // Build a wrapper SubMsg payload containing an unknown SubMsg nested 31 levels deep.
+        // At depth 2 (element inside WireArray/WireMap), depth 2 + 31 = 33 > 32 must throw.
+        byte[] nested31 = Array.Empty<byte>();
+        for (int i = 0; i < 31; i++)
+        {
+            var e = new OmniBufEncoder(nested31.Length + 8);
+            e.BeginSubMsgField(99u);
+            e.WriteRawBytes(nested31);
+            e.EndSubMsg();
+            nested31 = e.ToArray();
+        }
+
+        var elemEnc = new OmniBufEncoder(nested31.Length + 8);
+        elemEnc.WriteBytesValue(nested31);
+        byte[] elemBytes = elemEnc.ToArray();
+
+        Assert.Throws<OmniBufException>(() =>
+        {
+            int p = 0;
+            OmniBufWrappers.ReadElemInt32(elemBytes, ref p);
+        });
+
+        // Build a packet with Field #0 SchemaMeta nested 32 levels deep (valid at depth 0, invalid at depth 1).
+        SchemaMeta meta = new() { TypeName = "leaf" };
+        for (int i = 0; i < 15; i++)
+        {
+            meta = new SchemaMeta
+            {
+                TypeName = $"n{i}",
+                Children = new Dictionary<uint, SchemaMeta> { [1u] = meta },
+            };
+        }
+
+        // Each SchemaMeta child is +2 depth (WireMap + WireSubMsg); 15 children = depth 31 at root (depth 0),
+        // so at depth 1 it reaches depth 32, and at depth 2 it reaches 33 > 32.
+        var pktEnc = new OmniBufEncoder(512);
+        SchemaMeta.WriteField0(pktEnc, meta, deterministic: false);
+        pktEnc.WriteStringField(2u, "ok");
+        byte[] pkt = pktEnc.ToArray();
+
+        Assert.Throws<OmniBufException>(() => OmniBufOpaque.LocateFieldMask(pkt, 2u, 0xFFFF, out _, out _, depth: 2));
+        Assert.Throws<OmniBufException>(() =>
+        {
+            var outEnc = new OmniBufEncoder(64);
+            OmniBufOpaque.SpliceFieldsTo(outEnc, pkt, 1UL << 3, null, 0, static (_, _, _) => { }, depth: 2);
+        });
+    }
+
+    [Fact]
+    public void Audit5_NestedVariableWidthArray_StagesWithoutUnboundedPreAllocation()
+    {
+        var enc = new OmniBufEncoder(32);
+        enc.BeginArrayField(1u, OmniBufWireType.Array, 1);
+        enc.BeginArrayElement(OmniBufWireType.String, 100_000_000);
+        enc.WriteStringValue("only-one");
+        enc.EndArray();
+        enc.EndArray();
+        byte[] malformed = enc.ToArray();
+
+        Assert.Throws<OmniBufException>(() => OmniBufSerializer.Unmarshal<NestedStringArrayModel>(malformed));
+    }
+
+    [Fact]
+    public void Audit6_EditionsAndTopLevelExtensionsRejected_AndDepthLimitLeavesNoUnclosedScope()
+    {
+        var editionsFile = new FileDescriptorProto
+        {
+            Name = "editions_test.proto",
+            Package = "omnibuf.editions",
+            Syntax = "editions",
+        };
+        editionsFile.MessageType.Add(new DescriptorProto { Name = "EditionsMsg" });
+
+        (string? edErr, _) = OmniBuf.ProtocGen.Program.GenerateCode(
+            new[] { editionsFile.Name },
+            new[] { editionsFile });
+        Assert.NotNull(edErr);
+        Assert.Contains("editions", edErr, StringComparison.OrdinalIgnoreCase);
+
+        var extFile = new FileDescriptorProto
+        {
+            Name = "top_ext_test.proto",
+            Package = "omnibuf.ext",
+            Syntax = "proto2",
+        };
+        var baseMsg = new DescriptorProto { Name = "BaseMsg" };
+        extFile.MessageType.Add(baseMsg);
+        extFile.Extension.Add(new FieldDescriptorProto
+        {
+            Name = "extra",
+            Number = 100,
+            Label = FieldDescriptorProto.Types.Label.Optional,
+            Type = FieldDescriptorProto.Types.Type.Uint32,
+            Extendee = ".omnibuf.ext.BaseMsg",
+        });
+
+        (string? extErr, _) = OmniBuf.ProtocGen.Program.GenerateCode(
+            new[] { extFile.Name },
+            new[] { extFile });
+        Assert.NotNull(extErr);
+        Assert.Contains("extension", extErr, StringComparison.OrdinalIgnoreCase);
+
+        // Depth limit throws before BeginSubMsgField at depth 32, so ContainerDepth never exceeds MaxNestingDepth.
+        DepthChainNode root = new();
+        for (int i = 0; i < 33; i++)
+        {
+            root = new DepthChainNode { Next = root };
+        }
+
+        var callerEnc = new OmniBufEncoder(64);
+        Assert.Throws<OmniBufException>(() => OmniBufSerializer.Marshal(callerEnc, root));
+        Assert.Equal(OmniBufConstants.MaxNestingDepth, callerEnc.ContainerDepth);
     }
 
     private static ProtoTreeNode BuildProtoTreeChain(int edges)
