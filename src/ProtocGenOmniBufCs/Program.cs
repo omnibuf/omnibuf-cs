@@ -9,7 +9,7 @@ namespace OmniBuf.ProtocGen;
 public static class Program
 {
     private const ulong FeatureProto3Optional = 1UL;
-    private const int MaxFieldNumber = 16_777_215;
+    private const int MaxFieldNumber = 536_870_911;
 
     private static readonly HashSet<string> ReservedMemberNames = new(StringComparer.Ordinal)
     {
@@ -85,6 +85,7 @@ public static class Program
         var generatedFiles = new List<(string Name, string Content)>();
         var targetSet = new HashSet<string>(filesToGenerate, StringComparer.Ordinal);
         var validatedMessages = new HashSet<string>(StringComparer.Ordinal);
+        var usedOutputNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (FileDescriptorProto file in protoFiles)
         {
@@ -100,7 +101,7 @@ public static class Program
             }
 
             string fileContent = GenerateFile(file, symbolTable);
-            string outputName = ComputeOutputFileName(file.Name);
+            string outputName = ComputeOutputFileName(file.Name, usedOutputNames);
             generatedFiles.Add((outputName, fileContent));
         }
 
@@ -175,6 +176,7 @@ public static class Program
         public required string ProtoFullName { get; init; }
         public required string CSharpFullName { get; init; }
         public required string CSharpOpaqueFullName { get; init; }
+        public required string CSharpSpanViewFullName { get; init; }
         public required string SimpleName { get; init; }
         public required bool IsProto2 { get; init; }
         public DescriptorProto? Message { get; init; }
@@ -203,6 +205,7 @@ public static class Program
                     ProtoFullName = protoName,
                     CSharpFullName = csPrefix + en.Name,
                     CSharpOpaqueFullName = csPrefix + en.Name,
+                    CSharpSpanViewFullName = csPrefix + en.Name,
                     SimpleName = en.Name,
                     IsProto2 = isProto2,
                     Enum = en,
@@ -229,12 +232,14 @@ public static class Program
         string protoName = $"{protoParent}.{msg.Name}";
         string csName = isNested ? $"{csParent}Types.{msg.Name}" : $"{csParent}{msg.Name}";
         string csOpaqueName = isNested ? $"{csParent}Types.Opaque{msg.Name}" : $"{csParent}Opaque{msg.Name}";
+        string csSpanViewName = isNested ? $"{csParent}Types.{msg.Name}SpanView" : $"{csParent}{msg.Name}SpanView";
 
         table[protoName] = new TypeSymbol
         {
             ProtoFullName = protoName,
             CSharpFullName = csName,
             CSharpOpaqueFullName = csOpaqueName,
+            CSharpSpanViewFullName = csSpanViewName,
             SimpleName = msg.Name,
             IsProto2 = isProto2,
             Message = msg,
@@ -248,6 +253,7 @@ public static class Program
                 ProtoFullName = enProto,
                 CSharpFullName = $"{csName}.Types.{en.Name}",
                 CSharpOpaqueFullName = $"{csName}.Types.{en.Name}",
+                CSharpSpanViewFullName = $"{csName}.Types.{en.Name}",
                 SimpleName = en.Name,
                 IsProto2 = isProto2,
                 Enum = en,
@@ -265,11 +271,6 @@ public static class Program
         Dictionary<string, TypeSymbol> symbols,
         HashSet<string> validatedMessages)
     {
-        if (file.Extension.Count > 0)
-        {
-            return $"omnibuf: Protobuf extensions in {file.Name} are not supported";
-        }
-
         string protoPrefix = string.IsNullOrEmpty(file.Package) ? string.Empty : "." + file.Package;
         foreach (DescriptorProto msg in file.MessageType)
         {
@@ -384,11 +385,29 @@ public static class Program
         }
     }
 
-    private static string ComputeOutputFileName(string protoFileName)
+    private static string ComputeOutputFileName(string protoFileName, HashSet<string> usedOutputNames)
     {
         string baseName = Path.GetFileNameWithoutExtension(protoFileName);
         string pascal = ToPascalCase(baseName);
-        return $"{pascal}.OmniBuf.g.cs";
+        string candidate = $"{pascal}.OmniBuf.g.cs";
+        if (usedOutputNames.Add(candidate))
+        {
+            return candidate;
+        }
+
+        string dirPrefix = Path.GetDirectoryName(protoFileName)?.Replace('\\', '/') ?? string.Empty;
+        string qualified = string.IsNullOrEmpty(dirPrefix)
+            ? pascal
+            : ToPascalCase(dirPrefix.Replace('/', '_') + "_" + baseName);
+        candidate = $"{qualified}.OmniBuf.g.cs";
+        int suffix = 2;
+        while (!usedOutputNames.Add(candidate))
+        {
+            candidate = $"{qualified}_{suffix}.OmniBuf.g.cs";
+            suffix++;
+        }
+
+        return candidate;
     }
 
     private static string GetCSharpNamespace(FileDescriptorProto file)
@@ -490,6 +509,7 @@ public static class Program
         sb.AppendLine("#pragma warning disable CS1591, CS0612, CS3021, CS8981");
         sb.AppendLine();
         sb.AppendLine("using System;");
+        sb.AppendLine("using System.Buffers;");
         sb.AppendLine("using System.Collections.Generic;");
         sb.AppendLine("using Google.Protobuf;");
         sb.AppendLine("using OmniBuf;");
@@ -553,6 +573,7 @@ public static class Program
         sb.AppendLine();
 
         EmitOpaqueClass(sb, msgSym, msg, isProto2, orderedFields, symbols, indent);
+        EmitSpanViewStruct(sb, msgSym, msg, isProto2, orderedFields, symbols, indent);
     }
 
     private static void EmitSchemaMetaBuilders(
@@ -830,6 +851,101 @@ public static class Program
         sb.AppendLine($"{indent}    }}");
         sb.AppendLine($"{indent}}}");
         sb.AppendLine();
+        sb.AppendLine($"{indent}public void MarshalOmniBuf(IBufferWriter<byte> writer, MarshalOptions options = default)");
+        sb.AppendLine($"{indent}{{");
+        sb.AppendLine($"{indent}    ArgumentNullException.ThrowIfNull(writer);");
+        sb.AppendLine($"{indent}    OmniBufEncoder encoder = OmniBufEncoder.RentThreadLocal(out bool rented);");
+        sb.AppendLine($"{indent}    try");
+        sb.AppendLine($"{indent}    {{");
+        sb.AppendLine($"{indent}        MarshalOmniBuf(encoder, options);");
+        sb.AppendLine($"{indent}        encoder.CopyTo(writer);");
+        sb.AppendLine($"{indent}    }}");
+        sb.AppendLine($"{indent}    finally");
+        sb.AppendLine($"{indent}    {{");
+        sb.AppendLine($"{indent}        OmniBufEncoder.ReturnThreadLocal(encoder, rented);");
+        sb.AppendLine($"{indent}    }}");
+        sb.AppendLine($"{indent}}}");
+        sb.AppendLine();
+        sb.AppendLine($"{indent}internal int EstimateOmniBufMinSize(int depth = 0)");
+        sb.AppendLine($"{indent}{{");
+        sb.AppendLine($"{indent}    if (depth > 8) return 0;");
+        sb.AppendLine($"{indent}    int total = 0;");
+        foreach (FieldDescriptorProto f in fields)
+        {
+            string prop = GetPropertyName(f, msg.Name);
+            if (IsMapField(f, symbols, out _, out _))
+            {
+                continue;
+            }
+
+            if (f.Label == FieldDescriptorProto.Types.Label.Repeated)
+            {
+                if (f.Type == FieldDescriptorProto.Types.Type.String)
+                {
+                    sb.AppendLine($"{indent}    for (int i = 0; i < this.{prop}.Count; i++) total += 1 + (this.{prop}[i]?.Length ?? 0);");
+                }
+                else if (f.Type == FieldDescriptorProto.Types.Type.Bytes)
+                {
+                    sb.AppendLine($"{indent}    for (int i = 0; i < this.{prop}.Count; i++) total += 1 + this.{prop}[i].Length;");
+                }
+                else if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
+                {
+                    sb.AppendLine($"{indent}    for (int i = 0; i < this.{prop}.Count; i++) total += 2 + (this.{prop}[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0);");
+                }
+
+                continue;
+            }
+
+            if (IsRealOneof(f))
+            {
+                string oneofPascal = ToPascalCase(msg.OneofDecl[f.OneofIndex].Name);
+                if (f.Type == FieldDescriptorProto.Types.Type.String)
+                {
+                    sb.AppendLine($"{indent}    if (this.{oneofPascal}Case == {oneofPascal}OneofCase.{prop}) total += this.{prop}?.Length ?? 0;");
+                }
+                else if (f.Type == FieldDescriptorProto.Types.Type.Bytes)
+                {
+                    sb.AppendLine($"{indent}    if (this.{oneofPascal}Case == {oneofPascal}OneofCase.{prop}) total += this.{prop}.Length;");
+                }
+                else if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
+                {
+                    sb.AppendLine($"{indent}    if (this.{oneofPascal}Case == {oneofPascal}OneofCase.{prop} && this.{prop} is not null) total += 3 + this.{prop}.EstimateOmniBufMinSize(depth + 1);");
+                }
+
+                continue;
+            }
+
+            if (f.Type == FieldDescriptorProto.Types.Type.String)
+            {
+                if (HasExplicitScalarPresence(f, isProto2))
+                {
+                    sb.AppendLine($"{indent}    if (this.Has{prop}) total += this.{prop}?.Length ?? 0;");
+                }
+                else
+                {
+                    sb.AppendLine($"{indent}    total += this.{prop}?.Length ?? 0;");
+                }
+            }
+            else if (f.Type == FieldDescriptorProto.Types.Type.Bytes)
+            {
+                if (HasExplicitScalarPresence(f, isProto2))
+                {
+                    sb.AppendLine($"{indent}    if (this.Has{prop}) total += this.{prop}.Length;");
+                }
+                else
+                {
+                    sb.AppendLine($"{indent}    total += this.{prop}.Length;");
+                }
+            }
+            else if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
+            {
+                sb.AppendLine($"{indent}    if (this.{prop} is not null) total += 3 + this.{prop}.EstimateOmniBufMinSize(depth + 1);");
+            }
+        }
+
+        sb.AppendLine($"{indent}    return total;");
+        sb.AppendLine($"{indent}}}");
+        sb.AppendLine();
         sb.AppendLine($"{indent}public void MarshalOmniBuf(OmniBufEncoder encoder, MarshalOptions options = default)");
         sb.AppendLine($"{indent}{{");
         sb.AppendLine($"{indent}    if (options.SelfDescribing)");
@@ -876,7 +992,7 @@ public static class Program
                 sb.AppendLine($"{indent}            var keys_{fnum} = new List<{keyCs}>(this.{prop}.Keys);");
                 if (keyField.Type == FieldDescriptorProto.Types.Type.String)
                 {
-                    sb.AppendLine($"{indent}            keys_{fnum}.Sort(StringComparer.Ordinal);");
+                    sb.AppendLine($"{indent}            keys_{fnum}.Sort(Utf8OrdinalStringComparer.Instance);");
                 }
                 else
                 {
@@ -911,7 +1027,17 @@ public static class Program
                 sb.AppendLine($"{indent}    {{");
                 sb.AppendLine($"{indent}        throw new OmniBufException($\"omnibuf: WireArray encode depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
                 sb.AppendLine($"{indent}    }}");
-                sb.AppendLine($"{indent}    encoder.BeginArrayField({fnum}u, OmniBufWireType.{elemWt}, this.{prop}.Count);");
+                if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
+                {
+                    sb.AppendLine($"{indent}    int arrMin_{fnum} = 2;");
+                    sb.AppendLine($"{indent}    for (int i = 0; i < this.{prop}.Count; i++) arrMin_{fnum} += 2 + (this.{prop}[i]?.EstimateOmniBufMinSize(0) ?? 0);");
+                    sb.AppendLine($"{indent}    encoder.BeginArrayField({fnum}u, OmniBufWireType.{elemWt}, this.{prop}.Count, arrMin_{fnum});");
+                }
+                else
+                {
+                    sb.AppendLine($"{indent}    encoder.BeginArrayField({fnum}u, OmniBufWireType.{elemWt}, this.{prop}.Count);");
+                }
+
                 sb.AppendLine($"{indent}    for (int i = 0; i < this.{prop}.Count; i++)");
                 sb.AppendLine($"{indent}    {{");
                 if (f.Type == FieldDescriptorProto.Types.Type.Message)
@@ -920,9 +1046,9 @@ public static class Program
                     sb.AppendLine($"{indent}        {{");
                     sb.AppendLine($"{indent}            throw new OmniBufException($\"omnibuf: encode nesting depth {{depth + 2}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
                     sb.AppendLine($"{indent}        }}");
-                    sb.AppendLine($"{indent}        encoder.BeginContainer();");
                     if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? rWrap))
                     {
+                        sb.AppendLine($"{indent}        encoder.BeginContainer();");
                         if (rWrap.IsValueType)
                         {
                             sb.AppendLine($"{indent}        if (this.{prop}[i].HasValue)");
@@ -940,6 +1066,7 @@ public static class Program
                     }
                     else
                     {
+                        sb.AppendLine($"{indent}        encoder.BeginContainer(this.{prop}[i]?.EstimateOmniBufMinSize(0) ?? 0);");
                         sb.AppendLine($"{indent}        this.{prop}[i]?.EncodeOmniBufBody(encoder, deterministic, depth + 2);");
                     }
 
@@ -1013,7 +1140,7 @@ public static class Program
                     sb.AppendLine($"{indent}        {{");
                     sb.AppendLine($"{indent}            throw new OmniBufException($\"omnibuf: encode nesting depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
                     sb.AppendLine($"{indent}        }}");
-                    sb.AppendLine($"{indent}        encoder.BeginSubMsgField({fnum}u);");
+                    sb.AppendLine($"{indent}        encoder.BeginSubMsgField({fnum}u, this.{prop}.EstimateOmniBufMinSize(0));");
                     sb.AppendLine($"{indent}        this.{prop}.EncodeOmniBufBody(encoder, deterministic, depth + 1);");
                     sb.AppendLine($"{indent}        encoder.EndSubMsg();");
                     sb.AppendLine($"{indent}    }}");
@@ -1464,24 +1591,54 @@ public static class Program
         string indent)
     {
         string opaqueName = $"Opaque{msg.Name}";
+        string spanViewName = $"{msg.Name}SpanView";
         List<(int Index, string PascalName, List<FieldDescriptorProto> Fields)> realOneofs = GetRealOneofs(msg);
+        int maxField = fields.Count == 0 ? 0 : fields.Max(f => f.Number);
+        int maxIndexedField = Math.Min(maxField, 64);
 
         sb.AppendLine($"{indent}public sealed class {opaqueName}");
         sb.AppendLine($"{indent}{{");
+        sb.AppendLine($"{indent}    private const int MaxIndexedField = {maxIndexedField};");
+        foreach ((_, string oneofPascal, List<FieldDescriptorProto> members) in realOneofs)
+        {
+            string fNums = string.Join(", ", members.Select(m => $"{(uint)m.Number}u"));
+            string fMasks = string.Join(", ", members.Select(OneofMemberWireMaskLiteral));
+            sb.AppendLine($"{indent}    private static readonly uint[] s_oneof_{oneofPascal}_fields = new uint[] {{ {fNums} }};");
+            sb.AppendLine($"{indent}    private static readonly ushort[] s_oneof_{oneofPascal}_masks = new ushort[] {{ {fMasks} }};");
+        }
+
+        if (fields.Count > 0)
+        {
+            sb.AppendLine($"{indent}    private sealed class DirtyState");
+            sb.AppendLine($"{indent}    {{");
+            sb.AppendLine($"{indent}        public HashSet<uint>? Overflow;");
+            foreach (FieldDescriptorProto f in fields)
+            {
+                string prop = GetPropertyName(f, msg.Name);
+                string fieldStorageType = OpaqueStorageType(f, symbols);
+                sb.AppendLine($"{indent}        public {fieldStorageType} f_{prop};");
+                if (HasExplicitScalarPresence(f, isProto2) || IsRealOneof(f))
+                {
+                    sb.AppendLine($"{indent}        public bool present_{prop};");
+                }
+            }
+
+            sb.AppendLine($"{indent}    }}");
+            sb.AppendLine();
+        }
+
         sb.AppendLine($"{indent}    private readonly byte[] _raw;");
         sb.AppendLine($"{indent}    private ulong _dirtyMaskLow;");
-        sb.AppendLine($"{indent}    private HashSet<uint>? _dirtyOverflow;");
+        if (fields.Count > 0)
+        {
+            sb.AppendLine($"{indent}    private DirtyState? _dirty;");
+            sb.AppendLine($"{indent}    private long[]? _fieldIndex;");
+            sb.AppendLine($"{indent}    private byte _readCount;");
+        }
 
         foreach (FieldDescriptorProto f in fields)
         {
             string prop = GetPropertyName(f, msg.Name);
-            string fieldStorageType = OpaqueStorageType(f, symbols);
-            sb.AppendLine($"{indent}    private {fieldStorageType} _dirty_{prop};");
-            if (HasExplicitScalarPresence(f, isProto2) || IsRealOneof(f))
-            {
-                sb.AppendLine($"{indent}    private bool _present_{prop};");
-            }
-
             if (IsOpaqueSubMsgField(f, symbols))
             {
                 sb.AppendLine($"{indent}    private bool _hasCached_{prop};");
@@ -1511,22 +1668,44 @@ public static class Program
         sb.AppendLine();
         sb.AppendLine($"{indent}    public ReadOnlySpan<byte> RawSpan => _raw;");
         sb.AppendLine();
+        sb.AppendLine($"{indent}    public {spanViewName} AsSpanView() => new(_raw);");
+        sb.AppendLine();
 
         sb.AppendLine($"{indent}    internal bool HasDirtyFields");
         sb.AppendLine($"{indent}    {{");
         sb.AppendLine($"{indent}        get");
         sb.AppendLine($"{indent}        {{");
         sb.AppendLine($"{indent}            PropagateChildDirty();");
-        sb.AppendLine($"{indent}            return _dirtyMaskLow != 0 || (_dirtyOverflow is not null && _dirtyOverflow.Count > 0);");
+        if (fields.Count > 0)
+        {
+            sb.AppendLine($"{indent}            return _dirtyMaskLow != 0 || (_dirty?.Overflow is {{ Count: > 0 }});");
+        }
+        else
+        {
+            sb.AppendLine($"{indent}            return _dirtyMaskLow != 0;");
+        }
+
         sb.AppendLine($"{indent}        }}");
         sb.AppendLine($"{indent}    }}");
         sb.AppendLine();
 
         if (fields.Count > 0)
         {
+            sb.AppendLine($"{indent}    private DirtyState EnsureDirty() => _dirty ??= new DirtyState();");
+            sb.AppendLine();
+            sb.AppendLine($"{indent}    private long[]? GetOrBuildIndex()");
+            sb.AppendLine($"{indent}    {{");
+            sb.AppendLine($"{indent}        long[]? idx = _fieldIndex;");
+            sb.AppendLine($"{indent}        if (idx is not null) return idx;");
+            sb.AppendLine($"{indent}        if (_readCount == 0) {{ _readCount = 1; return null; }}");
+            sb.AppendLine($"{indent}        idx = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);");
+            sb.AppendLine($"{indent}        _fieldIndex = idx;");
+            sb.AppendLine($"{indent}        return idx;");
+            sb.AppendLine($"{indent}    }}");
+            sb.AppendLine();
             sb.AppendLine($"{indent}    private bool IsDirty(uint fieldNum) => fieldNum < 64");
             sb.AppendLine($"{indent}        ? (_dirtyMaskLow & (1UL << (int)fieldNum)) != 0");
-            sb.AppendLine($"{indent}        : (_dirtyOverflow is not null && _dirtyOverflow.Contains(fieldNum));");
+            sb.AppendLine($"{indent}        : (_dirty?.Overflow is not null && _dirty.Overflow.Contains(fieldNum));");
             sb.AppendLine();
             sb.AppendLine($"{indent}    private void MarkDirty(uint fieldNum)");
             sb.AppendLine($"{indent}    {{");
@@ -1536,7 +1715,7 @@ public static class Program
             sb.AppendLine($"{indent}        }}");
             sb.AppendLine($"{indent}        else");
             sb.AppendLine($"{indent}        {{");
-            sb.AppendLine($"{indent}            (_dirtyOverflow ??= new HashSet<uint>()).Add(fieldNum);");
+            sb.AppendLine($"{indent}            (EnsureDirty().Overflow ??= new HashSet<uint>()).Add(fieldNum);");
             sb.AppendLine($"{indent}        }}");
             sb.AppendLine($"{indent}    }}");
             sb.AppendLine();
@@ -1552,10 +1731,11 @@ public static class Program
             {
                 sb.AppendLine($"{indent}        if (!IsDirty({fnum}u) && _hasCached_{prop} && _cached_{prop} is not null && _cached_{prop}.HasDirtyFields)");
                 sb.AppendLine($"{indent}        {{");
-                sb.AppendLine($"{indent}            _dirty_{prop} = _cached_{prop};");
+                sb.AppendLine($"{indent}            DirtyState d = EnsureDirty();");
+                sb.AppendLine($"{indent}            d.f_{prop} = _cached_{prop};");
                 if (IsRealOneof(f))
                 {
-                    sb.AppendLine($"{indent}            _present_{prop} = true;");
+                    sb.AppendLine($"{indent}            d.present_{prop} = true;");
                     EmitClearOneofSiblings(sb, indent + "            ", msg, f);
                 }
 
@@ -1570,7 +1750,7 @@ public static class Program
                 sb.AppendLine($"{indent}            {{");
                 sb.AppendLine($"{indent}                if (_cached_{prop}[i].HasDirtyFields)");
                 sb.AppendLine($"{indent}                {{");
-                sb.AppendLine($"{indent}                    _dirty_{prop} = _cached_{prop};");
+                sb.AppendLine($"{indent}                    EnsureDirty().f_{prop} = _cached_{prop};");
                 sb.AppendLine($"{indent}                    MarkDirty({fnum}u);");
                 sb.AppendLine($"{indent}                    break;");
                 sb.AppendLine($"{indent}                }}");
@@ -1585,7 +1765,7 @@ public static class Program
                 sb.AppendLine($"{indent}            {{");
                 sb.AppendLine($"{indent}                if (kv.Value.HasDirtyFields)");
                 sb.AppendLine($"{indent}                {{");
-                sb.AppendLine($"{indent}                    _dirty_{prop} = _cached_{prop};");
+                sb.AppendLine($"{indent}                    EnsureDirty().f_{prop} = _cached_{prop};");
                 sb.AppendLine($"{indent}                    MarkDirty({fnum}u);");
                 sb.AppendLine($"{indent}                    break;");
                 sb.AppendLine($"{indent}                }}");
@@ -1599,12 +1779,35 @@ public static class Program
 
         foreach ((_, string oneofPascal, List<FieldDescriptorProto> members) in realOneofs)
         {
+            sb.AppendLine($"{indent}    private uint GetActive{oneofPascal}Field()");
+            sb.AppendLine($"{indent}    {{");
+            sb.AppendLine($"{indent}        PropagateChildDirty();");
+            sb.AppendLine($"{indent}        if (_dirty is {{ }} d)");
+            sb.AppendLine($"{indent}        {{");
+            sb.AppendLine($"{indent}            bool anyDirty = false;");
+            foreach (FieldDescriptorProto mf in members)
+            {
+                uint mfNum = (uint)mf.Number;
+                string mProp = GetPropertyName(mf, msg.Name);
+                sb.AppendLine($"{indent}            if (IsDirty({mfNum}u))");
+                sb.AppendLine($"{indent}            {{");
+                sb.AppendLine($"{indent}                if (d.present_{mProp}) return {mfNum}u;");
+                sb.AppendLine($"{indent}                anyDirty = true;");
+                sb.AppendLine($"{indent}            }}");
+            }
+
+            sb.AppendLine($"{indent}            if (anyDirty) return 0u;");
+            sb.AppendLine($"{indent}        }}");
+            sb.AppendLine($"{indent}        return OmniBufOpaque.LocateActiveOneof(_raw, s_oneof_{oneofPascal}_fields, s_oneof_{oneofPascal}_masks);");
+            sb.AppendLine($"{indent}    }}");
+            sb.AppendLine();
             sb.AppendLine($"{indent}    public void Clear{oneofPascal}()");
             sb.AppendLine($"{indent}    {{");
+            sb.AppendLine($"{indent}        DirtyState d = EnsureDirty();");
             foreach (FieldDescriptorProto mf in members)
             {
                 string mProp = GetPropertyName(mf, msg.Name);
-                sb.AppendLine($"{indent}        _present_{mProp} = false;");
+                sb.AppendLine($"{indent}        d.present_{mProp} = false;");
                 sb.AppendLine($"{indent}        MarkDirty({(uint)mf.Number}u);");
             }
 
@@ -1620,7 +1823,11 @@ public static class Program
         sb.AppendLine($"{indent}    public void ResetDirty()");
         sb.AppendLine($"{indent}    {{");
         sb.AppendLine($"{indent}        _dirtyMaskLow = 0;");
-        sb.AppendLine($"{indent}        _dirtyOverflow?.Clear();");
+        if (fields.Count > 0)
+        {
+            sb.AppendLine($"{indent}        _dirty = null;");
+        }
+
         foreach (FieldDescriptorProto f in fields)
         {
             string prop = GetPropertyName(f, msg.Name);
@@ -1638,6 +1845,42 @@ public static class Program
         sb.AppendLine($"{indent}    }}");
         sb.AppendLine();
 
+        string dirtyOverflowExpr = fields.Count > 0 ? "_dirty?.Overflow" : "null";
+
+        sb.AppendLine($"{indent}    internal void SpliceBodyInto(OmniBufEncoder encoder, bool deterministic, bool validate, int depth)");
+        sb.AppendLine($"{indent}    {{");
+        sb.AppendLine($"{indent}        if (depth > OmniBufConstants.MaxNestingDepth)");
+        sb.AppendLine($"{indent}        {{");
+        sb.AppendLine($"{indent}            throw new OmniBufException($\"omnibuf: nesting depth {{depth}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
+        sb.AppendLine($"{indent}        }}");
+        sb.AppendLine($"{indent}        PropagateChildDirty();");
+        sb.AppendLine($"{indent}        if (validate)");
+        sb.AppendLine($"{indent}        {{");
+        sb.AppendLine($"{indent}            OmniBufOpaque.SpliceFieldsValidatedTo(encoder, _raw, _dirtyMaskLow, {dirtyOverflowExpr}, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);");
+        sb.AppendLine($"{indent}        }}");
+        sb.AppendLine($"{indent}        else");
+        sb.AppendLine($"{indent}        {{");
+        sb.AppendLine($"{indent}            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, {dirtyOverflowExpr}, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);");
+        sb.AppendLine($"{indent}        }}");
+        sb.AppendLine($"{indent}    }}");
+        sb.AppendLine();
+
+        sb.AppendLine($"{indent}    public void MarshalOmniBuf(IBufferWriter<byte> writer, MarshalOptions options = default)");
+        sb.AppendLine($"{indent}    {{");
+        sb.AppendLine($"{indent}        ArgumentNullException.ThrowIfNull(writer);");
+        sb.AppendLine($"{indent}        OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);");
+        sb.AppendLine($"{indent}        try");
+        sb.AppendLine($"{indent}        {{");
+        sb.AppendLine($"{indent}            MarshalOmniBuf(enc, options);");
+        sb.AppendLine($"{indent}            enc.CopyTo(writer);");
+        sb.AppendLine($"{indent}        }}");
+        sb.AppendLine($"{indent}        finally");
+        sb.AppendLine($"{indent}        {{");
+        sb.AppendLine($"{indent}            OmniBufEncoder.ReturnThreadLocal(enc, rented);");
+        sb.AppendLine($"{indent}        }}");
+        sb.AppendLine($"{indent}    }}");
+        sb.AppendLine();
+
         sb.AppendLine($"{indent}    public void MarshalOmniBuf(OmniBufEncoder encoder, MarshalOptions options = default)");
         sb.AppendLine($"{indent}    {{");
         sb.AppendLine($"{indent}        PropagateChildDirty();");
@@ -1646,7 +1889,7 @@ public static class Program
         sb.AppendLine($"{indent}            SchemaMeta? meta = {msgSym.CSharpFullName}.BuildOmniBufSchemaMeta(1, null, out bool cyclic);");
         sb.AppendLine($"{indent}            if (cyclic)");
         sb.AppendLine($"{indent}            {{");
-        sb.AppendLine($"{indent}                byte[] body = OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false), stripField0: true);");
+        sb.AppendLine($"{indent}                byte[] body = OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, {dirtyOverflowExpr}, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0), stripField0: true);");
         sb.AppendLine($"{indent}                meta = {msgSym.CSharpFullName}.ParseOmniBuf(body).BuildOmniBufValueSchemaMeta(1, null);");
         sb.AppendLine($"{indent}                if (meta is not null)");
         sb.AppendLine($"{indent}                {{");
@@ -1660,7 +1903,7 @@ public static class Program
         sb.AppendLine($"{indent}                SchemaMeta.WriteField0(encoder, meta, options.Deterministic);");
         sb.AppendLine($"{indent}            }}");
         sb.AppendLine($"{indent}        }}");
-        sb.AppendLine($"{indent}        OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false), stripField0: options.SelfDescribing);");
+        sb.AppendLine($"{indent}        OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, {dirtyOverflowExpr}, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0), stripField0: options.SelfDescribing);");
         sb.AppendLine($"{indent}    }}");
         sb.AppendLine();
 
@@ -1669,9 +1912,9 @@ public static class Program
         sb.AppendLine($"{indent}        PropagateChildDirty();");
         sb.AppendLine($"{indent}        if (!options.SelfDescribing)");
         sb.AppendLine($"{indent}        {{");
-        sb.AppendLine($"{indent}            return (_dirtyMaskLow == 0 && (_dirtyOverflow is null || _dirtyOverflow.Count == 0))");
+        sb.AppendLine($"{indent}            return (_dirtyMaskLow == 0 && ({dirtyOverflowExpr} is null || {dirtyOverflowExpr}.Count == 0))");
         sb.AppendLine($"{indent}                ? (byte[])_raw.Clone()");
-        sb.AppendLine($"{indent}                : OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false));");
+        sb.AppendLine($"{indent}                : OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, {dirtyOverflowExpr}, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0));");
         sb.AppendLine($"{indent}        }}");
         sb.AppendLine($"{indent}        OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);");
         sb.AppendLine($"{indent}        try");
@@ -1689,17 +1932,20 @@ public static class Program
         sb.AppendLine($"{indent}    public byte[] MarshalValidated(MarshalOptions options = default)");
         sb.AppendLine($"{indent}    {{");
         sb.AppendLine($"{indent}        PropagateChildDirty();");
-        sb.AppendLine($"{indent}        if (!options.SelfDescribing)");
-        sb.AppendLine($"{indent}        {{");
-        sb.AppendLine($"{indent}            return OmniBufOpaque.SpliceFieldsValidated(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: true));");
-        sb.AppendLine($"{indent}        }}");
         sb.AppendLine($"{indent}        OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);");
         sb.AppendLine($"{indent}        try");
         sb.AppendLine($"{indent}        {{");
+        sb.AppendLine($"{indent}            if (!options.SelfDescribing)");
+        sb.AppendLine($"{indent}            {{");
+        sb.AppendLine($"{indent}                SpliceBodyInto(enc, options.Deterministic, validate: true, depth: 0);");
+        sb.AppendLine($"{indent}                return enc.ToArray();");
+        sb.AppendLine($"{indent}            }}");
         sb.AppendLine($"{indent}            SchemaMeta? meta = {msgSym.CSharpFullName}.BuildOmniBufSchemaMeta(1, null, out bool cyclic);");
         sb.AppendLine($"{indent}            if (cyclic)");
         sb.AppendLine($"{indent}            {{");
-        sb.AppendLine($"{indent}                byte[] body = OmniBufOpaque.SpliceFieldsValidated(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true), stripField0: true);");
+        sb.AppendLine($"{indent}                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, {dirtyOverflowExpr}, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, 0), stripField0: true, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);");
+        sb.AppendLine($"{indent}                byte[] body = enc.ToArray();");
+        sb.AppendLine($"{indent}                enc.Reset();");
         sb.AppendLine($"{indent}                meta = {msgSym.CSharpFullName}.ParseOmniBuf(body).BuildOmniBufValueSchemaMeta(1, null);");
         sb.AppendLine($"{indent}                if (meta is not null)");
         sb.AppendLine($"{indent}                {{");
@@ -1713,7 +1959,7 @@ public static class Program
         sb.AppendLine($"{indent}                {{");
         sb.AppendLine($"{indent}                    SchemaMeta.WriteField0(enc, meta, options.Deterministic);");
         sb.AppendLine($"{indent}                }}");
-        sb.AppendLine($"{indent}                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true), stripField0: true);");
+        sb.AppendLine($"{indent}                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, {dirtyOverflowExpr}, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, 0), stripField0: true, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);");
         sb.AppendLine($"{indent}            }}");
         sb.AppendLine($"{indent}            return enc.ToArray();");
         sb.AppendLine($"{indent}        }}");
@@ -1741,12 +1987,14 @@ public static class Program
         sb.AppendLine($"{indent}    }}");
         sb.AppendLine();
 
-        sb.AppendLine($"{indent}    private void AppendDirtyField(OmniBufEncoder encoder, uint fieldNum, bool deterministic, bool validate)");
+        sb.AppendLine($"{indent}    private void AppendDirtyField(OmniBufEncoder encoder, uint fieldNum, bool deterministic, bool validate, int depth)");
         sb.AppendLine($"{indent}    {{");
         sb.AppendLine($"{indent}        _ = deterministic;");
         sb.AppendLine($"{indent}        _ = validate;");
+        sb.AppendLine($"{indent}        _ = depth;");
         if (fields.Count > 0)
         {
+            sb.AppendLine($"{indent}        if (_dirty is not {{ }} d) return;");
             sb.AppendLine($"{indent}        switch (fieldNum)");
             sb.AppendLine($"{indent}        {{");
             foreach (FieldDescriptorProto f in fields)
@@ -1773,6 +2021,10 @@ public static class Program
         sb.AppendLine();
     }
 
+    private static string OneofMemberWireMaskLiteral(FieldDescriptorProto f) => f.Type == FieldDescriptorProto.Types.Type.Bool
+        ? "(ushort)((1 << (byte)OmniBufWireType.BoolFalse) | (1 << (byte)OmniBufWireType.BoolTrue))"
+        : $"(ushort)(1 << (byte)OmniBufWireType.{WireTypeEnumName(f.Type)})";
+
     private static void EmitClearOneofSiblings(
         StringBuilder sb,
         string indent,
@@ -1788,7 +2040,7 @@ public static class Program
                 && !sibling.Proto3Optional)
             {
                 string sibProp = GetPropertyName(sibling, msg.Name);
-                sb.AppendLine($"{indent}_present_{sibProp} = false;");
+                sb.AppendLine($"{indent}d.present_{sibProp} = false;");
                 sb.AppendLine($"{indent}MarkDirty({(uint)sibling.Number}u);");
             }
         }
@@ -1804,6 +2056,7 @@ public static class Program
     {
         uint fnum = (uint)f.Number;
         string prop = GetPropertyName(f, msg.Name);
+        string? oneofPascal = IsRealOneof(f) ? ToPascalCase(msg.OneofDecl[f.OneofIndex].Name) : null;
 
         if (IsMapField(f, symbols, out FieldDescriptorProto? keyField, out FieldDescriptorProto? valField))
         {
@@ -1828,25 +2081,28 @@ public static class Program
                 sb.AppendLine($"{indent}    {{");
                 sb.AppendLine($"{indent}        if (IsDirty({fnum}u))");
                 sb.AppendLine($"{indent}        {{");
-                sb.AppendLine($"{indent}            return _dirty_{prop} ?? new Dictionary<{keyCs}, {valOpaque}>({emptyDictCtorArgs});");
+                sb.AppendLine($"{indent}            return _dirty?.f_{prop} ?? new Dictionary<{keyCs}, {valOpaque}>({emptyDictCtorArgs});");
                 sb.AppendLine($"{indent}        }}");
                 sb.AppendLine($"{indent}        _cached_{prop} ??= OmniBufOpaque.ReadMap(_raw, {fnum}u, OmniBufWireType.{keyWt}, OmniBufWireType.{valWt}, {keyReader}, {valReader}, {comparerArg});");
                 sb.AppendLine($"{indent}        return _cached_{prop};");
                 sb.AppendLine($"{indent}    }}");
                 sb.AppendLine($"{indent}}}");
-                sb.AppendLine($"{indent}public void Set{prop}(IDictionary<{keyCs}, {valMsg}> value)");
+                sb.AppendLine($"{indent}public void Set{prop}(IDictionary<{keyCs}, {valMsg}?>? value)");
                 sb.AppendLine($"{indent}{{");
-                sb.AppendLine($"{indent}    var dict = new Dictionary<{keyCs}, {valOpaque}>({(keyField.Type == FieldDescriptorProto.Types.Type.String ? "value.Count, StringComparer.Ordinal" : "value.Count")});");
-                sb.AppendLine($"{indent}    foreach (var kv in value)");
+                sb.AppendLine($"{indent}    var dict = new Dictionary<{keyCs}, {valOpaque}>({(keyField.Type == FieldDescriptorProto.Types.Type.String ? "(value?.Count ?? 0), StringComparer.Ordinal" : "(value?.Count ?? 0)")});");
+                sb.AppendLine($"{indent}    if (value is not null)");
                 sb.AppendLine($"{indent}    {{");
-                sb.AppendLine($"{indent}        dict[kv.Key] = new {valOpaque}(kv.Value.MarshalOmniBuf());");
+                sb.AppendLine($"{indent}        foreach (var kv in value)");
+                sb.AppendLine($"{indent}        {{");
+                sb.AppendLine($"{indent}            dict[kv.Key] = kv.Value is null ? new {valOpaque}(Array.Empty<byte>()) : new {valOpaque}(kv.Value.MarshalOmniBuf());");
+                sb.AppendLine($"{indent}        }}");
                 sb.AppendLine($"{indent}    }}");
-                sb.AppendLine($"{indent}    _dirty_{prop} = dict;");
+                sb.AppendLine($"{indent}    EnsureDirty().f_{prop} = dict;");
                 sb.AppendLine($"{indent}    MarkDirty({fnum}u);");
                 sb.AppendLine($"{indent}}}");
-                sb.AppendLine($"{indent}public void Set{prop}(IDictionary<{keyCs}, {valOpaque}> value)");
+                sb.AppendLine($"{indent}public void Set{prop}(IDictionary<{keyCs}, {valOpaque}>? value)");
                 sb.AppendLine($"{indent}{{");
-                sb.AppendLine($"{indent}    _dirty_{prop} = new Dictionary<{keyCs}, {valOpaque}>({dictCtorArgs});");
+                sb.AppendLine($"{indent}    EnsureDirty().f_{prop} = value is null ? new Dictionary<{keyCs}, {valOpaque}>({emptyDictCtorArgs}) : new Dictionary<{keyCs}, {valOpaque}>({dictCtorArgs});");
                 sb.AppendLine($"{indent}    MarkDirty({fnum}u);");
                 sb.AppendLine($"{indent}}}");
                 sb.AppendLine();
@@ -1858,12 +2114,12 @@ public static class Program
             sb.AppendLine($"{indent}public IReadOnlyDictionary<{keyCs}, {valCs}> {prop}");
             sb.AppendLine($"{indent}{{");
             sb.AppendLine($"{indent}    get => IsDirty({fnum}u)");
-            sb.AppendLine($"{indent}        ? (_dirty_{prop} ?? new Dictionary<{keyCs}, {valCs}>({emptyDictCtorArgs}))");
+            sb.AppendLine($"{indent}        ? (_dirty?.f_{prop} ?? new Dictionary<{keyCs}, {valCs}>({emptyDictCtorArgs}))");
             sb.AppendLine($"{indent}        : OmniBufOpaque.ReadMap(_raw, {fnum}u, OmniBufWireType.{keyWt}, OmniBufWireType.{valWt}, {keyReader}, {valScalarReader}, {comparerArg});");
             sb.AppendLine($"{indent}}}");
-            sb.AppendLine($"{indent}public void Set{prop}(IDictionary<{keyCs}, {valCs}> value)");
+            sb.AppendLine($"{indent}public void Set{prop}(IDictionary<{keyCs}, {valCs}>? value)");
             sb.AppendLine($"{indent}{{");
-            sb.AppendLine($"{indent}    _dirty_{prop} = new Dictionary<{keyCs}, {valCs}>({dictCtorArgs});");
+            sb.AppendLine($"{indent}    EnsureDirty().f_{prop} = value is null ? new Dictionary<{keyCs}, {valCs}>({emptyDictCtorArgs}) : new Dictionary<{keyCs}, {valCs}>({dictCtorArgs});");
             sb.AppendLine($"{indent}    MarkDirty({fnum}u);");
             sb.AppendLine($"{indent}}}");
             sb.AppendLine();
@@ -1881,7 +2137,7 @@ public static class Program
                 sb.AppendLine($"{indent}    {{");
                 sb.AppendLine($"{indent}        if (IsDirty({fnum}u))");
                 sb.AppendLine($"{indent}        {{");
-                sb.AppendLine($"{indent}            return (IReadOnlyList<{sym.CSharpOpaqueFullName}>?)_dirty_{prop} ?? Array.Empty<{sym.CSharpOpaqueFullName}>();");
+                sb.AppendLine($"{indent}            return (IReadOnlyList<{sym.CSharpOpaqueFullName}>?)_dirty?.f_{prop} ?? Array.Empty<{sym.CSharpOpaqueFullName}>();");
                 sb.AppendLine($"{indent}        }}");
                 sb.AppendLine($"{indent}        if (_cached_{prop} is null)");
                 sb.AppendLine($"{indent}        {{");
@@ -1896,14 +2152,17 @@ public static class Program
                 sb.AppendLine($"{indent}        return _cached_{prop};");
                 sb.AppendLine($"{indent}    }}");
                 sb.AppendLine($"{indent}}}");
-                sb.AppendLine($"{indent}public void Set{prop}(IEnumerable<{sym.CSharpFullName}> values)");
+                sb.AppendLine($"{indent}public void Set{prop}(IEnumerable<{sym.CSharpFullName}?>? values)");
                 sb.AppendLine($"{indent}{{");
                 sb.AppendLine($"{indent}    var list = new List<{sym.CSharpOpaqueFullName}>();");
-                sb.AppendLine($"{indent}    foreach (var item in values)");
+                sb.AppendLine($"{indent}    if (values is not null)");
                 sb.AppendLine($"{indent}    {{");
-                sb.AppendLine($"{indent}        list.Add(new {sym.CSharpOpaqueFullName}(item.MarshalOmniBuf()));");
+                sb.AppendLine($"{indent}        foreach (var item in values)");
+                sb.AppendLine($"{indent}        {{");
+                sb.AppendLine($"{indent}            list.Add(item is null ? new {sym.CSharpOpaqueFullName}(Array.Empty<byte>()) : new {sym.CSharpOpaqueFullName}(item.MarshalOmniBuf()));");
+                sb.AppendLine($"{indent}        }}");
                 sb.AppendLine($"{indent}    }}");
-                sb.AppendLine($"{indent}    _dirty_{prop} = list;");
+                sb.AppendLine($"{indent}    EnsureDirty().f_{prop} = list;");
                 sb.AppendLine($"{indent}    MarkDirty({fnum}u);");
                 sb.AppendLine($"{indent}}}");
                 sb.AppendLine();
@@ -1916,12 +2175,12 @@ public static class Program
             sb.AppendLine($"{indent}public IReadOnlyList<{elemCs}> {prop}");
             sb.AppendLine($"{indent}{{");
             sb.AppendLine($"{indent}    get => IsDirty({fnum}u)");
-            sb.AppendLine($"{indent}        ? ((IReadOnlyList<{elemCs}>?)_dirty_{prop} ?? Array.Empty<{elemCs}>())");
+            sb.AppendLine($"{indent}        ? ((IReadOnlyList<{elemCs}>?)_dirty?.f_{prop} ?? Array.Empty<{elemCs}>())");
             sb.AppendLine($"{indent}        : OmniBufOpaque.ReadArray(_raw, {fnum}u, OmniBufWireType.{elemWt}, {elemReader});");
             sb.AppendLine($"{indent}}}");
-            sb.AppendLine($"{indent}public void Set{prop}(IEnumerable<{elemCs}> values)");
+            sb.AppendLine($"{indent}public void Set{prop}(IEnumerable<{elemCs}>? values)");
             sb.AppendLine($"{indent}{{");
-            sb.AppendLine($"{indent}    _dirty_{prop} = new List<{elemCs}>(values);");
+            sb.AppendLine($"{indent}    EnsureDirty().f_{prop} = values is null ? new List<{elemCs}>() : new List<{elemCs}>(values);");
             sb.AppendLine($"{indent}    MarkDirty({fnum}u);");
             sb.AppendLine($"{indent}}}");
             sb.AppendLine();
@@ -1936,23 +2195,24 @@ public static class Program
                 string readWrap = $"OmniBufOpaque.TryReadSubMsgBytes(_raw, {fnum}u, out byte[] sub) ? ({propType})OmniBufWrappers.Decode{wrap.MethodSuffix}(sub, {wrap.DefaultExpr}, 1, OmniBufConstants.MaxNestingDepth) : null";
                 sb.AppendLine($"{indent}public {propType} {prop}");
                 sb.AppendLine($"{indent}{{");
-                if (IsRealOneof(f))
+                if (oneofPascal is not null)
                 {
-                    sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? (_present_{prop} ? _dirty_{prop} : null) : ({readWrap});");
+                    sb.AppendLine($"{indent}    get => GetActive{oneofPascal}Field() != {fnum}u ? null : (IsDirty({fnum}u) ? _dirty!.f_{prop} : ({readWrap}));");
                     sb.AppendLine($"{indent}    set");
                     sb.AppendLine($"{indent}    {{");
-                    sb.AppendLine($"{indent}        _dirty_{prop} = value;");
-                    sb.AppendLine($"{indent}        _present_{prop} = value is not null;");
+                    sb.AppendLine($"{indent}        DirtyState d = EnsureDirty();");
+                    sb.AppendLine($"{indent}        d.f_{prop} = value;");
+                    sb.AppendLine($"{indent}        d.present_{prop} = value is not null;");
                     EmitClearOneofSiblings(sb, indent + "        ", msg, f);
                     sb.AppendLine($"{indent}        MarkDirty({fnum}u);");
                     sb.AppendLine($"{indent}    }}");
                 }
                 else
                 {
-                    sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? _dirty_{prop} : ({readWrap});");
+                    sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? _dirty!.f_{prop} : ({readWrap});");
                     sb.AppendLine($"{indent}    set");
                     sb.AppendLine($"{indent}    {{");
-                    sb.AppendLine($"{indent}        _dirty_{prop} = value;");
+                    sb.AppendLine($"{indent}        EnsureDirty().f_{prop} = value;");
                     sb.AppendLine($"{indent}        MarkDirty({fnum}u);");
                     sb.AppendLine($"{indent}    }}");
                 }
@@ -1967,13 +2227,14 @@ public static class Program
             sb.AppendLine($"{indent}{{");
             sb.AppendLine($"{indent}    get");
             sb.AppendLine($"{indent}    {{");
-            if (IsRealOneof(f))
+            if (oneofPascal is not null)
             {
-                sb.AppendLine($"{indent}        if (IsDirty({fnum}u)) return _present_{prop} ? _dirty_{prop} : null;");
+                sb.AppendLine($"{indent}        if (GetActive{oneofPascal}Field() != {fnum}u) return null;");
+                sb.AppendLine($"{indent}        if (IsDirty({fnum}u)) return _dirty!.f_{prop};");
             }
             else
             {
-                sb.AppendLine($"{indent}        if (IsDirty({fnum}u)) return _dirty_{prop};");
+                sb.AppendLine($"{indent}        if (IsDirty({fnum}u)) return _dirty!.f_{prop};");
             }
 
             sb.AppendLine($"{indent}        if (!_hasCached_{prop})");
@@ -1985,10 +2246,11 @@ public static class Program
             sb.AppendLine($"{indent}    }}");
             sb.AppendLine($"{indent}    set");
             sb.AppendLine($"{indent}    {{");
-            sb.AppendLine($"{indent}        _dirty_{prop} = value;");
-            if (IsRealOneof(f))
+            sb.AppendLine($"{indent}        DirtyState d = EnsureDirty();");
+            sb.AppendLine($"{indent}        d.f_{prop} = value;");
+            if (oneofPascal is not null)
             {
-                sb.AppendLine($"{indent}        _present_{prop} = value is not null;");
+                sb.AppendLine($"{indent}        d.present_{prop} = value is not null;");
                 EmitClearOneofSiblings(sb, indent + "        ", msg, f);
             }
 
@@ -2010,13 +2272,14 @@ public static class Program
                         sb.AppendLine($"{indent}public string Get{prop}{childProp}()");
                         sb.AppendLine($"{indent}{{");
                         sb.AppendLine($"{indent}    PropagateChildDirty();");
-                        if (IsRealOneof(f))
+                        if (oneofPascal is not null)
                         {
-                            sb.AppendLine($"{indent}    if (IsDirty({fnum}u)) return _present_{prop} ? (_dirty_{prop}?.{childProp} ?? string.Empty) : string.Empty;");
+                            sb.AppendLine($"{indent}    if (GetActive{oneofPascal}Field() != {fnum}u) return string.Empty;");
+                            sb.AppendLine($"{indent}    if (IsDirty({fnum}u)) return _dirty!.f_{prop}?.{childProp} ?? string.Empty;");
                         }
                         else
                         {
-                            sb.AppendLine($"{indent}    if (IsDirty({fnum}u)) return _dirty_{prop}?.{childProp} ?? string.Empty;");
+                            sb.AppendLine($"{indent}    if (IsDirty({fnum}u)) return _dirty!.f_{prop}?.{childProp} ?? string.Empty;");
                         }
 
                         sb.AppendLine($"{indent}    return OmniBufOpaque.TryReadNestedString(_raw, {fnum}u, {(uint)cf.Number}u, out string s) ? s : string.Empty;");
@@ -2029,20 +2292,33 @@ public static class Program
             return;
         }
 
-        bool hasPresence = HasExplicitScalarPresence(f, isProto2) || IsRealOneof(f);
+        bool hasPresence = HasExplicitScalarPresence(f, isProto2) || oneofPascal is not null;
 
         if (f.Type == FieldDescriptorProto.Types.Type.Bytes)
         {
             sb.AppendLine($"{indent}public byte[] {prop}");
             sb.AppendLine($"{indent}{{");
+            if (oneofPascal is not null)
+            {
+                sb.AppendLine($"{indent}    get => GetActive{oneofPascal}Field() != {fnum}u ? Array.Empty<byte>() : (IsDirty({fnum}u) ? (_dirty!.f_{prop} ?? Array.Empty<byte>()) : (GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadBytesIndexed(idx, _raw, {fnum}u, out byte[] bi) ? bi : Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, {fnum}u, out byte[] b) ? b : Array.Empty<byte>())));");
+            }
+            else if (hasPresence)
+            {
+                sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? (_dirty!.present_{prop} ? (_dirty.f_{prop} ?? Array.Empty<byte>()) : Array.Empty<byte>()) : (GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadBytesIndexed(idx, _raw, {fnum}u, out byte[] bi) ? bi : Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, {fnum}u, out byte[] b) ? b : Array.Empty<byte>()));");
+            }
+            else
+            {
+                sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? (_dirty!.f_{prop} ?? Array.Empty<byte>()) : (GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadBytesIndexed(idx, _raw, {fnum}u, out byte[] bi) ? bi : Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, {fnum}u, out byte[] b) ? b : Array.Empty<byte>()));");
+            }
+
             if (hasPresence)
             {
-                sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? (_present_{prop} ? (_dirty_{prop} ?? Array.Empty<byte>()) : Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, {fnum}u, out byte[] b) ? b : Array.Empty<byte>());");
                 sb.AppendLine($"{indent}    set");
                 sb.AppendLine($"{indent}    {{");
-                sb.AppendLine($"{indent}        _dirty_{prop} = value ?? Array.Empty<byte>();");
-                sb.AppendLine($"{indent}        _present_{prop} = true;");
-                if (IsRealOneof(f))
+                sb.AppendLine($"{indent}        DirtyState d = EnsureDirty();");
+                sb.AppendLine($"{indent}        d.f_{prop} = value ?? Array.Empty<byte>();");
+                sb.AppendLine($"{indent}        d.present_{prop} = true;");
+                if (oneofPascal is not null)
                 {
                     EmitClearOneofSiblings(sb, indent + "        ", msg, f);
                 }
@@ -2052,14 +2328,14 @@ public static class Program
             }
             else
             {
-                sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? (_dirty_{prop} ?? Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, {fnum}u, out byte[] b) ? b : Array.Empty<byte>());");
-                sb.AppendLine($"{indent}    set {{ _dirty_{prop} = value ?? Array.Empty<byte>(); MarkDirty({fnum}u); }}");
+                sb.AppendLine($"{indent}    set {{ EnsureDirty().f_{prop} = value ?? Array.Empty<byte>(); MarkDirty({fnum}u); }}");
             }
 
             sb.AppendLine($"{indent}}}");
+            sb.AppendLine($"{indent}public ReadOnlySpan<byte> Get{prop}Span() => {(oneofPascal is not null ? $"GetActive{oneofPascal}Field() != {fnum}u ? ReadOnlySpan<byte>.Empty : " : string.Empty)}(IsDirty({fnum}u) ? ({(hasPresence && oneofPascal is null ? $"_dirty!.present_{prop} ? (_dirty.f_{prop} ?? Array.Empty<byte>()) : Array.Empty<byte>()" : $"_dirty!.f_{prop} ?? Array.Empty<byte>()")}) : (OmniBufOpaque.TryReadBytesSpan(_raw, {fnum}u, out ReadOnlySpan<byte> sp) ? sp : ReadOnlySpan<byte>.Empty));");
             if (hasPresence)
             {
-                EmitOpaquePresenceHelpers(sb, indent, fnum, prop, f);
+                EmitOpaquePresenceHelpers(sb, indent, fnum, prop, f, oneofPascal);
             }
 
             sb.AppendLine();
@@ -2071,14 +2347,27 @@ public static class Program
         string defaultExpr = f.Type == FieldDescriptorProto.Types.Type.String ? "string.Empty" : DefaultValueLiteral(f, symbols);
         sb.AppendLine($"{indent}public {csType} {prop}");
         sb.AppendLine($"{indent}{{");
+        if (oneofPascal is not null)
+        {
+            sb.AppendLine($"{indent}    get => GetActive{oneofPascal}Field() != {fnum}u ? {defaultExpr} : (IsDirty({fnum}u) ? _dirty!.f_{prop}! : ({readExpr}));");
+        }
+        else if (hasPresence)
+        {
+            sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? (_dirty!.present_{prop} ? _dirty.f_{prop}! : {defaultExpr}) : ({readExpr});");
+        }
+        else
+        {
+            sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? _dirty!.f_{prop}! : ({readExpr});");
+        }
+
         if (hasPresence)
         {
-            sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? (_present_{prop} ? _dirty_{prop}! : {defaultExpr}) : ({readExpr});");
             sb.AppendLine($"{indent}    set");
             sb.AppendLine($"{indent}    {{");
-            sb.AppendLine($"{indent}        _dirty_{prop} = value;");
-            sb.AppendLine($"{indent}        _present_{prop} = true;");
-            if (IsRealOneof(f))
+            sb.AppendLine($"{indent}        DirtyState d = EnsureDirty();");
+            sb.AppendLine($"{indent}        d.f_{prop} = {(f.Type == FieldDescriptorProto.Types.Type.String ? "value ?? string.Empty" : "value")};");
+            sb.AppendLine($"{indent}        d.present_{prop} = true;");
+            if (oneofPascal is not null)
             {
                 EmitClearOneofSiblings(sb, indent + "        ", msg, f);
             }
@@ -2088,14 +2377,13 @@ public static class Program
         }
         else
         {
-            sb.AppendLine($"{indent}    get => IsDirty({fnum}u) ? _dirty_{prop}! : ({readExpr});");
-            sb.AppendLine($"{indent}    set {{ _dirty_{prop} = value; MarkDirty({fnum}u); }}");
+            sb.AppendLine($"{indent}    set {{ EnsureDirty().f_{prop} = {(f.Type == FieldDescriptorProto.Types.Type.String ? "value ?? string.Empty" : "value")}; MarkDirty({fnum}u); }}");
         }
 
         sb.AppendLine($"{indent}}}");
         if (hasPresence)
         {
-            EmitOpaquePresenceHelpers(sb, indent, fnum, prop, f);
+            EmitOpaquePresenceHelpers(sb, indent, fnum, prop, f, oneofPascal);
         }
 
         sb.AppendLine();
@@ -2106,36 +2394,158 @@ public static class Program
         string indent,
         uint fnum,
         string prop,
-        FieldDescriptorProto f)
+        FieldDescriptorProto f,
+        string? oneofPascal)
     {
-        string maskExpr = f.Type == FieldDescriptorProto.Types.Type.Bool
-            ? "(ushort)((1 << (byte)OmniBufWireType.BoolFalse) | (1 << (byte)OmniBufWireType.BoolTrue))"
-            : $"(ushort)(1 << (byte)OmniBufWireType.{WireTypeEnumName(f.Type)})";
-        sb.AppendLine($"{indent}public bool Has{prop} => IsDirty({fnum}u) ? _present_{prop} : OmniBufOpaque.LocateFieldMask(_raw, {fnum}u, {maskExpr}, out _, out _);");
+        if (oneofPascal is not null)
+        {
+            sb.AppendLine($"{indent}public bool Has{prop} => GetActive{oneofPascal}Field() == {fnum}u;");
+        }
+        else
+        {
+            string maskExpr = OneofMemberWireMaskLiteral(f);
+            sb.AppendLine($"{indent}public bool Has{prop} => IsDirty({fnum}u) ? _dirty!.present_{prop} : OmniBufOpaque.LocateFieldMask(_raw, {fnum}u, {maskExpr}, out _, out _);");
+        }
+
         sb.AppendLine($"{indent}public void Clear{prop}()");
         sb.AppendLine($"{indent}{{");
-        sb.AppendLine($"{indent}    _present_{prop} = false;");
+        sb.AppendLine($"{indent}    EnsureDirty().present_{prop} = false;");
         sb.AppendLine($"{indent}    MarkDirty({fnum}u);");
         sb.AppendLine($"{indent}}}");
     }
 
     private static string EmitOpaqueScalarRead(uint fnum, FieldDescriptorProto f, Dictionary<string, TypeSymbol> symbols) => f.Type switch
     {
-        FieldDescriptorProto.Types.Type.Uint32 => $"OmniBufOpaque.TryReadUint(_raw, {fnum}u, out ulong v) ? (uint)v : 0u",
-        FieldDescriptorProto.Types.Type.Uint64 => $"OmniBufOpaque.TryReadUint(_raw, {fnum}u, out ulong v) ? v : 0UL",
-        FieldDescriptorProto.Types.Type.Int32 or FieldDescriptorProto.Types.Type.Sint32 => $"OmniBufOpaque.TryReadSint(_raw, {fnum}u, out long v) ? (int)v : 0",
-        FieldDescriptorProto.Types.Type.Int64 or FieldDescriptorProto.Types.Type.Sint64 => $"OmniBufOpaque.TryReadSint(_raw, {fnum}u, out long v) ? v : 0L",
-        FieldDescriptorProto.Types.Type.Enum => $"OmniBufOpaque.TryReadSint(_raw, {fnum}u, out long v) ? ({symbols[f.TypeName].CSharpFullName})(int)v : default",
-        FieldDescriptorProto.Types.Type.Bool => $"OmniBufOpaque.TryReadBool(_raw, {fnum}u, out bool v) && v",
-        FieldDescriptorProto.Types.Type.Fixed32 => $"OmniBufOpaque.TryReadFixed32(_raw, {fnum}u, OmniBufWireType.Fixed32, out uint v) ? v : 0u",
-        FieldDescriptorProto.Types.Type.Sfixed32 => $"OmniBufOpaque.TryReadFixed32(_raw, {fnum}u, OmniBufWireType.Sfixed32, out uint v) ? (int)v : 0",
-        FieldDescriptorProto.Types.Type.Float => $"OmniBufOpaque.TryReadFixed32(_raw, {fnum}u, OmniBufWireType.Float32, out uint v) ? BitConverter.UInt32BitsToSingle(v) : 0f",
-        FieldDescriptorProto.Types.Type.Fixed64 => $"OmniBufOpaque.TryReadFixed64(_raw, {fnum}u, OmniBufWireType.Fixed64, out ulong v) ? v : 0UL",
-        FieldDescriptorProto.Types.Type.Sfixed64 => $"OmniBufOpaque.TryReadFixed64(_raw, {fnum}u, OmniBufWireType.Sfixed64, out ulong v) ? (long)v : 0L",
-        FieldDescriptorProto.Types.Type.Double => $"OmniBufOpaque.TryReadFixed64(_raw, {fnum}u, OmniBufWireType.Float64, out ulong v) ? BitConverter.UInt64BitsToDouble(v) : 0d",
-        FieldDescriptorProto.Types.Type.String => $"OmniBufOpaque.TryReadString(_raw, {fnum}u, out string v) ? v : string.Empty",
+        FieldDescriptorProto.Types.Type.Uint32 => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadUintIndexed(idx, _raw, {fnum}u, out ulong vi) ? (uint)vi : 0u) : (OmniBufOpaque.TryReadUint(_raw, {fnum}u, out ulong v) ? (uint)v : 0u)",
+        FieldDescriptorProto.Types.Type.Uint64 => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadUintIndexed(idx, _raw, {fnum}u, out ulong vi) ? vi : 0UL) : (OmniBufOpaque.TryReadUint(_raw, {fnum}u, out ulong v) ? v : 0UL)",
+        FieldDescriptorProto.Types.Type.Int32 or FieldDescriptorProto.Types.Type.Sint32 => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadSintIndexed(idx, _raw, {fnum}u, out long vi) ? (int)vi : 0) : (OmniBufOpaque.TryReadSint(_raw, {fnum}u, out long v) ? (int)v : 0)",
+        FieldDescriptorProto.Types.Type.Int64 or FieldDescriptorProto.Types.Type.Sint64 => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadSintIndexed(idx, _raw, {fnum}u, out long vi) ? vi : 0L) : (OmniBufOpaque.TryReadSint(_raw, {fnum}u, out long v) ? v : 0L)",
+        FieldDescriptorProto.Types.Type.Enum => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadSintIndexed(idx, _raw, {fnum}u, out long vi) ? ({symbols[f.TypeName].CSharpFullName})(int)vi : default) : (OmniBufOpaque.TryReadSint(_raw, {fnum}u, out long v) ? ({symbols[f.TypeName].CSharpFullName})(int)v : default)",
+        FieldDescriptorProto.Types.Type.Bool => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadBoolIndexed(idx, _raw, {fnum}u, out bool vi) && vi) : (OmniBufOpaque.TryReadBool(_raw, {fnum}u, out bool v) && v)",
+        FieldDescriptorProto.Types.Type.Fixed32 => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadFixed32Indexed(idx, _raw, {fnum}u, OmniBufWireType.Fixed32, out uint vi) ? vi : 0u) : (OmniBufOpaque.TryReadFixed32(_raw, {fnum}u, OmniBufWireType.Fixed32, out uint v) ? v : 0u)",
+        FieldDescriptorProto.Types.Type.Sfixed32 => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadFixed32Indexed(idx, _raw, {fnum}u, OmniBufWireType.Sfixed32, out uint vi) ? (int)vi : 0) : (OmniBufOpaque.TryReadFixed32(_raw, {fnum}u, OmniBufWireType.Sfixed32, out uint v) ? (int)v : 0)",
+        FieldDescriptorProto.Types.Type.Float => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadFixed32Indexed(idx, _raw, {fnum}u, OmniBufWireType.Float32, out uint vi) ? BitConverter.UInt32BitsToSingle(vi) : 0f) : (OmniBufOpaque.TryReadFixed32(_raw, {fnum}u, OmniBufWireType.Float32, out uint v) ? BitConverter.UInt32BitsToSingle(v) : 0f)",
+        FieldDescriptorProto.Types.Type.Fixed64 => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadFixed64Indexed(idx, _raw, {fnum}u, OmniBufWireType.Fixed64, out ulong vi) ? vi : 0UL) : (OmniBufOpaque.TryReadFixed64(_raw, {fnum}u, OmniBufWireType.Fixed64, out ulong v) ? v : 0UL)",
+        FieldDescriptorProto.Types.Type.Sfixed64 => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadFixed64Indexed(idx, _raw, {fnum}u, OmniBufWireType.Sfixed64, out ulong vi) ? (long)vi : 0L) : (OmniBufOpaque.TryReadFixed64(_raw, {fnum}u, OmniBufWireType.Sfixed64, out ulong v) ? (long)v : 0L)",
+        FieldDescriptorProto.Types.Type.Double => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadFixed64Indexed(idx, _raw, {fnum}u, OmniBufWireType.Float64, out ulong vi) ? BitConverter.UInt64BitsToDouble(vi) : 0d) : (OmniBufOpaque.TryReadFixed64(_raw, {fnum}u, OmniBufWireType.Float64, out ulong v) ? BitConverter.UInt64BitsToDouble(v) : 0d)",
+        FieldDescriptorProto.Types.Type.String => $"GetOrBuildIndex() is {{ }} idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, {fnum}u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, {fnum}u, out string v) ? v : string.Empty)",
         _ => "default!",
     };
+
+    private static void EmitSpanViewStruct(
+        StringBuilder sb,
+        TypeSymbol msgSym,
+        DescriptorProto msg,
+        bool isProto2,
+        List<FieldDescriptorProto> fields,
+        Dictionary<string, TypeSymbol> symbols,
+        string indent)
+    {
+        _ = msgSym;
+        _ = isProto2;
+        string spanViewName = $"{msg.Name}SpanView";
+        List<(int Index, string PascalName, List<FieldDescriptorProto> Fields)> realOneofs = GetRealOneofs(msg);
+
+        sb.AppendLine($"{indent}public readonly ref struct {spanViewName}");
+        sb.AppendLine($"{indent}{{");
+        foreach ((_, string oneofPascal, List<FieldDescriptorProto> members) in realOneofs)
+        {
+            string fNums = string.Join(", ", members.Select(m => $"{(uint)m.Number}u"));
+            string fMasks = string.Join(", ", members.Select(OneofMemberWireMaskLiteral));
+            sb.AppendLine($"{indent}    private static readonly uint[] s_oneof_{oneofPascal}_fields = new uint[] {{ {fNums} }};");
+            sb.AppendLine($"{indent}    private static readonly ushort[] s_oneof_{oneofPascal}_masks = new ushort[] {{ {fMasks} }};");
+        }
+
+        sb.AppendLine($"{indent}    private readonly ReadOnlySpan<byte> _raw;");
+        sb.AppendLine();
+        sb.AppendLine($"{indent}    public {spanViewName}(ReadOnlySpan<byte> raw)");
+        sb.AppendLine($"{indent}    {{");
+        sb.AppendLine($"{indent}        _raw = raw;");
+        sb.AppendLine($"{indent}    }}");
+        sb.AppendLine();
+        sb.AppendLine($"{indent}    public ReadOnlySpan<byte> RawSpan => _raw;");
+        sb.AppendLine();
+
+        foreach (FieldDescriptorProto f in fields)
+        {
+            if (IsMapField(f, symbols, out _, out _) || f.Label == FieldDescriptorProto.Types.Label.Repeated)
+            {
+                continue;
+            }
+
+            uint fnum = (uint)f.Number;
+            string prop = GetPropertyName(f, msg.Name);
+            string? oneofPascal = IsRealOneof(f) ? ToPascalCase(msg.OneofDecl[f.OneofIndex].Name) : null;
+            string oneofGuard = oneofPascal is not null
+                ? $"OmniBufOpaque.LocateActiveOneof(_raw, s_oneof_{oneofPascal}_fields, s_oneof_{oneofPascal}_masks) != {fnum}u"
+                : string.Empty;
+
+            if (f.Type == FieldDescriptorProto.Types.Type.Message)
+            {
+                if (WrapperTypes.ContainsKey(f.TypeName))
+                {
+                    continue;
+                }
+
+                TypeSymbol subSym = symbols[f.TypeName];
+                sb.AppendLine($"{indent}    public bool TryGet{prop}(out {subSym.CSharpSpanViewFullName} view)");
+                sb.AppendLine($"{indent}    {{");
+                if (oneofPascal is not null)
+                {
+                    sb.AppendLine($"{indent}        if ({oneofGuard}) {{ view = default; return false; }}");
+                }
+
+                sb.AppendLine($"{indent}        if (OmniBufOpaque.TryReadSubMsgSpan(_raw, {fnum}u, out ReadOnlySpan<byte> sub))");
+                sb.AppendLine($"{indent}        {{");
+                sb.AppendLine($"{indent}            view = new {subSym.CSharpSpanViewFullName}(sub);");
+                sb.AppendLine($"{indent}            return true;");
+                sb.AppendLine($"{indent}        }}");
+                sb.AppendLine($"{indent}        view = default;");
+                sb.AppendLine($"{indent}        return false;");
+                sb.AppendLine($"{indent}    }}");
+                continue;
+            }
+
+            if (f.Type == FieldDescriptorProto.Types.Type.Bytes)
+            {
+                string expr = $"OmniBufOpaque.TryReadBytesSpan(_raw, {fnum}u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty";
+                sb.AppendLine($"{indent}    public ReadOnlySpan<byte> {prop} => {(oneofPascal is not null ? $"{oneofGuard} ? ReadOnlySpan<byte>.Empty : ({expr})" : expr)};");
+                continue;
+            }
+
+            if (f.Type == FieldDescriptorProto.Types.Type.String)
+            {
+                string strExpr = $"OmniBufOpaque.TryReadString(_raw, {fnum}u, out string s) ? s : string.Empty";
+                string spanExpr = $"OmniBufOpaque.TryReadStringSpan(_raw, {fnum}u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty";
+                sb.AppendLine($"{indent}    public string {prop} => {(oneofPascal is not null ? $"{oneofGuard} ? string.Empty : ({strExpr})" : strExpr)};");
+                sb.AppendLine($"{indent}    public ReadOnlySpan<byte> Get{prop}Utf8Span() => {(oneofPascal is not null ? $"{oneofGuard} ? ReadOnlySpan<byte>.Empty : ({spanExpr})" : spanExpr)};");
+                continue;
+            }
+
+            string csType = CSharpScalarType(f, symbols);
+            string defaultExpr = DefaultValueLiteral(f, symbols);
+            string scalarExpr = f.Type switch
+            {
+                FieldDescriptorProto.Types.Type.Uint32 => $"OmniBufOpaque.TryReadUint(_raw, {fnum}u, out ulong v) ? (uint)v : 0u",
+                FieldDescriptorProto.Types.Type.Uint64 => $"OmniBufOpaque.TryReadUint(_raw, {fnum}u, out ulong v) ? v : 0UL",
+                FieldDescriptorProto.Types.Type.Int32 or FieldDescriptorProto.Types.Type.Sint32 => $"OmniBufOpaque.TryReadSint(_raw, {fnum}u, out long v) ? (int)v : 0",
+                FieldDescriptorProto.Types.Type.Int64 or FieldDescriptorProto.Types.Type.Sint64 => $"OmniBufOpaque.TryReadSint(_raw, {fnum}u, out long v) ? v : 0L",
+                FieldDescriptorProto.Types.Type.Enum => $"OmniBufOpaque.TryReadSint(_raw, {fnum}u, out long v) ? ({symbols[f.TypeName].CSharpFullName})(int)v : default",
+                FieldDescriptorProto.Types.Type.Bool => $"OmniBufOpaque.TryReadBool(_raw, {fnum}u, out bool v) && v",
+                FieldDescriptorProto.Types.Type.Fixed32 => $"OmniBufOpaque.TryReadFixed32(_raw, {fnum}u, OmniBufWireType.Fixed32, out uint v) ? v : 0u",
+                FieldDescriptorProto.Types.Type.Sfixed32 => $"OmniBufOpaque.TryReadFixed32(_raw, {fnum}u, OmniBufWireType.Sfixed32, out uint v) ? (int)v : 0",
+                FieldDescriptorProto.Types.Type.Float => $"OmniBufOpaque.TryReadFixed32(_raw, {fnum}u, OmniBufWireType.Float32, out uint v) ? BitConverter.UInt32BitsToSingle(v) : 0f",
+                FieldDescriptorProto.Types.Type.Fixed64 => $"OmniBufOpaque.TryReadFixed64(_raw, {fnum}u, OmniBufWireType.Fixed64, out ulong v) ? v : 0UL",
+                FieldDescriptorProto.Types.Type.Sfixed64 => $"OmniBufOpaque.TryReadFixed64(_raw, {fnum}u, OmniBufWireType.Sfixed64, out ulong v) ? (long)v : 0L",
+                FieldDescriptorProto.Types.Type.Double => $"OmniBufOpaque.TryReadFixed64(_raw, {fnum}u, OmniBufWireType.Float64, out ulong v) ? BitConverter.UInt64BitsToDouble(v) : 0d",
+                _ => defaultExpr,
+            };
+            sb.AppendLine($"{indent}    public {csType} {prop} => {(oneofPascal is not null ? $"{oneofGuard} ? {defaultExpr} : ({scalarExpr})" : scalarExpr)};");
+        }
+
+        sb.AppendLine($"{indent}}}");
+        sb.AppendLine();
+    }
 
     private static string OpaqueCollectionElemType(FieldDescriptorProto f, Dictionary<string, TypeSymbol> symbols)
     {
@@ -2189,7 +2599,11 @@ public static class Program
             string keyWt = WireTypeEnumName(keyField.Type);
             string valWt = WireTypeEnumName(valField!.Type);
 
-            sb.AppendLine($"{indent}var map = _dirty_{prop};");
+            sb.AppendLine($"{indent}if (depth + 1 > OmniBufConstants.MaxNestingDepth)");
+            sb.AppendLine($"{indent}{{");
+            sb.AppendLine($"{indent}    throw new OmniBufException($\"omnibuf: nesting depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
+            sb.AppendLine($"{indent}}}");
+            sb.AppendLine($"{indent}var map = d.f_{prop};");
             sb.AppendLine($"{indent}int count = map?.Count ?? 0;");
             sb.AppendLine($"{indent}encoder.BeginMapField({fnum}u, OmniBufWireType.{keyWt}, OmniBufWireType.{valWt}, count);");
             sb.AppendLine($"{indent}if (map is not null && count > 0)");
@@ -2199,7 +2613,7 @@ public static class Program
             sb.AppendLine($"{indent}        var keys = new List<{keyCs}>(map.Keys);");
             if (keyField.Type == FieldDescriptorProto.Types.Type.String)
             {
-                sb.AppendLine($"{indent}        keys.Sort(StringComparer.Ordinal);");
+                sb.AppendLine($"{indent}        keys.Sort(Utf8OrdinalStringComparer.Instance);");
             }
             else
             {
@@ -2230,7 +2644,11 @@ public static class Program
         if (f.Label == FieldDescriptorProto.Types.Label.Repeated)
         {
             string elemWt = WireTypeEnumName(f.Type);
-            sb.AppendLine($"{indent}var list = _dirty_{prop};");
+            sb.AppendLine($"{indent}if (depth + 1 > OmniBufConstants.MaxNestingDepth)");
+            sb.AppendLine($"{indent}{{");
+            sb.AppendLine($"{indent}    throw new OmniBufException($\"omnibuf: nesting depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
+            sb.AppendLine($"{indent}}}");
+            sb.AppendLine($"{indent}var list = d.f_{prop};");
             sb.AppendLine($"{indent}int count = list?.Count ?? 0;");
             sb.AppendLine($"{indent}encoder.BeginArrayField({fnum}u, OmniBufWireType.{elemWt}, count);");
             sb.AppendLine($"{indent}if (list is not null)");
@@ -2239,6 +2657,10 @@ public static class Program
             sb.AppendLine($"{indent}    {{");
             if (f.Type == FieldDescriptorProto.Types.Type.Message)
             {
+                sb.AppendLine($"{indent}        if (depth + 2 > OmniBufConstants.MaxNestingDepth)");
+                sb.AppendLine($"{indent}        {{");
+                sb.AppendLine($"{indent}            throw new OmniBufException($\"omnibuf: nesting depth {{depth + 2}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
+                sb.AppendLine($"{indent}        }}");
                 if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? rWrap))
                 {
                     sb.AppendLine($"{indent}        encoder.BeginContainer();");
@@ -2261,8 +2683,12 @@ public static class Program
                 }
                 else
                 {
-                    sb.AppendLine($"{indent}        byte[] elemBytes = validate ? list[i].MarshalValidated(new MarshalOptions(false, deterministic)) : list[i].MarshalOmniBuf(new MarshalOptions(false, deterministic));");
-                    sb.AppendLine($"{indent}        encoder.WriteBytesValue(elemBytes);");
+                    sb.AppendLine($"{indent}        encoder.BeginContainer();");
+                    sb.AppendLine($"{indent}        if (list[i] is not null)");
+                    sb.AppendLine($"{indent}        {{");
+                    sb.AppendLine($"{indent}            list[i].SpliceBodyInto(encoder, deterministic, validate, depth + 2);");
+                    sb.AppendLine($"{indent}        }}");
+                    sb.AppendLine($"{indent}        encoder.EndContainer();");
                 }
             }
             else
@@ -2281,11 +2707,15 @@ public static class Program
             if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? sWrap))
             {
                 string cond = IsRealOneof(f)
-                    ? (sWrap.IsValueType ? $"_present_{prop} && _dirty_{prop}.HasValue" : $"_present_{prop} && _dirty_{prop} is not null")
-                    : (sWrap.IsValueType ? $"_dirty_{prop}.HasValue" : $"_dirty_{prop} is not null");
-                string valExpr = sWrap.IsValueType ? $"_dirty_{prop}!.Value" : $"_dirty_{prop}!";
+                    ? (sWrap.IsValueType ? $"d.present_{prop} && d.f_{prop}.HasValue" : $"d.present_{prop} && d.f_{prop} is not null")
+                    : (sWrap.IsValueType ? $"d.f_{prop}.HasValue" : $"d.f_{prop} is not null");
+                string valExpr = sWrap.IsValueType ? $"d.f_{prop}!.Value" : $"d.f_{prop}!";
                 sb.AppendLine($"{indent}if ({cond})");
                 sb.AppendLine($"{indent}{{");
+                sb.AppendLine($"{indent}    if (depth + 1 > OmniBufConstants.MaxNestingDepth)");
+                sb.AppendLine($"{indent}    {{");
+                sb.AppendLine($"{indent}        throw new OmniBufException($\"omnibuf: nesting depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
+                sb.AppendLine($"{indent}    }}");
                 sb.AppendLine($"{indent}    encoder.BeginSubMsgField({fnum}u);");
                 sb.AppendLine($"{indent}    OmniBufWrappers.Write{sWrap.MethodSuffix}Body(encoder, {valExpr});");
                 sb.AppendLine($"{indent}    encoder.EndSubMsg();");
@@ -2293,12 +2723,12 @@ public static class Program
                 return;
             }
 
-            string msgCond = IsRealOneof(f) ? $"_present_{prop} && _dirty_{prop} is not null" : $"_dirty_{prop} is not null";
+            string msgCond = IsRealOneof(f) ? $"d.present_{prop} && d.f_{prop} is not null" : $"d.f_{prop} is not null";
             sb.AppendLine($"{indent}if ({msgCond})");
             sb.AppendLine($"{indent}{{");
-            sb.AppendLine($"{indent}    byte[] subBytes = validate ? _dirty_{prop}!.MarshalValidated(new MarshalOptions(false, deterministic)) : _dirty_{prop}!.MarshalOmniBuf(new MarshalOptions(false, deterministic));");
-            sb.AppendLine($"{indent}    encoder.WriteTag({fnum}u, OmniBufWireType.SubMsg);");
-            sb.AppendLine($"{indent}    encoder.WriteBytesValue(subBytes);");
+            sb.AppendLine($"{indent}    encoder.BeginSubMsgField({fnum}u);");
+            sb.AppendLine($"{indent}    d.f_{prop}!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);");
+            sb.AppendLine($"{indent}    encoder.EndSubMsg();");
             sb.AppendLine($"{indent}}}");
             return;
         }
@@ -2306,15 +2736,15 @@ public static class Program
         bool hasPresence = HasExplicitScalarPresence(f, isProto2) || IsRealOneof(f);
         if (hasPresence)
         {
-            sb.AppendLine($"{indent}if (_present_{prop})");
+            sb.AppendLine($"{indent}if (d.present_{prop})");
             sb.AppendLine($"{indent}{{");
             if (f.Type == FieldDescriptorProto.Types.Type.Bytes)
             {
-                sb.AppendLine($"{indent}    encoder.WriteBytesField({fnum}u, _dirty_{prop} ?? Array.Empty<byte>());");
+                sb.AppendLine($"{indent}    encoder.WriteBytesField({fnum}u, d.f_{prop} ?? Array.Empty<byte>());");
             }
             else
             {
-                sb.AppendLine($"{indent}    {EmitWriteField("encoder", fnum, f, $"_dirty_{prop}!")};");
+                sb.AppendLine($"{indent}    {EmitWriteField("encoder", fnum, f, $"d.f_{prop}!")};");
             }
 
             sb.AppendLine($"{indent}}}");
@@ -2323,17 +2753,21 @@ public static class Program
 
         if (f.Type == FieldDescriptorProto.Types.Type.Bytes)
         {
-            sb.AppendLine($"{indent}encoder.WriteBytesField({fnum}u, _dirty_{prop} ?? Array.Empty<byte>());");
+            sb.AppendLine($"{indent}encoder.WriteBytesField({fnum}u, d.f_{prop} ?? Array.Empty<byte>());");
             return;
         }
 
-        sb.AppendLine($"{indent}{EmitWriteField("encoder", fnum, f, $"_dirty_{prop}!")};");
+        sb.AppendLine($"{indent}{EmitWriteField("encoder", fnum, f, $"d.f_{prop}!")};");
     }
 
     private static void EmitOpaqueMapValAppend(StringBuilder sb, string indent, FieldDescriptorProto valField, string valExpr)
     {
         if (valField.Type == FieldDescriptorProto.Types.Type.Message)
         {
+            sb.AppendLine($"{indent}if (depth + 2 > OmniBufConstants.MaxNestingDepth)");
+            sb.AppendLine($"{indent}{{");
+            sb.AppendLine($"{indent}    throw new OmniBufException($\"omnibuf: nesting depth {{depth + 2}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
+            sb.AppendLine($"{indent}}}");
             if (WrapperTypes.TryGetValue(valField.TypeName, out WrapperInfo? mWrap))
             {
                 sb.AppendLine($"{indent}encoder.BeginContainer();");
@@ -2356,8 +2790,12 @@ public static class Program
             }
             else
             {
-                sb.AppendLine($"{indent}byte[] subBytes = validate ? {valExpr}.MarshalValidated(new MarshalOptions(false, deterministic)) : {valExpr}.MarshalOmniBuf(new MarshalOptions(false, deterministic));");
-                sb.AppendLine($"{indent}encoder.WriteBytesValue(subBytes);");
+                sb.AppendLine($"{indent}encoder.BeginContainer();");
+                sb.AppendLine($"{indent}if ({valExpr} is not null)");
+                sb.AppendLine($"{indent}{{");
+                sb.AppendLine($"{indent}    {valExpr}.SpliceBodyInto(encoder, deterministic, validate, depth + 2);");
+                sb.AppendLine($"{indent}}}");
+                sb.AppendLine($"{indent}encoder.EndContainer();");
             }
         }
         else

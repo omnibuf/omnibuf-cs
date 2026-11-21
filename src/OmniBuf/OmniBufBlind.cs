@@ -669,7 +669,7 @@ public static class OmniBufBlind
             case Dictionary<string, object?> dict:
                 writer.WriteStartObject();
                 var keys = new List<string>(dict.Keys);
-                keys.Sort(StringComparer.Ordinal);
+                keys.Sort(Utf8OrdinalStringComparer.Instance);
                 foreach (string k in keys)
                 {
                     writer.WritePropertyName(k);

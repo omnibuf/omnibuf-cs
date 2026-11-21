@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.Unicode;
 
 namespace OmniBuf;
 
@@ -105,26 +106,45 @@ public sealed class OmniBufEncoder
         return result;
     }
 
+    public void CopyTo(IBufferWriter<byte> writer)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        if (_depth != 0)
+        {
+            throw new OmniBufException($"omnibuf: unclosed container scopes remaining ({_depth})");
+        }
+
+        if (_pos == 0)
+        {
+            return;
+        }
+
+        Span<byte> dest = writer.GetSpan(_pos);
+        _buf.AsSpan(0, _pos).CopyTo(dest);
+        writer.Advance(_pos);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EnsureSpace(int needed)
     {
-        if ((uint)(_pos + needed) > (uint)_buf.Length)
+        long required = (long)_pos + needed;
+        if (needed < 0 || required > _buf.Length)
         {
-            GrowBuffer(_pos + needed);
+            GrowBuffer(required);
         }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void GrowBuffer(int minCapacity)
+    private void GrowBuffer(long minCapacity)
     {
+        if (minCapacity < 0 || minCapacity > Array.MaxLength)
+        {
+            throw new OmniBufException("omnibuf: encoder buffer exceeds maximum array length");
+        }
+
         long next = Math.Max((long)_buf.Length * 2, minCapacity);
         if (next > Array.MaxLength)
         {
-            if (minCapacity > Array.MaxLength)
-            {
-                throw new OmniBufException("omnibuf: encoder buffer exceeds maximum array length");
-            }
-
             next = Array.MaxLength;
         }
 
@@ -240,39 +260,106 @@ public sealed class OmniBufEncoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteFloat64Value(double v) => WriteFixed64Value(BitConverter.DoubleToUInt64Bits(v));
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteStringValue(string? value)
     {
         string s = value ?? string.Empty;
-        if (s.Length == 0)
+        int charLen = s.Length;
+        if (charLen == 0)
         {
             EnsureSpace(1);
             _buf[_pos++] = 1; // 1B Prefix-Varint for 0
             return;
         }
 
-        if (s.Length <= 127)
+        int headerLen = charLen <= 127 ? 1 : (charLen <= 16_383 ? 2 : (charLen <= 536_870_911 ? 4 : 9));
+        long minNeeded = (long)headerLen + charLen;
+        if (minNeeded > Array.MaxLength)
         {
-            EnsureSpace(1 + s.Length);
-            if (Ascii.FromUtf16(s.AsSpan(), _buf.AsSpan(_pos + 1, s.Length), out int asciiWritten) == OperationStatus.Done)
+            throw new OmniBufException("omnibuf: encoder buffer exceeds maximum array length");
+        }
+
+        EnsureSpace((int)minNeeded);
+        if (Ascii.FromUtf16(s.AsSpan(), _buf.AsSpan(_pos + headerLen, charLen), out int asciiWritten) == OperationStatus.Done)
+        {
+            WriteFixedWidthVarintAt(_pos, (ulong)asciiWritten, headerLen);
+            _pos += headerLen + asciiWritten;
+            return;
+        }
+
+        WriteNonAsciiStringTail(s, headerLen, asciiWritten);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void WriteFixedWidthVarintAt(int offset, ulong v, int width)
+    {
+        if (width == 1)
+        {
+            _buf[offset] = (byte)((v << 1) | 1);
+        }
+        else if (width == 2)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(_buf.AsSpan(offset, 2), (ushort)((v << 2) | 2));
+        }
+        else if (width == 4)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(_buf.AsSpan(offset, 4), (uint)((v << 3) | 4));
+        }
+        else
+        {
+            _buf[offset] = 0;
+            BinaryPrimitives.WriteUInt64LittleEndian(_buf.AsSpan(offset + 1, 8), v);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void WriteNonAsciiStringTail(string s, int headerLen, int asciiWritten)
+    {
+        ReadOnlySpan<char> remChars = s.AsSpan(asciiWritten);
+        long worstCaseNeeded = 9L + asciiWritten + (long)remChars.Length * 3;
+        if ((long)_pos + worstCaseNeeded <= Array.MaxLength)
+        {
+            EnsureSpace((int)worstCaseNeeded);
+        }
+        else
+        {
+            int exactByteCount = OmniBufConstants.GetUtf8ByteCountStrict(s);
+            int exactHeaderLen = exactByteCount <= 127 ? 1 : (exactByteCount <= 16_383 ? 2 : (exactByteCount <= 536_870_911 ? 4 : 9));
+            long exactTotal = (long)exactHeaderLen + exactByteCount;
+            if ((long)_pos + exactTotal > Array.MaxLength)
             {
-                _buf[_pos] = (byte)((asciiWritten << 1) | 1);
-                _pos += 1 + asciiWritten;
-                return;
+                throw new OmniBufException("omnibuf: encoder buffer exceeds maximum array length");
+            }
+
+            EnsureSpace((int)exactTotal);
+            if (exactHeaderLen != headerLen && asciiWritten > 0)
+            {
+                _buf.AsSpan(_pos + headerLen, asciiWritten).CopyTo(_buf.AsSpan(_pos + exactHeaderLen, asciiWritten));
+                headerLen = exactHeaderLen;
             }
         }
 
-        int byteCount = OmniBufConstants.GetUtf8ByteCountStrict(s);
-        WriteVarint((ulong)byteCount);
-        EnsureSpace(byteCount);
-        try
+        OperationStatus status = Utf8.FromUtf16(
+            remChars,
+            _buf.AsSpan(_pos + headerLen + asciiWritten),
+            out _,
+            out int remWritten,
+            replaceInvalidSequences: false,
+            isFinalBlock: true);
+        if (status != OperationStatus.Done)
         {
-            int written = OmniBufConstants.StrictUtf8.GetBytes(s.AsSpan(), _buf.AsSpan(_pos, byteCount));
-            _pos += written;
+            throw new OmniBufException("omnibuf: string contains invalid UTF-16 surrogates");
         }
-        catch (EncoderFallbackException ex)
+
+        int totalBytes = asciiWritten + remWritten;
+        int actualHeaderLen = totalBytes <= 127 ? 1 : (totalBytes <= 16_383 ? 2 : (totalBytes <= 536_870_911 ? 4 : 9));
+        if (actualHeaderLen != headerLen)
         {
-            throw new OmniBufException("omnibuf: string contains invalid UTF-16 surrogates", ex);
+            _buf.AsSpan(_pos + headerLen, totalBytes).CopyTo(_buf.AsSpan(_pos + actualHeaderLen, totalBytes));
         }
+
+        WriteFixedWidthVarintAt(_pos, (ulong)totalBytes, actualHeaderLen);
+        _pos += actualHeaderLen + totalBytes;
     }
 
     public void WriteBytesValue(ReadOnlySpan<byte> value)
@@ -381,6 +468,35 @@ public sealed class OmniBufEncoder
         _pos += 2;
     }
 
+    /// <summary>
+    /// Reserves a 2-byte or 4-byte Prefix-Varint length slot based on a body byte size hint.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void BeginContainer(int sizeHint)
+    {
+        if (sizeHint > 16_383)
+        {
+            BeginContainerLarge();
+            return;
+        }
+
+        BeginContainer();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void BeginContainerLarge()
+    {
+        if (_depth == _containerStack.Length)
+        {
+            GrowContainerStack();
+        }
+
+        EnsureSpace(4);
+        _containerStack[_depth++] = _pos | int.MinValue;
+        _buf.AsSpan(_pos, 4).Clear();
+        _pos += 4;
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void GrowContainerStack()
     {
@@ -400,7 +516,14 @@ public sealed class OmniBufEncoder
             throw new OmniBufException("omnibuf: container stack underflow");
         }
 
-        int lenPos = _containerStack[--_depth];
+        int rawEntry = _containerStack[--_depth];
+        if (rawEntry < 0)
+        {
+            EndContainerLarge(rawEntry & int.MaxValue);
+            return;
+        }
+
+        int lenPos = rawEntry;
         int bodyStart = lenPos + 2;
         int bodyLen = _pos - bodyStart;
 
@@ -429,10 +552,49 @@ public sealed class OmniBufEncoder
         }
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void EndContainerLarge(int lenPos)
+    {
+        int bodyStart = lenPos + 4;
+        int bodyLen = _pos - bodyStart;
+        if (bodyLen <= 16_383)
+        {
+            if (bodyLen > 0)
+            {
+                _buf.AsSpan(bodyStart, bodyLen).CopyTo(_buf.AsSpan(lenPos + 2, bodyLen));
+            }
+
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                _buf.AsSpan(lenPos, 2),
+                (ushort)(((uint)bodyLen << 2) | 2u));
+            _pos -= 2;
+        }
+        else if (bodyLen <= 536_870_911)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                _buf.AsSpan(lenPos, 4),
+                ((uint)bodyLen << 3) | 4u);
+        }
+        else
+        {
+            EnsureSpace(5);
+            _buf.AsSpan(bodyStart, bodyLen).CopyTo(_buf.AsSpan(lenPos + 9, bodyLen));
+            _buf[lenPos] = 0;
+            BinaryPrimitives.WriteUInt64LittleEndian(_buf.AsSpan(lenPos + 1, 8), (ulong)bodyLen);
+            _pos += 5;
+        }
+    }
+
     public void BeginSubMsgField(uint fieldNum)
     {
         WriteTag(fieldNum, OmniBufWireType.SubMsg);
         BeginContainer();
+    }
+
+    public void BeginSubMsgField(uint fieldNum, int sizeHint)
+    {
+        WriteTag(fieldNum, OmniBufWireType.SubMsg);
+        BeginContainer(sizeHint);
     }
 
     internal void BeginField0SubMsg()
@@ -451,7 +613,40 @@ public sealed class OmniBufEncoder
         }
 
         WriteTag(fieldNum, OmniBufWireType.Array);
-        BeginContainer();
+        long minElemWidth = Math.Max(1, OmniBufConstants.FixedElementWidth(elemType));
+        long minBody = 2L + (long)count * minElemWidth;
+        if (minBody > 16_383)
+        {
+            BeginContainerLarge();
+        }
+        else
+        {
+            BeginContainer();
+        }
+
+        WriteRawByte((byte)elemType);
+        WriteVarint((ulong)count);
+    }
+
+    public void BeginArrayField(uint fieldNum, OmniBufWireType elemType, int count, int minBodyHint)
+    {
+        if (!OmniBufConstants.IsValidContainerElemType(elemType) || count < 0)
+        {
+            throw new OmniBufException($"omnibuf: invalid WireArray header ({elemType}, count={count})");
+        }
+
+        WriteTag(fieldNum, OmniBufWireType.Array);
+        long minElemWidth = Math.Max(1, OmniBufConstants.FixedElementWidth(elemType));
+        long minBody = Math.Max(minBodyHint, 2L + (long)count * minElemWidth);
+        if (minBody > 16_383)
+        {
+            BeginContainerLarge();
+        }
+        else
+        {
+            BeginContainer();
+        }
+
         WriteRawByte((byte)elemType);
         WriteVarint((ulong)count);
     }
@@ -463,7 +658,17 @@ public sealed class OmniBufEncoder
             throw new OmniBufException($"omnibuf: invalid WireArray header ({elemType}, count={count})");
         }
 
-        BeginContainer();
+        long minElemWidth = Math.Max(1, OmniBufConstants.FixedElementWidth(elemType));
+        long minBody = 2L + (long)count * minElemWidth;
+        if (minBody > 16_383)
+        {
+            BeginContainerLarge();
+        }
+        else
+        {
+            BeginContainer();
+        }
+
         WriteRawByte((byte)elemType);
         WriteVarint((ulong)count);
     }
@@ -480,7 +685,18 @@ public sealed class OmniBufEncoder
         }
 
         WriteTag(fieldNum, OmniBufWireType.Map);
-        BeginContainer();
+        long minEntryWidth = Math.Max(1, OmniBufConstants.FixedElementWidth(keyType))
+            + Math.Max(1, OmniBufConstants.FixedElementWidth(valType));
+        long minBody = 3L + (long)count * minEntryWidth;
+        if (minBody > 16_383)
+        {
+            BeginContainerLarge();
+        }
+        else
+        {
+            BeginContainer();
+        }
+
         WriteRawByte((byte)keyType);
         WriteRawByte((byte)valType);
         WriteVarint((ulong)count);
@@ -495,7 +711,18 @@ public sealed class OmniBufEncoder
             throw new OmniBufException($"omnibuf: invalid WireMap header ({keyType}, {valType}, count={count})");
         }
 
-        BeginContainer();
+        long minEntryWidth = Math.Max(1, OmniBufConstants.FixedElementWidth(keyType))
+            + Math.Max(1, OmniBufConstants.FixedElementWidth(valType));
+        long minBody = 3L + (long)count * minEntryWidth;
+        if (minBody > 16_383)
+        {
+            BeginContainerLarge();
+        }
+        else
+        {
+            BeginContainer();
+        }
+
         WriteRawByte((byte)keyType);
         WriteRawByte((byte)valType);
         WriteVarint((ulong)count);

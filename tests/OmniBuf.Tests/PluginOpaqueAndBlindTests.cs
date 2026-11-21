@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text.Json;
 using Google.Protobuf;
 using Omnibuf.Bench;
@@ -192,5 +193,52 @@ public sealed class PluginOpaqueAndBlindTests
         byte[] shapeChangePacket = enc2.ToArray();
 
         Assert.Throws<OmniBufException>(() => OmniBufBlind.DecodeBlind(shapeChangePacket));
+    }
+
+    [Fact]
+    public void SpanViewAndBufferWriter_ZeroCopySliceReadsAndStreamingWritesMatchGeneratedCodec()
+    {
+        var peer = new PeerUpdate
+        {
+            Asn = 64512u,
+            RouterId = "edge-rtr-ams02",
+            Active = true,
+            Sequence = 42424242UL,
+            Location = new Location
+            {
+                Region = "eu-west-1",
+                City = "Amsterdam",
+                Rack = 9u,
+            },
+        };
+
+        var writer = new ArrayBufferWriter<byte>();
+        peer.MarshalOmniBuf(writer);
+        ReadOnlySpan<byte> wire = writer.WrittenSpan;
+        Assert.Equal(peer.MarshalOmniBuf(), wire.ToArray());
+
+        var view = new PeerUpdateSpanView(wire);
+        Assert.Equal(64512u, view.Asn);
+        Assert.Equal("edge-rtr-ams02", view.RouterId);
+        Assert.Equal("edge-rtr-ams02"u8.ToArray(), view.GetRouterIdUtf8Span().ToArray());
+        Assert.True(view.Active);
+        Assert.Equal(42424242UL, view.Sequence);
+        Assert.True(view.TryGetLocation(out LocationSpanView locView));
+        Assert.Equal("Amsterdam", locView.City);
+        Assert.Equal(9u, locView.Rack);
+
+        var msg = new TestAllTypes
+        {
+            F6String = "span-str",
+            F7Bytes = ByteString.CopyFrom(0xDE, 0xAD, 0xBE, 0xEF),
+        };
+        var msgWriter = new ArrayBufferWriter<byte>();
+        msg.MarshalOmniBuf(msgWriter);
+        var msgView = new TestAllTypesSpanView(msgWriter.WrittenSpan);
+        Assert.Equal(new byte[] { 0xDE, 0xAD, 0xBE, 0xEF }, msgView.F7Bytes.ToArray());
+        Assert.Equal("span-str", msgView.F6String);
+
+        var opaqueMsg = new OpaqueTestAllTypes(msgWriter.WrittenMemory.ToArray());
+        Assert.Equal(new byte[] { 0xDE, 0xAD, 0xBE, 0xEF }, opaqueMsg.GetF7BytesSpan().ToArray());
     }
 }

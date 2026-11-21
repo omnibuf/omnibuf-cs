@@ -6,6 +6,7 @@
 #pragma warning disable CS1591, CS0612, CS3021, CS8981
 
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using Google.Protobuf;
 using OmniBuf;
@@ -101,6 +102,32 @@ public sealed partial class ConformanceRequest
         {
             OmniBufEncoder.ReturnThreadLocal(encoder, rented);
         }
+    }
+
+    public void MarshalOmniBuf(IBufferWriter<byte> writer, MarshalOptions options = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        OmniBufEncoder encoder = OmniBufEncoder.RentThreadLocal(out bool rented);
+        try
+        {
+            MarshalOmniBuf(encoder, options);
+            encoder.CopyTo(writer);
+        }
+        finally
+        {
+            OmniBufEncoder.ReturnThreadLocal(encoder, rented);
+        }
+    }
+
+    internal int EstimateOmniBufMinSize(int depth = 0)
+    {
+        if (depth > 8) return 0;
+        int total = 0;
+        total += this.TestName?.Length ?? 0;
+        total += this.MessageType?.Length ?? 0;
+        total += this.OmnibufPayload.Length;
+        total += this.JsonPayload?.Length ?? 0;
+        return total;
     }
 
     public void MarshalOmniBuf(OmniBufEncoder encoder, MarshalOptions options = default)
@@ -313,18 +340,26 @@ public sealed partial class ConformanceRequest
 
 public sealed class OpaqueConformanceRequest
 {
+    private const int MaxIndexedField = 9;
+    private sealed class DirtyState
+    {
+        public HashSet<uint>? Overflow;
+        public string? f_TestName;
+        public string? f_MessageType;
+        public global::Omnibuf.Conformance.TestTier f_Tier;
+        public global::Omnibuf.Conformance.WireFormat f_RequestedOutputFormat;
+        public byte[]? f_OmnibufPayload;
+        public string? f_JsonPayload;
+        public bool f_SelfDescribing;
+        public bool f_TestOpaqueSplice;
+        public bool f_TestOpaqueSpliceShrink;
+    }
+
     private readonly byte[] _raw;
     private ulong _dirtyMaskLow;
-    private HashSet<uint>? _dirtyOverflow;
-    private string? _dirty_TestName;
-    private string? _dirty_MessageType;
-    private global::Omnibuf.Conformance.TestTier _dirty_Tier;
-    private global::Omnibuf.Conformance.WireFormat _dirty_RequestedOutputFormat;
-    private byte[]? _dirty_OmnibufPayload;
-    private string? _dirty_JsonPayload;
-    private bool _dirty_SelfDescribing;
-    private bool _dirty_TestOpaqueSplice;
-    private bool _dirty_TestOpaqueSpliceShrink;
+    private DirtyState? _dirty;
+    private long[]? _fieldIndex;
+    private byte _readCount;
 
     public OpaqueConformanceRequest(byte[] raw)
     {
@@ -338,18 +373,32 @@ public sealed class OpaqueConformanceRequest
 
     public ReadOnlySpan<byte> RawSpan => _raw;
 
+    public ConformanceRequestSpanView AsSpanView() => new(_raw);
+
     internal bool HasDirtyFields
     {
         get
         {
             PropagateChildDirty();
-            return _dirtyMaskLow != 0 || (_dirtyOverflow is not null && _dirtyOverflow.Count > 0);
+            return _dirtyMaskLow != 0 || (_dirty?.Overflow is { Count: > 0 });
         }
+    }
+
+    private DirtyState EnsureDirty() => _dirty ??= new DirtyState();
+
+    private long[]? GetOrBuildIndex()
+    {
+        long[]? idx = _fieldIndex;
+        if (idx is not null) return idx;
+        if (_readCount == 0) { _readCount = 1; return null; }
+        idx = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
+        _fieldIndex = idx;
+        return idx;
     }
 
     private bool IsDirty(uint fieldNum) => fieldNum < 64
         ? (_dirtyMaskLow & (1UL << (int)fieldNum)) != 0
-        : (_dirtyOverflow is not null && _dirtyOverflow.Contains(fieldNum));
+        : (_dirty?.Overflow is not null && _dirty.Overflow.Contains(fieldNum));
 
     private void MarkDirty(uint fieldNum)
     {
@@ -359,7 +408,7 @@ public sealed class OpaqueConformanceRequest
         }
         else
         {
-            (_dirtyOverflow ??= new HashSet<uint>()).Add(fieldNum);
+            (EnsureDirty().Overflow ??= new HashSet<uint>()).Add(fieldNum);
         }
     }
 
@@ -369,62 +418,95 @@ public sealed class OpaqueConformanceRequest
 
     public string TestName
     {
-        get => IsDirty(1u) ? _dirty_TestName! : (OmniBufOpaque.TryReadString(_raw, 1u, out string v) ? v : string.Empty);
-        set { _dirty_TestName = value; MarkDirty(1u); }
+        get => IsDirty(1u) ? _dirty!.f_TestName! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 1u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 1u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_TestName = value ?? string.Empty; MarkDirty(1u); }
     }
 
     public string MessageType
     {
-        get => IsDirty(2u) ? _dirty_MessageType! : (OmniBufOpaque.TryReadString(_raw, 2u, out string v) ? v : string.Empty);
-        set { _dirty_MessageType = value; MarkDirty(2u); }
+        get => IsDirty(2u) ? _dirty!.f_MessageType! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 2u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 2u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_MessageType = value ?? string.Empty; MarkDirty(2u); }
     }
 
     public global::Omnibuf.Conformance.TestTier Tier
     {
-        get => IsDirty(3u) ? _dirty_Tier! : (OmniBufOpaque.TryReadSint(_raw, 3u, out long v) ? (global::Omnibuf.Conformance.TestTier)(int)v : default);
-        set { _dirty_Tier = value; MarkDirty(3u); }
+        get => IsDirty(3u) ? _dirty!.f_Tier! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadSintIndexed(idx, _raw, 3u, out long vi) ? (global::Omnibuf.Conformance.TestTier)(int)vi : default) : (OmniBufOpaque.TryReadSint(_raw, 3u, out long v) ? (global::Omnibuf.Conformance.TestTier)(int)v : default));
+        set { EnsureDirty().f_Tier = value; MarkDirty(3u); }
     }
 
     public global::Omnibuf.Conformance.WireFormat RequestedOutputFormat
     {
-        get => IsDirty(4u) ? _dirty_RequestedOutputFormat! : (OmniBufOpaque.TryReadSint(_raw, 4u, out long v) ? (global::Omnibuf.Conformance.WireFormat)(int)v : default);
-        set { _dirty_RequestedOutputFormat = value; MarkDirty(4u); }
+        get => IsDirty(4u) ? _dirty!.f_RequestedOutputFormat! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadSintIndexed(idx, _raw, 4u, out long vi) ? (global::Omnibuf.Conformance.WireFormat)(int)vi : default) : (OmniBufOpaque.TryReadSint(_raw, 4u, out long v) ? (global::Omnibuf.Conformance.WireFormat)(int)v : default));
+        set { EnsureDirty().f_RequestedOutputFormat = value; MarkDirty(4u); }
     }
 
     public byte[] OmnibufPayload
     {
-        get => IsDirty(5u) ? (_dirty_OmnibufPayload ?? Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, 5u, out byte[] b) ? b : Array.Empty<byte>());
-        set { _dirty_OmnibufPayload = value ?? Array.Empty<byte>(); MarkDirty(5u); }
+        get => IsDirty(5u) ? (_dirty!.f_OmnibufPayload ?? Array.Empty<byte>()) : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadBytesIndexed(idx, _raw, 5u, out byte[] bi) ? bi : Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, 5u, out byte[] b) ? b : Array.Empty<byte>()));
+        set { EnsureDirty().f_OmnibufPayload = value ?? Array.Empty<byte>(); MarkDirty(5u); }
     }
+    public ReadOnlySpan<byte> GetOmnibufPayloadSpan() => (IsDirty(5u) ? (_dirty!.f_OmnibufPayload ?? Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytesSpan(_raw, 5u, out ReadOnlySpan<byte> sp) ? sp : ReadOnlySpan<byte>.Empty));
 
     public string JsonPayload
     {
-        get => IsDirty(6u) ? _dirty_JsonPayload! : (OmniBufOpaque.TryReadString(_raw, 6u, out string v) ? v : string.Empty);
-        set { _dirty_JsonPayload = value; MarkDirty(6u); }
+        get => IsDirty(6u) ? _dirty!.f_JsonPayload! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 6u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 6u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_JsonPayload = value ?? string.Empty; MarkDirty(6u); }
     }
 
     public bool SelfDescribing
     {
-        get => IsDirty(7u) ? _dirty_SelfDescribing! : (OmniBufOpaque.TryReadBool(_raw, 7u, out bool v) && v);
-        set { _dirty_SelfDescribing = value; MarkDirty(7u); }
+        get => IsDirty(7u) ? _dirty!.f_SelfDescribing! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadBoolIndexed(idx, _raw, 7u, out bool vi) && vi) : (OmniBufOpaque.TryReadBool(_raw, 7u, out bool v) && v));
+        set { EnsureDirty().f_SelfDescribing = value; MarkDirty(7u); }
     }
 
     public bool TestOpaqueSplice
     {
-        get => IsDirty(8u) ? _dirty_TestOpaqueSplice! : (OmniBufOpaque.TryReadBool(_raw, 8u, out bool v) && v);
-        set { _dirty_TestOpaqueSplice = value; MarkDirty(8u); }
+        get => IsDirty(8u) ? _dirty!.f_TestOpaqueSplice! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadBoolIndexed(idx, _raw, 8u, out bool vi) && vi) : (OmniBufOpaque.TryReadBool(_raw, 8u, out bool v) && v));
+        set { EnsureDirty().f_TestOpaqueSplice = value; MarkDirty(8u); }
     }
 
     public bool TestOpaqueSpliceShrink
     {
-        get => IsDirty(9u) ? _dirty_TestOpaqueSpliceShrink! : (OmniBufOpaque.TryReadBool(_raw, 9u, out bool v) && v);
-        set { _dirty_TestOpaqueSpliceShrink = value; MarkDirty(9u); }
+        get => IsDirty(9u) ? _dirty!.f_TestOpaqueSpliceShrink! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadBoolIndexed(idx, _raw, 9u, out bool vi) && vi) : (OmniBufOpaque.TryReadBool(_raw, 9u, out bool v) && v));
+        set { EnsureDirty().f_TestOpaqueSpliceShrink = value; MarkDirty(9u); }
     }
 
     public void ResetDirty()
     {
         _dirtyMaskLow = 0;
-        _dirtyOverflow?.Clear();
+        _dirty = null;
+    }
+
+    internal void SpliceBodyInto(OmniBufEncoder encoder, bool deterministic, bool validate, int depth)
+    {
+        if (depth > OmniBufConstants.MaxNestingDepth)
+        {
+            throw new OmniBufException($"omnibuf: nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+        }
+        PropagateChildDirty();
+        if (validate)
+        {
+            OmniBufOpaque.SpliceFieldsValidatedTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
+        }
+        else
+        {
+            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+        }
+    }
+
+    public void MarshalOmniBuf(IBufferWriter<byte> writer, MarshalOptions options = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
+        try
+        {
+            MarshalOmniBuf(enc, options);
+            enc.CopyTo(writer);
+        }
+        finally
+        {
+            OmniBufEncoder.ReturnThreadLocal(enc, rented);
+        }
     }
 
     public void MarshalOmniBuf(OmniBufEncoder encoder, MarshalOptions options = default)
@@ -435,7 +517,7 @@ public sealed class OpaqueConformanceRequest
             SchemaMeta? meta = global::Omnibuf.Conformance.ConformanceRequest.BuildOmniBufSchemaMeta(1, null, out bool cyclic);
             if (cyclic)
             {
-                byte[] body = OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false), stripField0: true);
+                byte[] body = OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0), stripField0: true);
                 meta = global::Omnibuf.Conformance.ConformanceRequest.ParseOmniBuf(body).BuildOmniBufValueSchemaMeta(1, null);
                 if (meta is not null)
                 {
@@ -449,7 +531,7 @@ public sealed class OpaqueConformanceRequest
                 SchemaMeta.WriteField0(encoder, meta, options.Deterministic);
             }
         }
-        OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false), stripField0: options.SelfDescribing);
+        OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0), stripField0: options.SelfDescribing);
     }
 
     public byte[] MarshalOmniBuf(MarshalOptions options = default)
@@ -457,9 +539,9 @@ public sealed class OpaqueConformanceRequest
         PropagateChildDirty();
         if (!options.SelfDescribing)
         {
-            return (_dirtyMaskLow == 0 && (_dirtyOverflow is null || _dirtyOverflow.Count == 0))
+            return (_dirtyMaskLow == 0 && (_dirty?.Overflow is null || _dirty?.Overflow.Count == 0))
                 ? (byte[])_raw.Clone()
-                : OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false));
+                : OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0));
         }
         OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
         try
@@ -476,17 +558,20 @@ public sealed class OpaqueConformanceRequest
     public byte[] MarshalValidated(MarshalOptions options = default)
     {
         PropagateChildDirty();
-        if (!options.SelfDescribing)
-        {
-            return OmniBufOpaque.SpliceFieldsValidated(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: true));
-        }
         OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
         try
         {
+            if (!options.SelfDescribing)
+            {
+                SpliceBodyInto(enc, options.Deterministic, validate: true, depth: 0);
+                return enc.ToArray();
+            }
             SchemaMeta? meta = global::Omnibuf.Conformance.ConformanceRequest.BuildOmniBufSchemaMeta(1, null, out bool cyclic);
             if (cyclic)
             {
-                byte[] body = OmniBufOpaque.SpliceFieldsValidated(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true), stripField0: true);
+                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, 0), stripField0: true, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);
+                byte[] body = enc.ToArray();
+                enc.Reset();
                 meta = global::Omnibuf.Conformance.ConformanceRequest.ParseOmniBuf(body).BuildOmniBufValueSchemaMeta(1, null);
                 if (meta is not null)
                 {
@@ -500,7 +585,7 @@ public sealed class OpaqueConformanceRequest
                 {
                     SchemaMeta.WriteField0(enc, meta, options.Deterministic);
                 }
-                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true), stripField0: true);
+                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, 0), stripField0: true, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);
             }
             return enc.ToArray();
         }
@@ -526,59 +611,86 @@ public sealed class OpaqueConformanceRequest
         }
     }
 
-    private void AppendDirtyField(OmniBufEncoder encoder, uint fieldNum, bool deterministic, bool validate)
+    private void AppendDirtyField(OmniBufEncoder encoder, uint fieldNum, bool deterministic, bool validate, int depth)
     {
         _ = deterministic;
         _ = validate;
+        _ = depth;
+        if (_dirty is not { } d) return;
         switch (fieldNum)
         {
             case 1u:
             {
-                encoder.WriteStringField(1u, _dirty_TestName!);
+                encoder.WriteStringField(1u, d.f_TestName!);
                 break;
             }
             case 2u:
             {
-                encoder.WriteStringField(2u, _dirty_MessageType!);
+                encoder.WriteStringField(2u, d.f_MessageType!);
                 break;
             }
             case 3u:
             {
-                encoder.WriteSintField(3u, (int)_dirty_Tier!);
+                encoder.WriteSintField(3u, (int)d.f_Tier!);
                 break;
             }
             case 4u:
             {
-                encoder.WriteSintField(4u, (int)_dirty_RequestedOutputFormat!);
+                encoder.WriteSintField(4u, (int)d.f_RequestedOutputFormat!);
                 break;
             }
             case 5u:
             {
-                encoder.WriteBytesField(5u, _dirty_OmnibufPayload ?? Array.Empty<byte>());
+                encoder.WriteBytesField(5u, d.f_OmnibufPayload ?? Array.Empty<byte>());
                 break;
             }
             case 6u:
             {
-                encoder.WriteStringField(6u, _dirty_JsonPayload!);
+                encoder.WriteStringField(6u, d.f_JsonPayload!);
                 break;
             }
             case 7u:
             {
-                encoder.WriteBoolField(7u, _dirty_SelfDescribing!);
+                encoder.WriteBoolField(7u, d.f_SelfDescribing!);
                 break;
             }
             case 8u:
             {
-                encoder.WriteBoolField(8u, _dirty_TestOpaqueSplice!);
+                encoder.WriteBoolField(8u, d.f_TestOpaqueSplice!);
                 break;
             }
             case 9u:
             {
-                encoder.WriteBoolField(9u, _dirty_TestOpaqueSpliceShrink!);
+                encoder.WriteBoolField(9u, d.f_TestOpaqueSpliceShrink!);
                 break;
             }
         }
     }
+}
+
+public readonly ref struct ConformanceRequestSpanView
+{
+    private readonly ReadOnlySpan<byte> _raw;
+
+    public ConformanceRequestSpanView(ReadOnlySpan<byte> raw)
+    {
+        _raw = raw;
+    }
+
+    public ReadOnlySpan<byte> RawSpan => _raw;
+
+    public string TestName => OmniBufOpaque.TryReadString(_raw, 1u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetTestNameUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 1u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public string MessageType => OmniBufOpaque.TryReadString(_raw, 2u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetMessageTypeUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 2u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public global::Omnibuf.Conformance.TestTier Tier => OmniBufOpaque.TryReadSint(_raw, 3u, out long v) ? (global::Omnibuf.Conformance.TestTier)(int)v : default;
+    public global::Omnibuf.Conformance.WireFormat RequestedOutputFormat => OmniBufOpaque.TryReadSint(_raw, 4u, out long v) ? (global::Omnibuf.Conformance.WireFormat)(int)v : default;
+    public ReadOnlySpan<byte> OmnibufPayload => OmniBufOpaque.TryReadBytesSpan(_raw, 5u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public string JsonPayload => OmniBufOpaque.TryReadString(_raw, 6u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetJsonPayloadUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 6u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public bool SelfDescribing => OmniBufOpaque.TryReadBool(_raw, 7u, out bool v) && v;
+    public bool TestOpaqueSplice => OmniBufOpaque.TryReadBool(_raw, 8u, out bool v) && v;
+    public bool TestOpaqueSpliceShrink => OmniBufOpaque.TryReadBool(_raw, 9u, out bool v) && v;
 }
 
 public sealed partial class ConformanceResponse
@@ -664,6 +776,34 @@ public sealed partial class ConformanceResponse
         {
             OmniBufEncoder.ReturnThreadLocal(encoder, rented);
         }
+    }
+
+    public void MarshalOmniBuf(IBufferWriter<byte> writer, MarshalOptions options = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        OmniBufEncoder encoder = OmniBufEncoder.RentThreadLocal(out bool rented);
+        try
+        {
+            MarshalOmniBuf(encoder, options);
+            encoder.CopyTo(writer);
+        }
+        finally
+        {
+            OmniBufEncoder.ReturnThreadLocal(encoder, rented);
+        }
+    }
+
+    internal int EstimateOmniBufMinSize(int depth = 0)
+    {
+        if (depth > 8) return 0;
+        int total = 0;
+        total += this.ParseError?.Length ?? 0;
+        total += this.SerializeError?.Length ?? 0;
+        total += this.RuntimeError?.Length ?? 0;
+        total += this.Skipped?.Length ?? 0;
+        total += this.OmnibufPayload.Length;
+        total += this.JsonPayload?.Length ?? 0;
+        return total;
     }
 
     public void MarshalOmniBuf(OmniBufEncoder encoder, MarshalOptions options = default)
@@ -828,15 +968,23 @@ public sealed partial class ConformanceResponse
 
 public sealed class OpaqueConformanceResponse
 {
+    private const int MaxIndexedField = 6;
+    private sealed class DirtyState
+    {
+        public HashSet<uint>? Overflow;
+        public string? f_ParseError;
+        public string? f_SerializeError;
+        public string? f_RuntimeError;
+        public string? f_Skipped;
+        public byte[]? f_OmnibufPayload;
+        public string? f_JsonPayload;
+    }
+
     private readonly byte[] _raw;
     private ulong _dirtyMaskLow;
-    private HashSet<uint>? _dirtyOverflow;
-    private string? _dirty_ParseError;
-    private string? _dirty_SerializeError;
-    private string? _dirty_RuntimeError;
-    private string? _dirty_Skipped;
-    private byte[]? _dirty_OmnibufPayload;
-    private string? _dirty_JsonPayload;
+    private DirtyState? _dirty;
+    private long[]? _fieldIndex;
+    private byte _readCount;
 
     public OpaqueConformanceResponse(byte[] raw)
     {
@@ -850,18 +998,32 @@ public sealed class OpaqueConformanceResponse
 
     public ReadOnlySpan<byte> RawSpan => _raw;
 
+    public ConformanceResponseSpanView AsSpanView() => new(_raw);
+
     internal bool HasDirtyFields
     {
         get
         {
             PropagateChildDirty();
-            return _dirtyMaskLow != 0 || (_dirtyOverflow is not null && _dirtyOverflow.Count > 0);
+            return _dirtyMaskLow != 0 || (_dirty?.Overflow is { Count: > 0 });
         }
+    }
+
+    private DirtyState EnsureDirty() => _dirty ??= new DirtyState();
+
+    private long[]? GetOrBuildIndex()
+    {
+        long[]? idx = _fieldIndex;
+        if (idx is not null) return idx;
+        if (_readCount == 0) { _readCount = 1; return null; }
+        idx = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
+        _fieldIndex = idx;
+        return idx;
     }
 
     private bool IsDirty(uint fieldNum) => fieldNum < 64
         ? (_dirtyMaskLow & (1UL << (int)fieldNum)) != 0
-        : (_dirtyOverflow is not null && _dirtyOverflow.Contains(fieldNum));
+        : (_dirty?.Overflow is not null && _dirty.Overflow.Contains(fieldNum));
 
     private void MarkDirty(uint fieldNum)
     {
@@ -871,7 +1033,7 @@ public sealed class OpaqueConformanceResponse
         }
         else
         {
-            (_dirtyOverflow ??= new HashSet<uint>()).Add(fieldNum);
+            (EnsureDirty().Overflow ??= new HashSet<uint>()).Add(fieldNum);
         }
     }
 
@@ -881,44 +1043,77 @@ public sealed class OpaqueConformanceResponse
 
     public string ParseError
     {
-        get => IsDirty(1u) ? _dirty_ParseError! : (OmniBufOpaque.TryReadString(_raw, 1u, out string v) ? v : string.Empty);
-        set { _dirty_ParseError = value; MarkDirty(1u); }
+        get => IsDirty(1u) ? _dirty!.f_ParseError! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 1u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 1u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_ParseError = value ?? string.Empty; MarkDirty(1u); }
     }
 
     public string SerializeError
     {
-        get => IsDirty(2u) ? _dirty_SerializeError! : (OmniBufOpaque.TryReadString(_raw, 2u, out string v) ? v : string.Empty);
-        set { _dirty_SerializeError = value; MarkDirty(2u); }
+        get => IsDirty(2u) ? _dirty!.f_SerializeError! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 2u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 2u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_SerializeError = value ?? string.Empty; MarkDirty(2u); }
     }
 
     public string RuntimeError
     {
-        get => IsDirty(3u) ? _dirty_RuntimeError! : (OmniBufOpaque.TryReadString(_raw, 3u, out string v) ? v : string.Empty);
-        set { _dirty_RuntimeError = value; MarkDirty(3u); }
+        get => IsDirty(3u) ? _dirty!.f_RuntimeError! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 3u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 3u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_RuntimeError = value ?? string.Empty; MarkDirty(3u); }
     }
 
     public string Skipped
     {
-        get => IsDirty(4u) ? _dirty_Skipped! : (OmniBufOpaque.TryReadString(_raw, 4u, out string v) ? v : string.Empty);
-        set { _dirty_Skipped = value; MarkDirty(4u); }
+        get => IsDirty(4u) ? _dirty!.f_Skipped! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 4u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 4u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_Skipped = value ?? string.Empty; MarkDirty(4u); }
     }
 
     public byte[] OmnibufPayload
     {
-        get => IsDirty(5u) ? (_dirty_OmnibufPayload ?? Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, 5u, out byte[] b) ? b : Array.Empty<byte>());
-        set { _dirty_OmnibufPayload = value ?? Array.Empty<byte>(); MarkDirty(5u); }
+        get => IsDirty(5u) ? (_dirty!.f_OmnibufPayload ?? Array.Empty<byte>()) : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadBytesIndexed(idx, _raw, 5u, out byte[] bi) ? bi : Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, 5u, out byte[] b) ? b : Array.Empty<byte>()));
+        set { EnsureDirty().f_OmnibufPayload = value ?? Array.Empty<byte>(); MarkDirty(5u); }
     }
+    public ReadOnlySpan<byte> GetOmnibufPayloadSpan() => (IsDirty(5u) ? (_dirty!.f_OmnibufPayload ?? Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytesSpan(_raw, 5u, out ReadOnlySpan<byte> sp) ? sp : ReadOnlySpan<byte>.Empty));
 
     public string JsonPayload
     {
-        get => IsDirty(6u) ? _dirty_JsonPayload! : (OmniBufOpaque.TryReadString(_raw, 6u, out string v) ? v : string.Empty);
-        set { _dirty_JsonPayload = value; MarkDirty(6u); }
+        get => IsDirty(6u) ? _dirty!.f_JsonPayload! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 6u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 6u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_JsonPayload = value ?? string.Empty; MarkDirty(6u); }
     }
 
     public void ResetDirty()
     {
         _dirtyMaskLow = 0;
-        _dirtyOverflow?.Clear();
+        _dirty = null;
+    }
+
+    internal void SpliceBodyInto(OmniBufEncoder encoder, bool deterministic, bool validate, int depth)
+    {
+        if (depth > OmniBufConstants.MaxNestingDepth)
+        {
+            throw new OmniBufException($"omnibuf: nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+        }
+        PropagateChildDirty();
+        if (validate)
+        {
+            OmniBufOpaque.SpliceFieldsValidatedTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
+        }
+        else
+        {
+            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+        }
+    }
+
+    public void MarshalOmniBuf(IBufferWriter<byte> writer, MarshalOptions options = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
+        try
+        {
+            MarshalOmniBuf(enc, options);
+            enc.CopyTo(writer);
+        }
+        finally
+        {
+            OmniBufEncoder.ReturnThreadLocal(enc, rented);
+        }
     }
 
     public void MarshalOmniBuf(OmniBufEncoder encoder, MarshalOptions options = default)
@@ -929,7 +1124,7 @@ public sealed class OpaqueConformanceResponse
             SchemaMeta? meta = global::Omnibuf.Conformance.ConformanceResponse.BuildOmniBufSchemaMeta(1, null, out bool cyclic);
             if (cyclic)
             {
-                byte[] body = OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false), stripField0: true);
+                byte[] body = OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0), stripField0: true);
                 meta = global::Omnibuf.Conformance.ConformanceResponse.ParseOmniBuf(body).BuildOmniBufValueSchemaMeta(1, null);
                 if (meta is not null)
                 {
@@ -943,7 +1138,7 @@ public sealed class OpaqueConformanceResponse
                 SchemaMeta.WriteField0(encoder, meta, options.Deterministic);
             }
         }
-        OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false), stripField0: options.SelfDescribing);
+        OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0), stripField0: options.SelfDescribing);
     }
 
     public byte[] MarshalOmniBuf(MarshalOptions options = default)
@@ -951,9 +1146,9 @@ public sealed class OpaqueConformanceResponse
         PropagateChildDirty();
         if (!options.SelfDescribing)
         {
-            return (_dirtyMaskLow == 0 && (_dirtyOverflow is null || _dirtyOverflow.Count == 0))
+            return (_dirtyMaskLow == 0 && (_dirty?.Overflow is null || _dirty?.Overflow.Count == 0))
                 ? (byte[])_raw.Clone()
-                : OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false));
+                : OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0));
         }
         OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
         try
@@ -970,17 +1165,20 @@ public sealed class OpaqueConformanceResponse
     public byte[] MarshalValidated(MarshalOptions options = default)
     {
         PropagateChildDirty();
-        if (!options.SelfDescribing)
-        {
-            return OmniBufOpaque.SpliceFieldsValidated(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: true));
-        }
         OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
         try
         {
+            if (!options.SelfDescribing)
+            {
+                SpliceBodyInto(enc, options.Deterministic, validate: true, depth: 0);
+                return enc.ToArray();
+            }
             SchemaMeta? meta = global::Omnibuf.Conformance.ConformanceResponse.BuildOmniBufSchemaMeta(1, null, out bool cyclic);
             if (cyclic)
             {
-                byte[] body = OmniBufOpaque.SpliceFieldsValidated(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true), stripField0: true);
+                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, 0), stripField0: true, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);
+                byte[] body = enc.ToArray();
+                enc.Reset();
                 meta = global::Omnibuf.Conformance.ConformanceResponse.ParseOmniBuf(body).BuildOmniBufValueSchemaMeta(1, null);
                 if (meta is not null)
                 {
@@ -994,7 +1192,7 @@ public sealed class OpaqueConformanceResponse
                 {
                     SchemaMeta.WriteField0(enc, meta, options.Deterministic);
                 }
-                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true), stripField0: true);
+                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, 0), stripField0: true, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);
             }
             return enc.ToArray();
         }
@@ -1020,44 +1218,70 @@ public sealed class OpaqueConformanceResponse
         }
     }
 
-    private void AppendDirtyField(OmniBufEncoder encoder, uint fieldNum, bool deterministic, bool validate)
+    private void AppendDirtyField(OmniBufEncoder encoder, uint fieldNum, bool deterministic, bool validate, int depth)
     {
         _ = deterministic;
         _ = validate;
+        _ = depth;
+        if (_dirty is not { } d) return;
         switch (fieldNum)
         {
             case 1u:
             {
-                encoder.WriteStringField(1u, _dirty_ParseError!);
+                encoder.WriteStringField(1u, d.f_ParseError!);
                 break;
             }
             case 2u:
             {
-                encoder.WriteStringField(2u, _dirty_SerializeError!);
+                encoder.WriteStringField(2u, d.f_SerializeError!);
                 break;
             }
             case 3u:
             {
-                encoder.WriteStringField(3u, _dirty_RuntimeError!);
+                encoder.WriteStringField(3u, d.f_RuntimeError!);
                 break;
             }
             case 4u:
             {
-                encoder.WriteStringField(4u, _dirty_Skipped!);
+                encoder.WriteStringField(4u, d.f_Skipped!);
                 break;
             }
             case 5u:
             {
-                encoder.WriteBytesField(5u, _dirty_OmnibufPayload ?? Array.Empty<byte>());
+                encoder.WriteBytesField(5u, d.f_OmnibufPayload ?? Array.Empty<byte>());
                 break;
             }
             case 6u:
             {
-                encoder.WriteStringField(6u, _dirty_JsonPayload!);
+                encoder.WriteStringField(6u, d.f_JsonPayload!);
                 break;
             }
         }
     }
+}
+
+public readonly ref struct ConformanceResponseSpanView
+{
+    private readonly ReadOnlySpan<byte> _raw;
+
+    public ConformanceResponseSpanView(ReadOnlySpan<byte> raw)
+    {
+        _raw = raw;
+    }
+
+    public ReadOnlySpan<byte> RawSpan => _raw;
+
+    public string ParseError => OmniBufOpaque.TryReadString(_raw, 1u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetParseErrorUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 1u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public string SerializeError => OmniBufOpaque.TryReadString(_raw, 2u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetSerializeErrorUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 2u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public string RuntimeError => OmniBufOpaque.TryReadString(_raw, 3u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetRuntimeErrorUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 3u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public string Skipped => OmniBufOpaque.TryReadString(_raw, 4u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetSkippedUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 4u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public ReadOnlySpan<byte> OmnibufPayload => OmniBufOpaque.TryReadBytesSpan(_raw, 5u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public string JsonPayload => OmniBufOpaque.TryReadString(_raw, 6u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetJsonPayloadUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 6u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
 }
 
 public sealed partial class AllTypesSubMsg
@@ -1139,6 +1363,29 @@ public sealed partial class AllTypesSubMsg
         {
             OmniBufEncoder.ReturnThreadLocal(encoder, rented);
         }
+    }
+
+    public void MarshalOmniBuf(IBufferWriter<byte> writer, MarshalOptions options = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        OmniBufEncoder encoder = OmniBufEncoder.RentThreadLocal(out bool rented);
+        try
+        {
+            MarshalOmniBuf(encoder, options);
+            encoder.CopyTo(writer);
+        }
+        finally
+        {
+            OmniBufEncoder.ReturnThreadLocal(encoder, rented);
+        }
+    }
+
+    internal int EstimateOmniBufMinSize(int depth = 0)
+    {
+        if (depth > 8) return 0;
+        int total = 0;
+        total += this.Label?.Length ?? 0;
+        return total;
     }
 
     public void MarshalOmniBuf(OmniBufEncoder encoder, MarshalOptions options = default)
@@ -1271,13 +1518,21 @@ public sealed partial class AllTypesSubMsg
 
 public sealed class OpaqueAllTypesSubMsg
 {
+    private const int MaxIndexedField = 4;
+    private sealed class DirtyState
+    {
+        public HashSet<uint>? Overflow;
+        public uint f_Id;
+        public string? f_Label;
+        public bool f_Flag;
+        public long f_Score;
+    }
+
     private readonly byte[] _raw;
     private ulong _dirtyMaskLow;
-    private HashSet<uint>? _dirtyOverflow;
-    private uint _dirty_Id;
-    private string? _dirty_Label;
-    private bool _dirty_Flag;
-    private long _dirty_Score;
+    private DirtyState? _dirty;
+    private long[]? _fieldIndex;
+    private byte _readCount;
 
     public OpaqueAllTypesSubMsg(byte[] raw)
     {
@@ -1291,18 +1546,32 @@ public sealed class OpaqueAllTypesSubMsg
 
     public ReadOnlySpan<byte> RawSpan => _raw;
 
+    public AllTypesSubMsgSpanView AsSpanView() => new(_raw);
+
     internal bool HasDirtyFields
     {
         get
         {
             PropagateChildDirty();
-            return _dirtyMaskLow != 0 || (_dirtyOverflow is not null && _dirtyOverflow.Count > 0);
+            return _dirtyMaskLow != 0 || (_dirty?.Overflow is { Count: > 0 });
         }
+    }
+
+    private DirtyState EnsureDirty() => _dirty ??= new DirtyState();
+
+    private long[]? GetOrBuildIndex()
+    {
+        long[]? idx = _fieldIndex;
+        if (idx is not null) return idx;
+        if (_readCount == 0) { _readCount = 1; return null; }
+        idx = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
+        _fieldIndex = idx;
+        return idx;
     }
 
     private bool IsDirty(uint fieldNum) => fieldNum < 64
         ? (_dirtyMaskLow & (1UL << (int)fieldNum)) != 0
-        : (_dirtyOverflow is not null && _dirtyOverflow.Contains(fieldNum));
+        : (_dirty?.Overflow is not null && _dirty.Overflow.Contains(fieldNum));
 
     private void MarkDirty(uint fieldNum)
     {
@@ -1312,7 +1581,7 @@ public sealed class OpaqueAllTypesSubMsg
         }
         else
         {
-            (_dirtyOverflow ??= new HashSet<uint>()).Add(fieldNum);
+            (EnsureDirty().Overflow ??= new HashSet<uint>()).Add(fieldNum);
         }
     }
 
@@ -1322,32 +1591,64 @@ public sealed class OpaqueAllTypesSubMsg
 
     public uint Id
     {
-        get => IsDirty(1u) ? _dirty_Id! : (OmniBufOpaque.TryReadUint(_raw, 1u, out ulong v) ? (uint)v : 0u);
-        set { _dirty_Id = value; MarkDirty(1u); }
+        get => IsDirty(1u) ? _dirty!.f_Id! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadUintIndexed(idx, _raw, 1u, out ulong vi) ? (uint)vi : 0u) : (OmniBufOpaque.TryReadUint(_raw, 1u, out ulong v) ? (uint)v : 0u));
+        set { EnsureDirty().f_Id = value; MarkDirty(1u); }
     }
 
     public string Label
     {
-        get => IsDirty(2u) ? _dirty_Label! : (OmniBufOpaque.TryReadString(_raw, 2u, out string v) ? v : string.Empty);
-        set { _dirty_Label = value; MarkDirty(2u); }
+        get => IsDirty(2u) ? _dirty!.f_Label! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 2u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 2u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_Label = value ?? string.Empty; MarkDirty(2u); }
     }
 
     public bool Flag
     {
-        get => IsDirty(3u) ? _dirty_Flag! : (OmniBufOpaque.TryReadBool(_raw, 3u, out bool v) && v);
-        set { _dirty_Flag = value; MarkDirty(3u); }
+        get => IsDirty(3u) ? _dirty!.f_Flag! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadBoolIndexed(idx, _raw, 3u, out bool vi) && vi) : (OmniBufOpaque.TryReadBool(_raw, 3u, out bool v) && v));
+        set { EnsureDirty().f_Flag = value; MarkDirty(3u); }
     }
 
     public long Score
     {
-        get => IsDirty(4u) ? _dirty_Score! : (OmniBufOpaque.TryReadSint(_raw, 4u, out long v) ? v : 0L);
-        set { _dirty_Score = value; MarkDirty(4u); }
+        get => IsDirty(4u) ? _dirty!.f_Score! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadSintIndexed(idx, _raw, 4u, out long vi) ? vi : 0L) : (OmniBufOpaque.TryReadSint(_raw, 4u, out long v) ? v : 0L));
+        set { EnsureDirty().f_Score = value; MarkDirty(4u); }
     }
 
     public void ResetDirty()
     {
         _dirtyMaskLow = 0;
-        _dirtyOverflow?.Clear();
+        _dirty = null;
+    }
+
+    internal void SpliceBodyInto(OmniBufEncoder encoder, bool deterministic, bool validate, int depth)
+    {
+        if (depth > OmniBufConstants.MaxNestingDepth)
+        {
+            throw new OmniBufException($"omnibuf: nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+        }
+        PropagateChildDirty();
+        if (validate)
+        {
+            OmniBufOpaque.SpliceFieldsValidatedTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
+        }
+        else
+        {
+            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+        }
+    }
+
+    public void MarshalOmniBuf(IBufferWriter<byte> writer, MarshalOptions options = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
+        try
+        {
+            MarshalOmniBuf(enc, options);
+            enc.CopyTo(writer);
+        }
+        finally
+        {
+            OmniBufEncoder.ReturnThreadLocal(enc, rented);
+        }
     }
 
     public void MarshalOmniBuf(OmniBufEncoder encoder, MarshalOptions options = default)
@@ -1358,7 +1659,7 @@ public sealed class OpaqueAllTypesSubMsg
             SchemaMeta? meta = global::Omnibuf.Conformance.AllTypesSubMsg.BuildOmniBufSchemaMeta(1, null, out bool cyclic);
             if (cyclic)
             {
-                byte[] body = OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false), stripField0: true);
+                byte[] body = OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0), stripField0: true);
                 meta = global::Omnibuf.Conformance.AllTypesSubMsg.ParseOmniBuf(body).BuildOmniBufValueSchemaMeta(1, null);
                 if (meta is not null)
                 {
@@ -1372,7 +1673,7 @@ public sealed class OpaqueAllTypesSubMsg
                 SchemaMeta.WriteField0(encoder, meta, options.Deterministic);
             }
         }
-        OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false), stripField0: options.SelfDescribing);
+        OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0), stripField0: options.SelfDescribing);
     }
 
     public byte[] MarshalOmniBuf(MarshalOptions options = default)
@@ -1380,9 +1681,9 @@ public sealed class OpaqueAllTypesSubMsg
         PropagateChildDirty();
         if (!options.SelfDescribing)
         {
-            return (_dirtyMaskLow == 0 && (_dirtyOverflow is null || _dirtyOverflow.Count == 0))
+            return (_dirtyMaskLow == 0 && (_dirty?.Overflow is null || _dirty?.Overflow.Count == 0))
                 ? (byte[])_raw.Clone()
-                : OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false));
+                : OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0));
         }
         OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
         try
@@ -1399,17 +1700,20 @@ public sealed class OpaqueAllTypesSubMsg
     public byte[] MarshalValidated(MarshalOptions options = default)
     {
         PropagateChildDirty();
-        if (!options.SelfDescribing)
-        {
-            return OmniBufOpaque.SpliceFieldsValidated(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: true));
-        }
         OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
         try
         {
+            if (!options.SelfDescribing)
+            {
+                SpliceBodyInto(enc, options.Deterministic, validate: true, depth: 0);
+                return enc.ToArray();
+            }
             SchemaMeta? meta = global::Omnibuf.Conformance.AllTypesSubMsg.BuildOmniBufSchemaMeta(1, null, out bool cyclic);
             if (cyclic)
             {
-                byte[] body = OmniBufOpaque.SpliceFieldsValidated(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true), stripField0: true);
+                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, 0), stripField0: true, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);
+                byte[] body = enc.ToArray();
+                enc.Reset();
                 meta = global::Omnibuf.Conformance.AllTypesSubMsg.ParseOmniBuf(body).BuildOmniBufValueSchemaMeta(1, null);
                 if (meta is not null)
                 {
@@ -1423,7 +1727,7 @@ public sealed class OpaqueAllTypesSubMsg
                 {
                     SchemaMeta.WriteField0(enc, meta, options.Deterministic);
                 }
-                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true), stripField0: true);
+                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, 0), stripField0: true, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);
             }
             return enc.ToArray();
         }
@@ -1449,34 +1753,54 @@ public sealed class OpaqueAllTypesSubMsg
         }
     }
 
-    private void AppendDirtyField(OmniBufEncoder encoder, uint fieldNum, bool deterministic, bool validate)
+    private void AppendDirtyField(OmniBufEncoder encoder, uint fieldNum, bool deterministic, bool validate, int depth)
     {
         _ = deterministic;
         _ = validate;
+        _ = depth;
+        if (_dirty is not { } d) return;
         switch (fieldNum)
         {
             case 1u:
             {
-                encoder.WriteUintField(1u, _dirty_Id!);
+                encoder.WriteUintField(1u, d.f_Id!);
                 break;
             }
             case 2u:
             {
-                encoder.WriteStringField(2u, _dirty_Label!);
+                encoder.WriteStringField(2u, d.f_Label!);
                 break;
             }
             case 3u:
             {
-                encoder.WriteBoolField(3u, _dirty_Flag!);
+                encoder.WriteBoolField(3u, d.f_Flag!);
                 break;
             }
             case 4u:
             {
-                encoder.WriteSintField(4u, _dirty_Score!);
+                encoder.WriteSintField(4u, d.f_Score!);
                 break;
             }
         }
     }
+}
+
+public readonly ref struct AllTypesSubMsgSpanView
+{
+    private readonly ReadOnlySpan<byte> _raw;
+
+    public AllTypesSubMsgSpanView(ReadOnlySpan<byte> raw)
+    {
+        _raw = raw;
+    }
+
+    public ReadOnlySpan<byte> RawSpan => _raw;
+
+    public uint Id => OmniBufOpaque.TryReadUint(_raw, 1u, out ulong v) ? (uint)v : 0u;
+    public string Label => OmniBufOpaque.TryReadString(_raw, 2u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetLabelUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 2u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public bool Flag => OmniBufOpaque.TryReadBool(_raw, 3u, out bool v) && v;
+    public long Score => OmniBufOpaque.TryReadSint(_raw, 4u, out long v) ? v : 0L;
 }
 
 public sealed partial class TestAllTypes
@@ -1620,6 +1944,34 @@ public sealed partial class TestAllTypes
         }
     }
 
+    public void MarshalOmniBuf(IBufferWriter<byte> writer, MarshalOptions options = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        OmniBufEncoder encoder = OmniBufEncoder.RentThreadLocal(out bool rented);
+        try
+        {
+            MarshalOmniBuf(encoder, options);
+            encoder.CopyTo(writer);
+        }
+        finally
+        {
+            OmniBufEncoder.ReturnThreadLocal(encoder, rented);
+        }
+    }
+
+    internal int EstimateOmniBufMinSize(int depth = 0)
+    {
+        if (depth > 8) return 0;
+        int total = 0;
+        total += this.F6String?.Length ?? 0;
+        total += this.F7Bytes.Length;
+        if (this.F8SubMsg is not null) total += 3 + this.F8SubMsg.EstimateOmniBufMinSize(depth + 1);
+        for (int i = 0; i < this.F9StringArr.Count; i++) total += 1 + (this.F9StringArr[i]?.Length ?? 0);
+        for (int i = 0; i < this.F11SubMsgArr.Count; i++) total += 2 + (this.F11SubMsgArr[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0);
+        total += this.F20OverflowStr?.Length ?? 0;
+        return total;
+    }
+
     public void MarshalOmniBuf(OmniBufEncoder encoder, MarshalOptions options = default)
     {
         if (options.SelfDescribing)
@@ -1656,7 +2008,7 @@ public sealed partial class TestAllTypes
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
-            encoder.BeginSubMsgField(8u);
+            encoder.BeginSubMsgField(8u, this.F8SubMsg.EstimateOmniBufMinSize(0));
             this.F8SubMsg.EncodeOmniBufBody(encoder, deterministic, depth + 1);
             encoder.EndSubMsg();
         }
@@ -1684,14 +2036,16 @@ public sealed partial class TestAllTypes
         {
             throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
         }
-        encoder.BeginArrayField(11u, OmniBufWireType.SubMsg, this.F11SubMsgArr.Count);
+        int arrMin_11 = 2;
+        for (int i = 0; i < this.F11SubMsgArr.Count; i++) arrMin_11 += 2 + (this.F11SubMsgArr[i]?.EstimateOmniBufMinSize(0) ?? 0);
+        encoder.BeginArrayField(11u, OmniBufWireType.SubMsg, this.F11SubMsgArr.Count, arrMin_11);
         for (int i = 0; i < this.F11SubMsgArr.Count; i++)
         {
             if (depth + 2 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
-            encoder.BeginContainer();
+            encoder.BeginContainer(this.F11SubMsgArr[i]?.EstimateOmniBufMinSize(0) ?? 0);
             this.F11SubMsgArr[i]?.EncodeOmniBufBody(encoder, deterministic, depth + 2);
             encoder.EndContainer();
         }
@@ -1706,7 +2060,7 @@ public sealed partial class TestAllTypes
             if (deterministic && this.F12MapStrUint.Count > 1)
             {
                 var keys_12 = new List<string>(this.F12MapStrUint.Keys);
-                keys_12.Sort(StringComparer.Ordinal);
+                keys_12.Sort(Utf8OrdinalStringComparer.Instance);
                 for (int i = 0; i < keys_12.Count; i++)
                 {
                     var k = keys_12[i];
@@ -2144,29 +2498,37 @@ public sealed partial class TestAllTypes
 
 public sealed class OpaqueTestAllTypes
 {
+    private const int MaxIndexedField = 20;
+    private sealed class DirtyState
+    {
+        public HashSet<uint>? Overflow;
+        public uint f_F1Uint32;
+        public ulong f_F2Uint64;
+        public int f_F3Sint32;
+        public long f_F4Sint64;
+        public bool f_F5Bool;
+        public string? f_F6String;
+        public byte[]? f_F7Bytes;
+        public global::Omnibuf.Conformance.OpaqueAllTypesSubMsg? f_F8SubMsg;
+        public List<string>? f_F9StringArr;
+        public List<uint>? f_F10Uint32Arr;
+        public List<global::Omnibuf.Conformance.OpaqueAllTypesSubMsg>? f_F11SubMsgArr;
+        public Dictionary<string, ulong>? f_F12MapStrUint;
+        public float f_F13Float32;
+        public double f_F14Float64;
+        public uint f_F15Fixed32;
+        public ulong f_F16Fixed64;
+        public string? f_F20OverflowStr;
+    }
+
     private readonly byte[] _raw;
     private ulong _dirtyMaskLow;
-    private HashSet<uint>? _dirtyOverflow;
-    private uint _dirty_F1Uint32;
-    private ulong _dirty_F2Uint64;
-    private int _dirty_F3Sint32;
-    private long _dirty_F4Sint64;
-    private bool _dirty_F5Bool;
-    private string? _dirty_F6String;
-    private byte[]? _dirty_F7Bytes;
-    private global::Omnibuf.Conformance.OpaqueAllTypesSubMsg? _dirty_F8SubMsg;
+    private DirtyState? _dirty;
+    private long[]? _fieldIndex;
+    private byte _readCount;
     private bool _hasCached_F8SubMsg;
     private global::Omnibuf.Conformance.OpaqueAllTypesSubMsg? _cached_F8SubMsg;
-    private List<string>? _dirty_F9StringArr;
-    private List<uint>? _dirty_F10Uint32Arr;
-    private List<global::Omnibuf.Conformance.OpaqueAllTypesSubMsg>? _dirty_F11SubMsgArr;
     private List<global::Omnibuf.Conformance.OpaqueAllTypesSubMsg>? _cached_F11SubMsgArr;
-    private Dictionary<string, ulong>? _dirty_F12MapStrUint;
-    private float _dirty_F13Float32;
-    private double _dirty_F14Float64;
-    private uint _dirty_F15Fixed32;
-    private ulong _dirty_F16Fixed64;
-    private string? _dirty_F20OverflowStr;
 
     public OpaqueTestAllTypes(byte[] raw)
     {
@@ -2180,18 +2542,32 @@ public sealed class OpaqueTestAllTypes
 
     public ReadOnlySpan<byte> RawSpan => _raw;
 
+    public TestAllTypesSpanView AsSpanView() => new(_raw);
+
     internal bool HasDirtyFields
     {
         get
         {
             PropagateChildDirty();
-            return _dirtyMaskLow != 0 || (_dirtyOverflow is not null && _dirtyOverflow.Count > 0);
+            return _dirtyMaskLow != 0 || (_dirty?.Overflow is { Count: > 0 });
         }
+    }
+
+    private DirtyState EnsureDirty() => _dirty ??= new DirtyState();
+
+    private long[]? GetOrBuildIndex()
+    {
+        long[]? idx = _fieldIndex;
+        if (idx is not null) return idx;
+        if (_readCount == 0) { _readCount = 1; return null; }
+        idx = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
+        _fieldIndex = idx;
+        return idx;
     }
 
     private bool IsDirty(uint fieldNum) => fieldNum < 64
         ? (_dirtyMaskLow & (1UL << (int)fieldNum)) != 0
-        : (_dirtyOverflow is not null && _dirtyOverflow.Contains(fieldNum));
+        : (_dirty?.Overflow is not null && _dirty.Overflow.Contains(fieldNum));
 
     private void MarkDirty(uint fieldNum)
     {
@@ -2201,7 +2577,7 @@ public sealed class OpaqueTestAllTypes
         }
         else
         {
-            (_dirtyOverflow ??= new HashSet<uint>()).Add(fieldNum);
+            (EnsureDirty().Overflow ??= new HashSet<uint>()).Add(fieldNum);
         }
     }
 
@@ -2209,7 +2585,8 @@ public sealed class OpaqueTestAllTypes
     {
         if (!IsDirty(8u) && _hasCached_F8SubMsg && _cached_F8SubMsg is not null && _cached_F8SubMsg.HasDirtyFields)
         {
-            _dirty_F8SubMsg = _cached_F8SubMsg;
+            DirtyState d = EnsureDirty();
+            d.f_F8SubMsg = _cached_F8SubMsg;
             MarkDirty(8u);
         }
         if (!IsDirty(11u) && _cached_F11SubMsgArr is not null)
@@ -2218,7 +2595,7 @@ public sealed class OpaqueTestAllTypes
             {
                 if (_cached_F11SubMsgArr[i].HasDirtyFields)
                 {
-                    _dirty_F11SubMsgArr = _cached_F11SubMsgArr;
+                    EnsureDirty().f_F11SubMsgArr = _cached_F11SubMsgArr;
                     MarkDirty(11u);
                     break;
                 }
@@ -2228,51 +2605,52 @@ public sealed class OpaqueTestAllTypes
 
     public uint F1Uint32
     {
-        get => IsDirty(1u) ? _dirty_F1Uint32! : (OmniBufOpaque.TryReadUint(_raw, 1u, out ulong v) ? (uint)v : 0u);
-        set { _dirty_F1Uint32 = value; MarkDirty(1u); }
+        get => IsDirty(1u) ? _dirty!.f_F1Uint32! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadUintIndexed(idx, _raw, 1u, out ulong vi) ? (uint)vi : 0u) : (OmniBufOpaque.TryReadUint(_raw, 1u, out ulong v) ? (uint)v : 0u));
+        set { EnsureDirty().f_F1Uint32 = value; MarkDirty(1u); }
     }
 
     public ulong F2Uint64
     {
-        get => IsDirty(2u) ? _dirty_F2Uint64! : (OmniBufOpaque.TryReadUint(_raw, 2u, out ulong v) ? v : 0UL);
-        set { _dirty_F2Uint64 = value; MarkDirty(2u); }
+        get => IsDirty(2u) ? _dirty!.f_F2Uint64! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadUintIndexed(idx, _raw, 2u, out ulong vi) ? vi : 0UL) : (OmniBufOpaque.TryReadUint(_raw, 2u, out ulong v) ? v : 0UL));
+        set { EnsureDirty().f_F2Uint64 = value; MarkDirty(2u); }
     }
 
     public int F3Sint32
     {
-        get => IsDirty(3u) ? _dirty_F3Sint32! : (OmniBufOpaque.TryReadSint(_raw, 3u, out long v) ? (int)v : 0);
-        set { _dirty_F3Sint32 = value; MarkDirty(3u); }
+        get => IsDirty(3u) ? _dirty!.f_F3Sint32! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadSintIndexed(idx, _raw, 3u, out long vi) ? (int)vi : 0) : (OmniBufOpaque.TryReadSint(_raw, 3u, out long v) ? (int)v : 0));
+        set { EnsureDirty().f_F3Sint32 = value; MarkDirty(3u); }
     }
 
     public long F4Sint64
     {
-        get => IsDirty(4u) ? _dirty_F4Sint64! : (OmniBufOpaque.TryReadSint(_raw, 4u, out long v) ? v : 0L);
-        set { _dirty_F4Sint64 = value; MarkDirty(4u); }
+        get => IsDirty(4u) ? _dirty!.f_F4Sint64! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadSintIndexed(idx, _raw, 4u, out long vi) ? vi : 0L) : (OmniBufOpaque.TryReadSint(_raw, 4u, out long v) ? v : 0L));
+        set { EnsureDirty().f_F4Sint64 = value; MarkDirty(4u); }
     }
 
     public bool F5Bool
     {
-        get => IsDirty(5u) ? _dirty_F5Bool! : (OmniBufOpaque.TryReadBool(_raw, 5u, out bool v) && v);
-        set { _dirty_F5Bool = value; MarkDirty(5u); }
+        get => IsDirty(5u) ? _dirty!.f_F5Bool! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadBoolIndexed(idx, _raw, 5u, out bool vi) && vi) : (OmniBufOpaque.TryReadBool(_raw, 5u, out bool v) && v));
+        set { EnsureDirty().f_F5Bool = value; MarkDirty(5u); }
     }
 
     public string F6String
     {
-        get => IsDirty(6u) ? _dirty_F6String! : (OmniBufOpaque.TryReadString(_raw, 6u, out string v) ? v : string.Empty);
-        set { _dirty_F6String = value; MarkDirty(6u); }
+        get => IsDirty(6u) ? _dirty!.f_F6String! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 6u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 6u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_F6String = value ?? string.Empty; MarkDirty(6u); }
     }
 
     public byte[] F7Bytes
     {
-        get => IsDirty(7u) ? (_dirty_F7Bytes ?? Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, 7u, out byte[] b) ? b : Array.Empty<byte>());
-        set { _dirty_F7Bytes = value ?? Array.Empty<byte>(); MarkDirty(7u); }
+        get => IsDirty(7u) ? (_dirty!.f_F7Bytes ?? Array.Empty<byte>()) : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadBytesIndexed(idx, _raw, 7u, out byte[] bi) ? bi : Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytes(_raw, 7u, out byte[] b) ? b : Array.Empty<byte>()));
+        set { EnsureDirty().f_F7Bytes = value ?? Array.Empty<byte>(); MarkDirty(7u); }
     }
+    public ReadOnlySpan<byte> GetF7BytesSpan() => (IsDirty(7u) ? (_dirty!.f_F7Bytes ?? Array.Empty<byte>()) : (OmniBufOpaque.TryReadBytesSpan(_raw, 7u, out ReadOnlySpan<byte> sp) ? sp : ReadOnlySpan<byte>.Empty));
 
     public global::Omnibuf.Conformance.OpaqueAllTypesSubMsg? F8SubMsg
     {
         get
         {
-            if (IsDirty(8u)) return _dirty_F8SubMsg;
+            if (IsDirty(8u)) return _dirty!.f_F8SubMsg;
             if (!_hasCached_F8SubMsg)
             {
                 _cached_F8SubMsg = OmniBufOpaque.TryReadSubMsgBytes(_raw, 8u, out byte[] sub) ? new global::Omnibuf.Conformance.OpaqueAllTypesSubMsg(sub) : null;
@@ -2282,7 +2660,8 @@ public sealed class OpaqueTestAllTypes
         }
         set
         {
-            _dirty_F8SubMsg = value;
+            DirtyState d = EnsureDirty();
+            d.f_F8SubMsg = value;
             MarkDirty(8u);
         }
     }
@@ -2293,31 +2672,31 @@ public sealed class OpaqueTestAllTypes
     public string GetF8SubMsgLabel()
     {
         PropagateChildDirty();
-        if (IsDirty(8u)) return _dirty_F8SubMsg?.Label ?? string.Empty;
+        if (IsDirty(8u)) return _dirty!.f_F8SubMsg?.Label ?? string.Empty;
         return OmniBufOpaque.TryReadNestedString(_raw, 8u, 2u, out string s) ? s : string.Empty;
     }
 
     public IReadOnlyList<string> F9StringArr
     {
         get => IsDirty(9u)
-            ? ((IReadOnlyList<string>?)_dirty_F9StringArr ?? Array.Empty<string>())
+            ? ((IReadOnlyList<string>?)_dirty?.f_F9StringArr ?? Array.Empty<string>())
             : OmniBufOpaque.ReadArray(_raw, 9u, OmniBufWireType.String, OmniBufOpaque.ReadElemString);
     }
-    public void SetF9StringArr(IEnumerable<string> values)
+    public void SetF9StringArr(IEnumerable<string>? values)
     {
-        _dirty_F9StringArr = new List<string>(values);
+        EnsureDirty().f_F9StringArr = values is null ? new List<string>() : new List<string>(values);
         MarkDirty(9u);
     }
 
     public IReadOnlyList<uint> F10Uint32Arr
     {
         get => IsDirty(10u)
-            ? ((IReadOnlyList<uint>?)_dirty_F10Uint32Arr ?? Array.Empty<uint>())
+            ? ((IReadOnlyList<uint>?)_dirty?.f_F10Uint32Arr ?? Array.Empty<uint>())
             : OmniBufOpaque.ReadArray(_raw, 10u, OmniBufWireType.Uint, OmniBufOpaque.ReadElemUint32);
     }
-    public void SetF10Uint32Arr(IEnumerable<uint> values)
+    public void SetF10Uint32Arr(IEnumerable<uint>? values)
     {
-        _dirty_F10Uint32Arr = new List<uint>(values);
+        EnsureDirty().f_F10Uint32Arr = values is null ? new List<uint>() : new List<uint>(values);
         MarkDirty(10u);
     }
 
@@ -2327,7 +2706,7 @@ public sealed class OpaqueTestAllTypes
         {
             if (IsDirty(11u))
             {
-                return (IReadOnlyList<global::Omnibuf.Conformance.OpaqueAllTypesSubMsg>?)_dirty_F11SubMsgArr ?? Array.Empty<global::Omnibuf.Conformance.OpaqueAllTypesSubMsg>();
+                return (IReadOnlyList<global::Omnibuf.Conformance.OpaqueAllTypesSubMsg>?)_dirty?.f_F11SubMsgArr ?? Array.Empty<global::Omnibuf.Conformance.OpaqueAllTypesSubMsg>();
             }
             if (_cached_F11SubMsgArr is null)
             {
@@ -2342,66 +2721,101 @@ public sealed class OpaqueTestAllTypes
             return _cached_F11SubMsgArr;
         }
     }
-    public void SetF11SubMsgArr(IEnumerable<global::Omnibuf.Conformance.AllTypesSubMsg> values)
+    public void SetF11SubMsgArr(IEnumerable<global::Omnibuf.Conformance.AllTypesSubMsg?>? values)
     {
         var list = new List<global::Omnibuf.Conformance.OpaqueAllTypesSubMsg>();
-        foreach (var item in values)
+        if (values is not null)
         {
-            list.Add(new global::Omnibuf.Conformance.OpaqueAllTypesSubMsg(item.MarshalOmniBuf()));
+            foreach (var item in values)
+            {
+                list.Add(item is null ? new global::Omnibuf.Conformance.OpaqueAllTypesSubMsg(Array.Empty<byte>()) : new global::Omnibuf.Conformance.OpaqueAllTypesSubMsg(item.MarshalOmniBuf()));
+            }
         }
-        _dirty_F11SubMsgArr = list;
+        EnsureDirty().f_F11SubMsgArr = list;
         MarkDirty(11u);
     }
 
     public IReadOnlyDictionary<string, ulong> F12MapStrUint
     {
         get => IsDirty(12u)
-            ? (_dirty_F12MapStrUint ?? new Dictionary<string, ulong>(StringComparer.Ordinal))
+            ? (_dirty?.f_F12MapStrUint ?? new Dictionary<string, ulong>(StringComparer.Ordinal))
             : OmniBufOpaque.ReadMap(_raw, 12u, OmniBufWireType.String, OmniBufWireType.Uint, OmniBufOpaque.ReadElemString, OmniBufOpaque.ReadElemUint64, StringComparer.Ordinal);
     }
-    public void SetF12MapStrUint(IDictionary<string, ulong> value)
+    public void SetF12MapStrUint(IDictionary<string, ulong>? value)
     {
-        _dirty_F12MapStrUint = new Dictionary<string, ulong>(value, StringComparer.Ordinal);
+        EnsureDirty().f_F12MapStrUint = value is null ? new Dictionary<string, ulong>(StringComparer.Ordinal) : new Dictionary<string, ulong>(value, StringComparer.Ordinal);
         MarkDirty(12u);
     }
 
     public float F13Float32
     {
-        get => IsDirty(13u) ? _dirty_F13Float32! : (OmniBufOpaque.TryReadFixed32(_raw, 13u, OmniBufWireType.Float32, out uint v) ? BitConverter.UInt32BitsToSingle(v) : 0f);
-        set { _dirty_F13Float32 = value; MarkDirty(13u); }
+        get => IsDirty(13u) ? _dirty!.f_F13Float32! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadFixed32Indexed(idx, _raw, 13u, OmniBufWireType.Float32, out uint vi) ? BitConverter.UInt32BitsToSingle(vi) : 0f) : (OmniBufOpaque.TryReadFixed32(_raw, 13u, OmniBufWireType.Float32, out uint v) ? BitConverter.UInt32BitsToSingle(v) : 0f));
+        set { EnsureDirty().f_F13Float32 = value; MarkDirty(13u); }
     }
 
     public double F14Float64
     {
-        get => IsDirty(14u) ? _dirty_F14Float64! : (OmniBufOpaque.TryReadFixed64(_raw, 14u, OmniBufWireType.Float64, out ulong v) ? BitConverter.UInt64BitsToDouble(v) : 0d);
-        set { _dirty_F14Float64 = value; MarkDirty(14u); }
+        get => IsDirty(14u) ? _dirty!.f_F14Float64! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadFixed64Indexed(idx, _raw, 14u, OmniBufWireType.Float64, out ulong vi) ? BitConverter.UInt64BitsToDouble(vi) : 0d) : (OmniBufOpaque.TryReadFixed64(_raw, 14u, OmniBufWireType.Float64, out ulong v) ? BitConverter.UInt64BitsToDouble(v) : 0d));
+        set { EnsureDirty().f_F14Float64 = value; MarkDirty(14u); }
     }
 
     public uint F15Fixed32
     {
-        get => IsDirty(15u) ? _dirty_F15Fixed32! : (OmniBufOpaque.TryReadFixed32(_raw, 15u, OmniBufWireType.Fixed32, out uint v) ? v : 0u);
-        set { _dirty_F15Fixed32 = value; MarkDirty(15u); }
+        get => IsDirty(15u) ? _dirty!.f_F15Fixed32! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadFixed32Indexed(idx, _raw, 15u, OmniBufWireType.Fixed32, out uint vi) ? vi : 0u) : (OmniBufOpaque.TryReadFixed32(_raw, 15u, OmniBufWireType.Fixed32, out uint v) ? v : 0u));
+        set { EnsureDirty().f_F15Fixed32 = value; MarkDirty(15u); }
     }
 
     public ulong F16Fixed64
     {
-        get => IsDirty(16u) ? _dirty_F16Fixed64! : (OmniBufOpaque.TryReadFixed64(_raw, 16u, OmniBufWireType.Fixed64, out ulong v) ? v : 0UL);
-        set { _dirty_F16Fixed64 = value; MarkDirty(16u); }
+        get => IsDirty(16u) ? _dirty!.f_F16Fixed64! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadFixed64Indexed(idx, _raw, 16u, OmniBufWireType.Fixed64, out ulong vi) ? vi : 0UL) : (OmniBufOpaque.TryReadFixed64(_raw, 16u, OmniBufWireType.Fixed64, out ulong v) ? v : 0UL));
+        set { EnsureDirty().f_F16Fixed64 = value; MarkDirty(16u); }
     }
 
     public string F20OverflowStr
     {
-        get => IsDirty(20u) ? _dirty_F20OverflowStr! : (OmniBufOpaque.TryReadString(_raw, 20u, out string v) ? v : string.Empty);
-        set { _dirty_F20OverflowStr = value; MarkDirty(20u); }
+        get => IsDirty(20u) ? _dirty!.f_F20OverflowStr! : (GetOrBuildIndex() is { } idx ? (OmniBufOpaque.TryReadStringIndexed(idx, _raw, 20u, out string vi) ? vi : string.Empty) : (OmniBufOpaque.TryReadString(_raw, 20u, out string v) ? v : string.Empty));
+        set { EnsureDirty().f_F20OverflowStr = value ?? string.Empty; MarkDirty(20u); }
     }
 
     public void ResetDirty()
     {
         _dirtyMaskLow = 0;
-        _dirtyOverflow?.Clear();
+        _dirty = null;
         _hasCached_F8SubMsg = false;
         _cached_F8SubMsg = null;
         _cached_F11SubMsgArr = null;
+    }
+
+    internal void SpliceBodyInto(OmniBufEncoder encoder, bool deterministic, bool validate, int depth)
+    {
+        if (depth > OmniBufConstants.MaxNestingDepth)
+        {
+            throw new OmniBufException($"omnibuf: nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+        }
+        PropagateChildDirty();
+        if (validate)
+        {
+            OmniBufOpaque.SpliceFieldsValidatedTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, st.Depth), stripField0: false, depth: depth, maxDepth: OmniBufConstants.MaxNestingDepth);
+        }
+        else
+        {
+            OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: deterministic, Depth: depth), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: false, st.Depth), stripField0: false);
+        }
+    }
+
+    public void MarshalOmniBuf(IBufferWriter<byte> writer, MarshalOptions options = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
+        try
+        {
+            MarshalOmniBuf(enc, options);
+            enc.CopyTo(writer);
+        }
+        finally
+        {
+            OmniBufEncoder.ReturnThreadLocal(enc, rented);
+        }
     }
 
     public void MarshalOmniBuf(OmniBufEncoder encoder, MarshalOptions options = default)
@@ -2412,7 +2826,7 @@ public sealed class OpaqueTestAllTypes
             SchemaMeta? meta = global::Omnibuf.Conformance.TestAllTypes.BuildOmniBufSchemaMeta(1, null, out bool cyclic);
             if (cyclic)
             {
-                byte[] body = OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false), stripField0: true);
+                byte[] body = OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0), stripField0: true);
                 meta = global::Omnibuf.Conformance.TestAllTypes.ParseOmniBuf(body).BuildOmniBufValueSchemaMeta(1, null);
                 if (meta is not null)
                 {
@@ -2426,7 +2840,7 @@ public sealed class OpaqueTestAllTypes
                 SchemaMeta.WriteField0(encoder, meta, options.Deterministic);
             }
         }
-        OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false), stripField0: options.SelfDescribing);
+        OmniBufOpaque.SpliceFieldsTo(encoder, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0), stripField0: options.SelfDescribing);
     }
 
     public byte[] MarshalOmniBuf(MarshalOptions options = default)
@@ -2434,9 +2848,9 @@ public sealed class OpaqueTestAllTypes
         PropagateChildDirty();
         if (!options.SelfDescribing)
         {
-            return (_dirtyMaskLow == 0 && (_dirtyOverflow is null || _dirtyOverflow.Count == 0))
+            return (_dirtyMaskLow == 0 && (_dirty?.Overflow is null || _dirty?.Overflow.Count == 0))
                 ? (byte[])_raw.Clone()
-                : OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false));
+                : OmniBufOpaque.SpliceFields(_raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: false, 0));
         }
         OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
         try
@@ -2453,17 +2867,20 @@ public sealed class OpaqueTestAllTypes
     public byte[] MarshalValidated(MarshalOptions options = default)
     {
         PropagateChildDirty();
-        if (!options.SelfDescribing)
-        {
-            return OmniBufOpaque.SpliceFieldsValidated(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, enc, fnum) => st.Self.AppendDirtyField(enc, fnum, st.Deterministic, validate: true));
-        }
         OmniBufEncoder enc = OmniBufEncoder.RentThreadLocal(out bool rented);
         try
         {
+            if (!options.SelfDescribing)
+            {
+                SpliceBodyInto(enc, options.Deterministic, validate: true, depth: 0);
+                return enc.ToArray();
+            }
             SchemaMeta? meta = global::Omnibuf.Conformance.TestAllTypes.BuildOmniBufSchemaMeta(1, null, out bool cyclic);
             if (cyclic)
             {
-                byte[] body = OmniBufOpaque.SpliceFieldsValidated(_raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true), stripField0: true);
+                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, 0), stripField0: true, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);
+                byte[] body = enc.ToArray();
+                enc.Reset();
                 meta = global::Omnibuf.Conformance.TestAllTypes.ParseOmniBuf(body).BuildOmniBufValueSchemaMeta(1, null);
                 if (meta is not null)
                 {
@@ -2477,7 +2894,7 @@ public sealed class OpaqueTestAllTypes
                 {
                     SchemaMeta.WriteField0(enc, meta, options.Deterministic);
                 }
-                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirtyOverflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true), stripField0: true);
+                OmniBufOpaque.SpliceFieldsValidatedTo(enc, _raw, _dirtyMaskLow, _dirty?.Overflow, (Self: this, Deterministic: options.Deterministic), static (st, e, fnum) => st.Self.AppendDirtyField(e, fnum, st.Deterministic, validate: true, 0), stripField0: true, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);
             }
             return enc.ToArray();
         }
@@ -2503,60 +2920,66 @@ public sealed class OpaqueTestAllTypes
         }
     }
 
-    private void AppendDirtyField(OmniBufEncoder encoder, uint fieldNum, bool deterministic, bool validate)
+    private void AppendDirtyField(OmniBufEncoder encoder, uint fieldNum, bool deterministic, bool validate, int depth)
     {
         _ = deterministic;
         _ = validate;
+        _ = depth;
+        if (_dirty is not { } d) return;
         switch (fieldNum)
         {
             case 1u:
             {
-                encoder.WriteUintField(1u, _dirty_F1Uint32!);
+                encoder.WriteUintField(1u, d.f_F1Uint32!);
                 break;
             }
             case 2u:
             {
-                encoder.WriteUintField(2u, _dirty_F2Uint64!);
+                encoder.WriteUintField(2u, d.f_F2Uint64!);
                 break;
             }
             case 3u:
             {
-                encoder.WriteSintField(3u, _dirty_F3Sint32!);
+                encoder.WriteSintField(3u, d.f_F3Sint32!);
                 break;
             }
             case 4u:
             {
-                encoder.WriteSintField(4u, _dirty_F4Sint64!);
+                encoder.WriteSintField(4u, d.f_F4Sint64!);
                 break;
             }
             case 5u:
             {
-                encoder.WriteBoolField(5u, _dirty_F5Bool!);
+                encoder.WriteBoolField(5u, d.f_F5Bool!);
                 break;
             }
             case 6u:
             {
-                encoder.WriteStringField(6u, _dirty_F6String!);
+                encoder.WriteStringField(6u, d.f_F6String!);
                 break;
             }
             case 7u:
             {
-                encoder.WriteBytesField(7u, _dirty_F7Bytes ?? Array.Empty<byte>());
+                encoder.WriteBytesField(7u, d.f_F7Bytes ?? Array.Empty<byte>());
                 break;
             }
             case 8u:
             {
-                if (_dirty_F8SubMsg is not null)
+                if (d.f_F8SubMsg is not null)
                 {
-                    byte[] subBytes = validate ? _dirty_F8SubMsg!.MarshalValidated(new MarshalOptions(false, deterministic)) : _dirty_F8SubMsg!.MarshalOmniBuf(new MarshalOptions(false, deterministic));
-                    encoder.WriteTag(8u, OmniBufWireType.SubMsg);
-                    encoder.WriteBytesValue(subBytes);
+                    encoder.BeginSubMsgField(8u);
+                    d.f_F8SubMsg!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
+                    encoder.EndSubMsg();
                 }
                 break;
             }
             case 9u:
             {
-                var list = _dirty_F9StringArr;
+                if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                {
+                    throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                }
+                var list = d.f_F9StringArr;
                 int count = list?.Count ?? 0;
                 encoder.BeginArrayField(9u, OmniBufWireType.String, count);
                 if (list is not null)
@@ -2571,7 +2994,11 @@ public sealed class OpaqueTestAllTypes
             }
             case 10u:
             {
-                var list = _dirty_F10Uint32Arr;
+                if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                {
+                    throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                }
+                var list = d.f_F10Uint32Arr;
                 int count = list?.Count ?? 0;
                 encoder.BeginArrayField(10u, OmniBufWireType.Uint, count);
                 if (list is not null)
@@ -2586,15 +3013,27 @@ public sealed class OpaqueTestAllTypes
             }
             case 11u:
             {
-                var list = _dirty_F11SubMsgArr;
+                if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                {
+                    throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                }
+                var list = d.f_F11SubMsgArr;
                 int count = list?.Count ?? 0;
                 encoder.BeginArrayField(11u, OmniBufWireType.SubMsg, count);
                 if (list is not null)
                 {
                     for (int i = 0; i < count; i++)
                     {
-                        byte[] elemBytes = validate ? list[i].MarshalValidated(new MarshalOptions(false, deterministic)) : list[i].MarshalOmniBuf(new MarshalOptions(false, deterministic));
-                        encoder.WriteBytesValue(elemBytes);
+                        if (depth + 2 > OmniBufConstants.MaxNestingDepth)
+                        {
+                            throw new OmniBufException($"omnibuf: nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                        }
+                        encoder.BeginContainer();
+                        if (list[i] is not null)
+                        {
+                            list[i].SpliceBodyInto(encoder, deterministic, validate, depth + 2);
+                        }
+                        encoder.EndContainer();
                     }
                 }
                 encoder.EndArray();
@@ -2602,7 +3041,11 @@ public sealed class OpaqueTestAllTypes
             }
             case 12u:
             {
-                var map = _dirty_F12MapStrUint;
+                if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                {
+                    throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                }
+                var map = d.f_F12MapStrUint;
                 int count = map?.Count ?? 0;
                 encoder.BeginMapField(12u, OmniBufWireType.String, OmniBufWireType.Uint, count);
                 if (map is not null && count > 0)
@@ -2610,7 +3053,7 @@ public sealed class OpaqueTestAllTypes
                     if (deterministic && count > 1)
                     {
                         var keys = new List<string>(map.Keys);
-                        keys.Sort(StringComparer.Ordinal);
+                        keys.Sort(Utf8OrdinalStringComparer.Instance);
                         for (int i = 0; i < keys.Count; i++)
                         {
                             var k = keys[i];
@@ -2633,30 +3076,67 @@ public sealed class OpaqueTestAllTypes
             }
             case 13u:
             {
-                encoder.WriteFloat32Field(13u, _dirty_F13Float32!);
+                encoder.WriteFloat32Field(13u, d.f_F13Float32!);
                 break;
             }
             case 14u:
             {
-                encoder.WriteFloat64Field(14u, _dirty_F14Float64!);
+                encoder.WriteFloat64Field(14u, d.f_F14Float64!);
                 break;
             }
             case 15u:
             {
-                encoder.WriteFixed32Field(15u, _dirty_F15Fixed32!);
+                encoder.WriteFixed32Field(15u, d.f_F15Fixed32!);
                 break;
             }
             case 16u:
             {
-                encoder.WriteFixed64Field(16u, _dirty_F16Fixed64!);
+                encoder.WriteFixed64Field(16u, d.f_F16Fixed64!);
                 break;
             }
             case 20u:
             {
-                encoder.WriteStringField(20u, _dirty_F20OverflowStr!);
+                encoder.WriteStringField(20u, d.f_F20OverflowStr!);
                 break;
             }
         }
     }
+}
+
+public readonly ref struct TestAllTypesSpanView
+{
+    private readonly ReadOnlySpan<byte> _raw;
+
+    public TestAllTypesSpanView(ReadOnlySpan<byte> raw)
+    {
+        _raw = raw;
+    }
+
+    public ReadOnlySpan<byte> RawSpan => _raw;
+
+    public uint F1Uint32 => OmniBufOpaque.TryReadUint(_raw, 1u, out ulong v) ? (uint)v : 0u;
+    public ulong F2Uint64 => OmniBufOpaque.TryReadUint(_raw, 2u, out ulong v) ? v : 0UL;
+    public int F3Sint32 => OmniBufOpaque.TryReadSint(_raw, 3u, out long v) ? (int)v : 0;
+    public long F4Sint64 => OmniBufOpaque.TryReadSint(_raw, 4u, out long v) ? v : 0L;
+    public bool F5Bool => OmniBufOpaque.TryReadBool(_raw, 5u, out bool v) && v;
+    public string F6String => OmniBufOpaque.TryReadString(_raw, 6u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetF6StringUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 6u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public ReadOnlySpan<byte> F7Bytes => OmniBufOpaque.TryReadBytesSpan(_raw, 7u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
+    public bool TryGetF8SubMsg(out global::Omnibuf.Conformance.AllTypesSubMsgSpanView view)
+    {
+        if (OmniBufOpaque.TryReadSubMsgSpan(_raw, 8u, out ReadOnlySpan<byte> sub))
+        {
+            view = new global::Omnibuf.Conformance.AllTypesSubMsgSpanView(sub);
+            return true;
+        }
+        view = default;
+        return false;
+    }
+    public float F13Float32 => OmniBufOpaque.TryReadFixed32(_raw, 13u, OmniBufWireType.Float32, out uint v) ? BitConverter.UInt32BitsToSingle(v) : 0f;
+    public double F14Float64 => OmniBufOpaque.TryReadFixed64(_raw, 14u, OmniBufWireType.Float64, out ulong v) ? BitConverter.UInt64BitsToDouble(v) : 0d;
+    public uint F15Fixed32 => OmniBufOpaque.TryReadFixed32(_raw, 15u, OmniBufWireType.Fixed32, out uint v) ? v : 0u;
+    public ulong F16Fixed64 => OmniBufOpaque.TryReadFixed64(_raw, 16u, OmniBufWireType.Fixed64, out ulong v) ? v : 0UL;
+    public string F20OverflowStr => OmniBufOpaque.TryReadString(_raw, 20u, out string s) ? s : string.Empty;
+    public ReadOnlySpan<byte> GetF20OverflowStrUtf8Span() => OmniBufOpaque.TryReadStringSpan(_raw, 20u, out ReadOnlySpan<byte> b) ? b : ReadOnlySpan<byte>.Empty;
 }
 

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Linq.Expressions;
@@ -23,6 +24,23 @@ public static class OmniBufSerializer
         {
             Marshal(encoder, value, options);
             return encoder.ToArray();
+        }
+        finally
+        {
+            OmniBufEncoder.ReturnThreadLocal(encoder, rented);
+        }
+    }
+
+    public static void Marshal<T>(IBufferWriter<byte> writer, T value, MarshalOptions options = default)
+        where T : notnull
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(value);
+        OmniBufEncoder encoder = OmniBufEncoder.RentThreadLocal(out bool rented);
+        try
+        {
+            Marshal(encoder, value, options);
+            encoder.CopyTo(writer);
         }
         finally
         {
@@ -220,6 +238,7 @@ public static class OmniBufSerializer
         public Type? MapKeyEnumType { get; init; }
         public ValueNode? MapValNode { get; init; }
         public Func<IDictionary>? MapFactory { get; init; }
+        public Func<object, List<KeyValuePair<object, object?>>>? MapEntryExtractor { get; init; }
     }
 
     private delegate void FastInPlaceDecodeDelegate(
@@ -244,6 +263,7 @@ public static class OmniBufSerializer
         public required bool OmitEmpty { get; init; }
         public required Func<object, object?> Getter { get; init; }
         public Action<object, object?>? Setter { get; init; }
+        public Action<object, object?>? InitSetter { get; set; }
         public ScalarKind Scalar { get; init; }
         public Type? EnumType { get; init; }
         public bool IsNullableValueType { get; init; }
@@ -278,6 +298,8 @@ public static class OmniBufSerializer
         private Func<object>? _defaultCtor;
         private Func<object?[], object>? _paramCtor;
         private int[]? _ctorParamFieldOrdinals;
+        private object?[]? _ctorParamDefaults;
+        private int[]? _postCtorFieldOrdinals;
 
         public MessageCodec(Type type)
         {
@@ -363,6 +385,7 @@ public static class OmniBufSerializer
                         OmitEmpty = p.OmitEmpty,
                         Getter = p.Getter,
                         Setter = p.Setter,
+                        InitSetter = p.Setter ?? CompileInitSetter(p.Property),
                         Scalar = p.Scalar,
                         EnumType = p.EnumType,
                         IsNullableValueType = p.IsNullableValueType,
@@ -407,28 +430,25 @@ public static class OmniBufSerializer
                     }
                 }
 
+                string? bindError = null;
                 ConstructorInfo? parameterless = _type.GetConstructor(BindingFlags.Instance | BindingFlags.Public, Type.EmptyTypes);
-                if (parameterless is not null && _fields.All(f => f.Setter is not null))
+                if (parameterless is not null && !_type.IsValueType && _fields.All(f => f.Setter is not null))
                 {
                     NewExpression newExpr = Expression.New(parameterless);
                     UnaryExpression boxed = Expression.Convert(newExpr, typeof(object));
                     _defaultCtor = Expression.Lambda<Func<object>>(boxed).Compile();
                 }
-                else if (_type.IsValueType && _fields.All(f => f.Setter is not null))
+                else if (_type.IsValueType && _fields.All(f => f.Setter is not null) && primaryCtor is null)
                 {
                     _defaultCtor = () => Activator.CreateInstance(_type)!;
                 }
-                else if (primaryCtor is not null)
+                else if (primaryCtor is not null
+                    && TryBindParameterizedConstructor(primaryCtor, ctorParamAttrs, out int[]? ordinals, out object?[]? defaults, out int[]? postOrdinals, out bindError))
                 {
                     ParameterInfo[] cParams = primaryCtor.GetParameters();
-                    _ctorParamFieldOrdinals = new int[cParams.Length];
-                    for (int i = 0; i < cParams.Length; i++)
-                    {
-                        string pName = cParams[i].Name ?? string.Empty;
-                        int idx = Array.FindIndex(_fields, f => f.PropertyType == cParams[i].ParameterType
-                            && string.Equals(FindPropName(_type, f.FieldNum, ctorParamAttrs), pName, StringComparison.OrdinalIgnoreCase));
-                        _ctorParamFieldOrdinals[i] = idx;
-                    }
+                    _ctorParamFieldOrdinals = ordinals;
+                    _ctorParamDefaults = defaults;
+                    _postCtorFieldOrdinals = postOrdinals;
 
                     ParameterExpression arrParam = Expression.Parameter(typeof(object?[]), "args");
                     var callArgs = new Expression[cParams.Length];
@@ -441,9 +461,33 @@ public static class OmniBufSerializer
                     UnaryExpression body = Expression.Convert(Expression.New(primaryCtor, callArgs), typeof(object));
                     _paramCtor = Expression.Lambda<Func<object?[], object>>(body, arrParam).Compile();
                 }
+                else if ((parameterless is not null || _type.IsValueType) && _fields.All(f => f.InitSetter is not null))
+                {
+                    _ctorParamFieldOrdinals = Array.Empty<int>();
+                    _ctorParamDefaults = Array.Empty<object?>();
+                    var post = new int[_fields.Length];
+                    for (int i = 0; i < _fields.Length; i++)
+                    {
+                        post[i] = i;
+                    }
+
+                    _postCtorFieldOrdinals = post;
+                    if (parameterless is not null)
+                    {
+                        NewExpression newExpr = Expression.New(parameterless);
+                        UnaryExpression boxed = Expression.Convert(newExpr, typeof(object));
+                        Func<object> blankFactory = Expression.Lambda<Func<object>>(boxed).Compile();
+                        _paramCtor = _ => blankFactory();
+                    }
+                    else
+                    {
+                        _paramCtor = _ => Activator.CreateInstance(_type)!;
+                    }
+                }
                 else
                 {
-                    throw new OmniBufException($"omnibuf: type {_type.Name} requires either writable properties with a parameterless constructor or a matching record constructor");
+                    throw new OmniBufException(
+                        bindError ?? $"omnibuf: type {_type.Name} requires either writable properties with a parameterless constructor or a matching record constructor");
                 }
 
                 IsInitialized = true;
@@ -452,6 +496,96 @@ public static class OmniBufSerializer
             {
                 IsInitializing = false;
             }
+        }
+
+        private bool TryBindParameterizedConstructor(
+            ConstructorInfo ctor,
+            Dictionary<string, OmniBufFieldAttribute>? ctorParamAttrs,
+            out int[]? ordinals,
+            out object?[]? defaults,
+            out int[]? postOrdinals,
+            out string? error)
+        {
+            ParameterInfo[] cParams = ctor.GetParameters();
+            ordinals = new int[cParams.Length];
+            defaults = new object?[cParams.Length];
+            var boundSet = new HashSet<int>();
+
+            for (int i = 0; i < cParams.Length; i++)
+            {
+                ParameterInfo param = cParams[i];
+                string pName = param.Name ?? string.Empty;
+                int idx = Array.FindIndex(_fields, f => f.PropertyType == param.ParameterType
+                    && string.Equals(FindPropName(_type, f.FieldNum, ctorParamAttrs), pName, StringComparison.OrdinalIgnoreCase));
+                if (idx >= 0)
+                {
+                    ordinals[i] = idx;
+                    boundSet.Add(idx);
+                }
+                else if (param.HasDefaultValue)
+                {
+                    ordinals[i] = -1;
+                    defaults[i] = ResolveParameterDefaultValue(param);
+                }
+                else
+                {
+                    ordinals = null;
+                    defaults = null;
+                    postOrdinals = null;
+                    error = $"omnibuf: constructor parameter '{pName}' on {_type.Name} does not match an [OmniBufField] property and has no default value";
+                    return false;
+                }
+            }
+
+            var unbound = new List<int>();
+            foreach (FieldPlan f in _fields)
+            {
+                if (!boundSet.Contains(f.Ordinal))
+                {
+                    if (f.InitSetter is null)
+                    {
+                        ordinals = null;
+                        defaults = null;
+                        postOrdinals = null;
+                        error = $"omnibuf: property {_type.Name}.{f.Property.Name} is neither bound to a constructor parameter nor writable";
+                        return false;
+                    }
+
+                    unbound.Add(f.Ordinal);
+                }
+            }
+
+            postOrdinals = unbound.Count > 0 ? unbound.ToArray() : null;
+            error = null;
+            return true;
+        }
+
+        private static object? ResolveParameterDefaultValue(ParameterInfo param)
+        {
+            Type pType = param.ParameterType;
+            object? raw = param.DefaultValue;
+            if (raw is DBNull or Missing)
+            {
+                raw = null;
+            }
+
+            if (raw is null)
+            {
+                if (pType.IsValueType && Nullable.GetUnderlyingType(pType) is null)
+                {
+                    return Activator.CreateInstance(pType);
+                }
+
+                return null;
+            }
+
+            Type targetType = Nullable.GetUnderlyingType(pType) ?? pType;
+            if (targetType.IsEnum && raw.GetType() != targetType)
+            {
+                return Enum.ToObject(targetType, raw);
+            }
+
+            return raw;
         }
 
         private static string FindPropName(Type t, uint fnum, Dictionary<string, OmniBufFieldAttribute>? ctorAttrs)
@@ -615,7 +749,7 @@ public static class OmniBufSerializer
                     {
                         FieldCategory.SubMsg => childCodec.BuildValueSchemaMeta(fieldVal, depth + 2, active),
                         FieldCategory.Array or FieldCategory.List => CollectListSchemaMeta((IEnumerable)fieldVal, childCodec, depth + 2, active),
-                        FieldCategory.Map => CollectDictSchemaMeta((IDictionary)fieldVal, childCodec, depth + 2, active),
+                        FieldCategory.Map => CollectDictSchemaMeta(fieldVal, f.MapKeyType!, f.MapValType!, childCodec, depth + 2, active),
                         FieldCategory.NestedContainer => CollectNestedContainerSchemaMeta(fieldVal, f.ContainerNode!, childCodec, depth + 2, active),
                         _ => null,
                     };
@@ -651,14 +785,46 @@ public static class OmniBufSerializer
             return merged;
         }
 
-        private static SchemaMeta? CollectDictSchemaMeta(IDictionary dict, MessageCodec leafCodec, int childDepth, HashSet<object>? active)
+        private static SchemaMeta? CollectDictSchemaMeta(object mapObj, Type keyType, Type valType, MessageCodec leafCodec, int childDepth, HashSet<object>? active)
         {
-            SchemaMeta? merged = null;
-            foreach (DictionaryEntry entry in dict)
+            if (mapObj is IDictionary dict)
             {
-                if (entry.Value is not null)
+                SchemaMeta? merged = null;
+                foreach (DictionaryEntry entry in dict)
                 {
-                    merged = SchemaMeta.Merge(merged, leafCodec.BuildValueSchemaMeta(entry.Value, childDepth, active));
+                    if (entry.Value is not null)
+                    {
+                        merged = SchemaMeta.Merge(merged, leafCodec.BuildValueSchemaMeta(entry.Value, childDepth, active));
+                    }
+                }
+
+                return merged;
+            }
+
+            MethodInfo helper = typeof(MessageCodec)
+                .GetMethod(nameof(CollectGenericDictSchemaMeta), BindingFlags.NonPublic | BindingFlags.Static)!
+                .MakeGenericMethod(keyType, valType);
+            return (SchemaMeta?)helper.Invoke(null, new object?[] { mapObj, leafCodec, childDepth, active });
+        }
+
+        private static SchemaMeta? CollectGenericDictSchemaMeta<TKey, TVal>(
+            object mapObj,
+            MessageCodec leafCodec,
+            int childDepth,
+            HashSet<object>? active)
+            where TKey : notnull
+        {
+            if (mapObj is not IEnumerable<KeyValuePair<TKey, TVal>> pairs)
+            {
+                return null;
+            }
+
+            SchemaMeta? merged = null;
+            foreach (KeyValuePair<TKey, TVal> kv in pairs)
+            {
+                if (kv.Value is not null)
+                {
+                    merged = SchemaMeta.Merge(merged, leafCodec.BuildValueSchemaMeta(kv.Value, childDepth, active));
                 }
             }
 
@@ -683,13 +849,26 @@ public static class OmniBufSerializer
                     }
                 }
             }
-            else if (node.Kind == ValueNodeKind.Map && val is IDictionary dict)
+            else if (node.Kind == ValueNodeKind.Map)
             {
-                foreach (DictionaryEntry entry in dict)
+                if (val is IDictionary dict)
                 {
-                    if (entry.Value is not null)
+                    foreach (DictionaryEntry entry in dict)
                     {
-                        merged = SchemaMeta.Merge(merged, CollectNestedContainerSchemaMeta(entry.Value, node.MapValNode!, leafCodec, childDepth, active));
+                        if (entry.Value is not null)
+                        {
+                            merged = SchemaMeta.Merge(merged, CollectNestedContainerSchemaMeta(entry.Value, node.MapValNode!, leafCodec, childDepth, active));
+                        }
+                    }
+                }
+                else if (node.MapEntryExtractor is not null)
+                {
+                    foreach (KeyValuePair<object, object?> kv in node.MapEntryExtractor(val))
+                    {
+                        if (kv.Value is not null)
+                        {
+                            merged = SchemaMeta.Merge(merged, CollectNestedContainerSchemaMeta(kv.Value, node.MapValNode!, leafCodec, childDepth, active));
+                        }
                     }
                 }
             }
@@ -712,10 +891,17 @@ public static class OmniBufSerializer
 
         public object DecodeNew(ReadOnlySpan<byte> data, int depth, int maxDepth)
         {
+            if (CanDecodeInPlace)
+            {
+                object instance = _defaultCtor!();
+                DecodeInto(data, instance, depth, maxDepth, merge: false);
+                return instance;
+            }
+
             if (_defaultCtor is not null)
             {
                 object instance = _defaultCtor();
-                DecodeInto(data, instance, depth, maxDepth, merge: false);
+                DecodeIntoCore(data, instance, depth, maxDepth, merge: false);
                 return instance;
             }
 
@@ -724,7 +910,7 @@ public static class OmniBufSerializer
 
         public object DecodeMerge(ReadOnlySpan<byte> data, object existing, int depth, int maxDepth)
         {
-            if (_defaultCtor is not null && !_type.IsValueType)
+            if (CanDecodeInPlace)
             {
                 DecodeInto(data, existing, depth, maxDepth, merge: true);
                 return existing;
@@ -733,7 +919,7 @@ public static class OmniBufSerializer
             if (_defaultCtor is not null && _type.IsValueType)
             {
                 object copy = existing;
-                DecodeInto(data, copy, depth, maxDepth, merge: true);
+                DecodeIntoCore(data, copy, depth, maxDepth, merge: true);
                 return copy;
             }
 
@@ -780,13 +966,33 @@ public static class OmniBufSerializer
             for (int i = 0; i < _ctorParamFieldOrdinals.Length; i++)
             {
                 int ord = _ctorParamFieldOrdinals[i];
-                ctorArgs[i] = ord >= 0 ? values[ord] : null;
+                ctorArgs[i] = ord >= 0 ? values[ord] : _ctorParamDefaults![i];
             }
 
-            return _paramCtor!(ctorArgs);
+            object instance = _paramCtor!(ctorArgs);
+            if (_postCtorFieldOrdinals is not null)
+            {
+                for (int i = 0; i < _postCtorFieldOrdinals.Length; i++)
+                {
+                    int ord = _postCtorFieldOrdinals[i];
+                    _fields[ord].InitSetter!(instance, values[ord]);
+                }
+            }
+
+            return instance;
         }
 
         public void DecodeInto(ReadOnlySpan<byte> data, object target, int depth, int maxDepth, bool merge)
+        {
+            if (!CanDecodeInPlace)
+            {
+                throw new OmniBufException($"omnibuf: type {_type.Name} does not support in-place unmarshaling");
+            }
+
+            DecodeIntoCore(data, target, depth, maxDepth, merge);
+        }
+
+        private void DecodeIntoCore(ReadOnlySpan<byte> data, object target, int depth, int maxDepth, bool merge)
         {
             if (depth > maxDepth)
             {
@@ -1075,7 +1281,8 @@ public static class OmniBufSerializer
         if (propType.IsGenericType)
         {
             Type genDef = propType.GetGenericTypeDefinition();
-            if (genDef == typeof(List<>) || genDef == typeof(IList<>) || genDef == typeof(IReadOnlyList<>))
+            if (genDef == typeof(List<>) || genDef == typeof(IList<>) || genDef == typeof(IReadOnlyList<>)
+                || genDef == typeof(ICollection<>) || genDef == typeof(IReadOnlyCollection<>))
             {
                 Type elemType = propType.GetGenericArguments()[0];
                 Type concreteListType = typeof(List<>).MakeGenericType(elemType);
@@ -1278,6 +1485,7 @@ public static class OmniBufSerializer
         {
             Type g = t.GetGenericTypeDefinition();
             return g == typeof(List<>) || g == typeof(IList<>) || g == typeof(IReadOnlyList<>)
+                || g == typeof(ICollection<>) || g == typeof(IReadOnlyCollection<>)
                 || g == typeof(Dictionary<,>) || g == typeof(IDictionary<,>) || g == typeof(IReadOnlyDictionary<,>);
         }
 
@@ -1324,7 +1532,8 @@ public static class OmniBufSerializer
         if (t.IsGenericType)
         {
             Type g = t.GetGenericTypeDefinition();
-            if (g == typeof(List<>) || g == typeof(IList<>) || g == typeof(IReadOnlyList<>))
+            if (g == typeof(List<>) || g == typeof(IList<>) || g == typeof(IReadOnlyList<>)
+                || g == typeof(ICollection<>) || g == typeof(IReadOnlyCollection<>))
             {
                 Type elemType = t.GetGenericArguments()[0];
                 Type concreteList = typeof(List<>).MakeGenericType(elemType);
@@ -1354,6 +1563,7 @@ public static class OmniBufSerializer
 
                 Type concreteMap = typeof(Dictionary<,>).MakeGenericType(keyType, valType);
                 Func<IDictionary> mapFactory = Expression.Lambda<Func<IDictionary>>(Expression.Convert(Expression.New(concreteMap), typeof(IDictionary))).Compile();
+                Func<object, List<KeyValuePair<object, object?>>> mapExtractor = BuildBoxedMapEntryExtractor(keyType, valType);
                 OmniBufWireType? innerValOverride = valOrElemExplicitWire is not null && valOrElemExplicitWire != OmniBufWireType.Map ? valOrElemExplicitWire : null;
                 ValueNode valNode = BuildValueNode(valType, null, innerValOverride, resolveSubCodec);
                 return new ValueNode
@@ -1366,6 +1576,7 @@ public static class OmniBufSerializer
                     MapKeyEnumType = keyEnumType,
                     MapValNode = valNode,
                     MapFactory = mapFactory,
+                    MapEntryExtractor = mapExtractor,
                 };
             }
         }
@@ -1616,106 +1827,19 @@ public static class OmniBufSerializer
                     return fastListEnc!;
                 }
 
-                goto case FieldCategory.Array;
+                return BuildGenericCollectionFieldEncoder(plan, fnum, omitEmpty);
 
             case FieldCategory.Array:
-                return (enc, obj, det, depth) =>
-                {
-                    var list = plan.Getter(obj) as IList;
-                    int count = list?.Count ?? 0;
-                    if (omitEmpty && count == 0)
-                    {
-                        return;
-                    }
-
-                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-                    {
-                        throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-                    }
-
-                    enc.BeginArrayField(fnum, plan.ElemWireType, count);
-                    if (list is not null && count > 0)
-                    {
-                        if (plan.ElemWireType == OmniBufWireType.SubMsg)
-                        {
-                            MessageCodec subCodec = plan.SubCodec!;
-                            for (int i = 0; i < count; i++)
-                            {
-                                enc.BeginContainer();
-                                object? elem = list[i];
-                                if (elem is not null)
-                                {
-                                    subCodec.EncodeObject(enc, elem, det, depth + 2);
-                                }
-
-                                enc.EndContainer();
-                            }
-                        }
-                        else
-                        {
-                            for (int i = 0; i < count; i++)
-                            {
-                                WriteScalarPayload(enc, plan.ElemScalar, plan.ElemWireType, list[i]);
-                            }
-                        }
-                    }
-
-                    enc.EndArray();
-                };
+                return BuildGenericCollectionFieldEncoder(plan, fnum, omitEmpty);
 
             case FieldCategory.Map:
-                return (enc, obj, det, depth) =>
-                {
-                    var dict = plan.Getter(obj) as IDictionary;
-                    int count = dict?.Count ?? 0;
-                    if (omitEmpty && count == 0)
-                    {
-                        return;
-                    }
-
-                    if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-                    {
-                        throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-                    }
-
-                    enc.BeginMapField(fnum, plan.MapKeyWireType, plan.MapValWireType, count);
-                    if (dict is not null && count > 0)
-                    {
-                        if (det && count > 1)
-                        {
-                            var keys = new object[count];
-                            dict.Keys.CopyTo(keys, 0);
-                            SortMapKeys(keys, plan.MapKeyScalar);
-                            foreach (object k in keys)
-                            {
-                                WriteScalarPayload(enc, plan.MapKeyScalar, plan.MapKeyWireType, k);
-                                WriteMapValuePayload(enc, plan, dict[k], det, depth + 2);
-                            }
-                        }
-                        else
-                        {
-                            foreach (DictionaryEntry entry in dict)
-                            {
-                                WriteScalarPayload(enc, plan.MapKeyScalar, plan.MapKeyWireType, entry.Key);
-                                WriteMapValuePayload(enc, plan, entry.Value, det, depth + 2);
-                            }
-                        }
-                    }
-
-                    enc.EndMap();
-                };
+                return BuildGenericMapFieldEncoder(plan, fnum, omitEmpty);
 
             case FieldCategory.NestedContainer:
                 return (enc, obj, det, depth) =>
                 {
                     object? container = plan.Getter(obj);
-                    int count = container switch
-                    {
-                        IList l => l.Count,
-                        IDictionary d => d.Count,
-                        _ => 0,
-                    };
-                    if (omitEmpty && count == 0)
+                    if (omitEmpty && IsContainerEmpty(container, plan.ContainerNode!))
                     {
                         return;
                     }
@@ -1727,6 +1851,289 @@ public static class OmniBufSerializer
             default:
                 throw new OmniBufException($"omnibuf: unsupported field category {plan.Category}");
         }
+    }
+
+    private static Action<OmniBufEncoder, object, bool, int> BuildGenericCollectionFieldEncoder(FieldPlan plan, uint fnum, bool omitEmpty)
+    {
+        MethodInfo helper = typeof(OmniBufSerializer)
+            .GetMethod(nameof(BuildGenericCollectionFieldEncoderCore), BindingFlags.NonPublic | BindingFlags.Static)!
+            .MakeGenericMethod(plan.ElemType!);
+        return (Action<OmniBufEncoder, object, bool, int>)helper.Invoke(null, new object[] { plan, fnum, omitEmpty })!;
+    }
+
+    private static Action<OmniBufEncoder, object, bool, int> BuildGenericCollectionFieldEncoderCore<TElem>(FieldPlan plan, uint fnum, bool omitEmpty)
+    {
+        return (enc, obj, det, depth) =>
+        {
+            object? raw = plan.Getter(obj);
+            if (raw is null)
+            {
+                if (omitEmpty)
+                {
+                    return;
+                }
+
+                if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+                {
+                    throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                }
+
+                enc.BeginArrayField(fnum, plan.ElemWireType, 0);
+                enc.EndArray();
+                return;
+            }
+
+            IReadOnlyList<TElem>? indexed = raw as IReadOnlyList<TElem>;
+            IEnumerable<TElem>? seq = raw as IEnumerable<TElem>;
+            int count;
+            if (indexed is not null)
+            {
+                count = indexed.Count;
+            }
+            else if (raw is ICollection<TElem> coll)
+            {
+                count = coll.Count;
+            }
+            else if (raw is IReadOnlyCollection<TElem> roColl)
+            {
+                count = roColl.Count;
+            }
+            else if (seq is not null)
+            {
+                var materialized = new List<TElem>(seq);
+                indexed = materialized;
+                count = materialized.Count;
+            }
+            else
+            {
+                count = 0;
+            }
+
+            if (omitEmpty && count == 0)
+            {
+                return;
+            }
+
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+            {
+                throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            }
+
+            enc.BeginArrayField(fnum, plan.ElemWireType, count);
+            if (count > 0)
+            {
+                if (plan.ElemWireType == OmniBufWireType.SubMsg)
+                {
+                    if (depth + 2 > OmniBufConstants.MaxNestingDepth)
+                    {
+                        throw new OmniBufException($"omnibuf: encode nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                    }
+
+                    MessageCodec subCodec = plan.SubCodec!;
+                    if (indexed is not null)
+                    {
+                        for (int i = 0; i < count; i++)
+                        {
+                            enc.BeginContainer();
+                            TElem elem = indexed[i];
+                            if (elem is not null)
+                            {
+                                subCodec.EncodeObject(enc, elem, det, depth + 2);
+                            }
+
+                            enc.EndContainer();
+                        }
+                    }
+                    else
+                    {
+                        foreach (TElem elem in seq!)
+                        {
+                            enc.BeginContainer();
+                            if (elem is not null)
+                            {
+                                subCodec.EncodeObject(enc, elem, det, depth + 2);
+                            }
+
+                            enc.EndContainer();
+                        }
+                    }
+                }
+                else if (indexed is not null)
+                {
+                    for (int i = 0; i < count; i++)
+                    {
+                        WriteScalarPayload(enc, plan.ElemScalar, plan.ElemWireType, indexed[i]);
+                    }
+                }
+                else
+                {
+                    foreach (TElem elem in seq!)
+                    {
+                        WriteScalarPayload(enc, plan.ElemScalar, plan.ElemWireType, elem);
+                    }
+                }
+            }
+
+            enc.EndArray();
+        };
+    }
+
+    private static Action<OmniBufEncoder, object, bool, int> BuildGenericMapFieldEncoder(FieldPlan plan, uint fnum, bool omitEmpty)
+    {
+        MethodInfo helper = typeof(OmniBufSerializer)
+            .GetMethod(nameof(BuildGenericMapFieldEncoderCore), BindingFlags.NonPublic | BindingFlags.Static)!
+            .MakeGenericMethod(plan.MapKeyType!, plan.MapValType!);
+        return (Action<OmniBufEncoder, object, bool, int>)helper.Invoke(null, new object[] { plan, fnum, omitEmpty })!;
+    }
+
+    private static Action<OmniBufEncoder, object, bool, int> BuildGenericMapFieldEncoderCore<TKey, TVal>(FieldPlan plan, uint fnum, bool omitEmpty)
+        where TKey : notnull
+    {
+        return (enc, obj, det, depth) =>
+        {
+            var pairs = plan.Getter(obj) as IEnumerable<KeyValuePair<TKey, TVal>>;
+            int count;
+            if (pairs is null)
+            {
+                count = 0;
+            }
+            else if (pairs is ICollection<KeyValuePair<TKey, TVal>> coll)
+            {
+                count = coll.Count;
+            }
+            else if (pairs is IReadOnlyCollection<KeyValuePair<TKey, TVal>> roColl)
+            {
+                count = roColl.Count;
+            }
+            else if (pairs is ICollection nonGen)
+            {
+                count = nonGen.Count;
+            }
+            else
+            {
+                var materialized = new List<KeyValuePair<TKey, TVal>>(pairs);
+                pairs = materialized;
+                count = materialized.Count;
+            }
+
+            if (omitEmpty && count == 0)
+            {
+                return;
+            }
+
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+            {
+                throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            }
+
+            if (count > 0 && plan.MapValWireType == OmniBufWireType.SubMsg && depth + 2 > OmniBufConstants.MaxNestingDepth)
+            {
+                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            }
+
+            enc.BeginMapField(fnum, plan.MapKeyWireType, plan.MapValWireType, count);
+            if (pairs is not null && count > 0)
+            {
+                if (det && count > 1)
+                {
+                    var entries = new KeyValuePair<TKey, TVal>[count];
+                    int idx = 0;
+                    foreach (KeyValuePair<TKey, TVal> kv in pairs)
+                    {
+                        entries[idx++] = kv;
+                    }
+
+                    var keys = new object[count];
+                    for (int i = 0; i < count; i++)
+                    {
+                        keys[i] = entries[i].Key;
+                    }
+
+                    var order = new int[count];
+                    for (int i = 0; i < count; i++)
+                    {
+                        order[i] = i;
+                    }
+
+                    SortMapKeyIndices(keys, order, plan.MapKeyScalar, plan.MapKeyWireType);
+                    for (int i = 0; i < count; i++)
+                    {
+                        KeyValuePair<TKey, TVal> kv = entries[order[i]];
+                        WriteScalarPayload(enc, plan.MapKeyScalar, plan.MapKeyWireType, kv.Key);
+                        WriteMapValuePayload(enc, plan, kv.Value, det, depth + 2);
+                    }
+                }
+                else
+                {
+                    foreach (KeyValuePair<TKey, TVal> kv in pairs)
+                    {
+                        WriteScalarPayload(enc, plan.MapKeyScalar, plan.MapKeyWireType, kv.Key);
+                        WriteMapValuePayload(enc, plan, kv.Value, det, depth + 2);
+                    }
+                }
+            }
+
+            enc.EndMap();
+        };
+    }
+
+    private static Func<object, List<KeyValuePair<object, object?>>> BuildBoxedMapEntryExtractor(Type keyType, Type valType)
+    {
+        MethodInfo helper = typeof(OmniBufSerializer)
+            .GetMethod(nameof(BuildBoxedMapEntryExtractorCore), BindingFlags.NonPublic | BindingFlags.Static)!
+            .MakeGenericMethod(keyType, valType);
+        return (Func<object, List<KeyValuePair<object, object?>>>)helper.Invoke(null, null)!;
+    }
+
+    private static Func<object, List<KeyValuePair<object, object?>>> BuildBoxedMapEntryExtractorCore<TKey, TVal>()
+        where TKey : notnull
+    {
+        return mapObj =>
+        {
+            var result = new List<KeyValuePair<object, object?>>();
+            if (mapObj is IEnumerable<KeyValuePair<TKey, TVal>> pairs)
+            {
+                foreach (KeyValuePair<TKey, TVal> kv in pairs)
+                {
+                    result.Add(new KeyValuePair<object, object?>(kv.Key, kv.Value));
+                }
+            }
+
+            return result;
+        };
+    }
+
+    private static bool IsContainerEmpty(object? container, ValueNode node)
+    {
+        if (container is null)
+        {
+            return true;
+        }
+
+        if (container is ICollection coll)
+        {
+            return coll.Count == 0;
+        }
+
+        if (node.Kind == ValueNodeKind.Map && node.MapEntryExtractor is not null)
+        {
+            return node.MapEntryExtractor(container).Count == 0;
+        }
+
+        if (container is IEnumerable enumerable)
+        {
+            IEnumerator e = enumerable.GetEnumerator();
+            try
+            {
+                return !e.MoveNext();
+            }
+            finally
+            {
+                (e as IDisposable)?.Dispose();
+            }
+        }
+
+        return true;
     }
 
     private static void EncodeValueNode(OmniBufEncoder enc, ValueNode node, object? val, bool det, int depth)
@@ -1755,54 +2162,141 @@ public static class OmniBufSerializer
             case ValueNodeKind.List:
             case ValueNodeKind.Array:
                 {
-                    var list = val as IList;
-                    int count = list?.Count ?? 0;
                     ValueNode elemNode = node.ElemNode!;
-                    enc.BeginArrayElement(elemNode.WireType, count);
-                    if (list is not null)
+                    int nextDepth = elemNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
+                    if (val is IList list)
                     {
-                        int nextDepth = elemNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
+                        int count = list.Count;
+                        if (count > 0 && nextDepth > OmniBufConstants.MaxNestingDepth)
+                        {
+                            throw new OmniBufException($"omnibuf: container encode depth {nextDepth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                        }
+
+                        enc.BeginArrayElement(elemNode.WireType, count);
                         for (int i = 0; i < count; i++)
                         {
                             EncodeValueNode(enc, elemNode, list[i], det, nextDepth);
                         }
+
+                        enc.EndArray();
+                    }
+                    else if (val is IEnumerable enumerable)
+                    {
+                        var items = new List<object?>();
+                        foreach (object? item in enumerable)
+                        {
+                            items.Add(item);
+                        }
+
+                        int count = items.Count;
+                        if (count > 0 && nextDepth > OmniBufConstants.MaxNestingDepth)
+                        {
+                            throw new OmniBufException($"omnibuf: container encode depth {nextDepth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                        }
+
+                        enc.BeginArrayElement(elemNode.WireType, count);
+                        for (int i = 0; i < count; i++)
+                        {
+                            EncodeValueNode(enc, elemNode, items[i], det, nextDepth);
+                        }
+
+                        enc.EndArray();
+                    }
+                    else
+                    {
+                        enc.BeginArrayElement(elemNode.WireType, 0);
+                        enc.EndArray();
                     }
 
-                    enc.EndArray();
                     break;
                 }
 
             case ValueNodeKind.Map:
                 {
-                    var dict = val as IDictionary;
-                    int count = dict?.Count ?? 0;
                     ValueNode valNode = node.MapValNode!;
-                    enc.BeginMapElement(node.MapKeyWireType, valNode.WireType, count);
-                    if (dict is not null && count > 0)
+                    int nextDepth = valNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
+                    if (val is IDictionary dict)
                     {
-                        int nextDepth = valNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
-                        if (det && count > 1)
+                        int count = dict.Count;
+                        if (count > 0 && nextDepth > OmniBufConstants.MaxNestingDepth)
                         {
-                            var keys = new object[count];
-                            dict.Keys.CopyTo(keys, 0);
-                            SortMapKeys(keys, node.MapKeyScalar);
-                            foreach (object k in keys)
+                            throw new OmniBufException($"omnibuf: container encode depth {nextDepth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                        }
+
+                        enc.BeginMapElement(node.MapKeyWireType, valNode.WireType, count);
+                        if (count > 0)
+                        {
+                            if (det && count > 1)
                             {
-                                WriteScalarPayload(enc, node.MapKeyScalar, node.MapKeyWireType, k);
-                                EncodeValueNode(enc, valNode, dict[k], det, nextDepth);
+                                var keys = new object[count];
+                                dict.Keys.CopyTo(keys, 0);
+                                SortMapKeys(keys, node.MapKeyScalar, node.MapKeyWireType);
+                                foreach (object k in keys)
+                                {
+                                    WriteScalarPayload(enc, node.MapKeyScalar, node.MapKeyWireType, k);
+                                    EncodeValueNode(enc, valNode, dict[k], det, nextDepth);
+                                }
+                            }
+                            else
+                            {
+                                foreach (DictionaryEntry entry in dict)
+                                {
+                                    WriteScalarPayload(enc, node.MapKeyScalar, node.MapKeyWireType, entry.Key);
+                                    EncodeValueNode(enc, valNode, entry.Value, det, nextDepth);
+                                }
                             }
                         }
-                        else
+
+                        enc.EndMap();
+                    }
+                    else if (val is not null && node.MapEntryExtractor is not null)
+                    {
+                        List<KeyValuePair<object, object?>> entries = node.MapEntryExtractor(val);
+                        int count = entries.Count;
+                        if (count > 0 && nextDepth > OmniBufConstants.MaxNestingDepth)
                         {
-                            foreach (DictionaryEntry entry in dict)
+                            throw new OmniBufException($"omnibuf: container encode depth {nextDepth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                        }
+
+                        enc.BeginMapElement(node.MapKeyWireType, valNode.WireType, count);
+                        if (count > 0)
+                        {
+                            if (det && count > 1)
                             {
-                                WriteScalarPayload(enc, node.MapKeyScalar, node.MapKeyWireType, entry.Key);
-                                EncodeValueNode(enc, valNode, entry.Value, det, nextDepth);
+                                var keys = new object[count];
+                                var order = new int[count];
+                                for (int i = 0; i < count; i++)
+                                {
+                                    keys[i] = entries[i].Key;
+                                    order[i] = i;
+                                }
+
+                                SortMapKeyIndices(keys, order, node.MapKeyScalar, node.MapKeyWireType);
+                                for (int i = 0; i < count; i++)
+                                {
+                                    KeyValuePair<object, object?> kv = entries[order[i]];
+                                    WriteScalarPayload(enc, node.MapKeyScalar, node.MapKeyWireType, kv.Key);
+                                    EncodeValueNode(enc, valNode, kv.Value, det, nextDepth);
+                                }
+                            }
+                            else
+                            {
+                                foreach (KeyValuePair<object, object?> kv in entries)
+                                {
+                                    WriteScalarPayload(enc, node.MapKeyScalar, node.MapKeyWireType, kv.Key);
+                                    EncodeValueNode(enc, valNode, kv.Value, det, nextDepth);
+                                }
                             }
                         }
+
+                        enc.EndMap();
+                    }
+                    else
+                    {
+                        enc.BeginMapElement(node.MapKeyWireType, valNode.WireType, 0);
+                        enc.EndMap();
                     }
 
-                    enc.EndMap();
                     break;
                 }
         }
@@ -2481,6 +2975,11 @@ public static class OmniBufSerializer
                 throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
 
+            if (count > 0 && depth + 2 > OmniBufConstants.MaxNestingDepth)
+            {
+                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            }
+
             enc.BeginArrayField(fnum, OmniBufWireType.SubMsg, count);
             if (list is not null)
             {
@@ -2532,6 +3031,11 @@ public static class OmniBufSerializer
     {
         if (plan.MapValWireType == OmniBufWireType.SubMsg)
         {
+            if (childDepth > OmniBufConstants.MaxNestingDepth)
+            {
+                throw new OmniBufException($"omnibuf: encode nesting depth {childDepth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            }
+
             enc.BeginContainer();
             if (val is not null)
             {
@@ -2804,10 +3308,25 @@ public static class OmniBufSerializer
                     markedSeen = true;
                     if (plan.Category == FieldCategory.List)
                     {
-                        IList list = existing as IList ?? plan.ListFactory!();
-                        if (!alreadySeen)
+                        IList list;
+                        if (existing is IList existingList && !existingList.IsReadOnly && !existingList.IsFixedSize)
                         {
-                            list.Clear();
+                            list = existingList;
+                            if (!alreadySeen)
+                            {
+                                list.Clear();
+                            }
+                        }
+                        else
+                        {
+                            list = plan.ListFactory!();
+                            if (alreadySeen && existing is IEnumerable prevItems)
+                            {
+                                foreach (object? item in prevItems)
+                                {
+                                    list.Add(item);
+                                }
+                            }
                         }
 
                         AppendArrayElementsToList(body, ref p, count, plan, list, depth, maxDepth);
@@ -2822,6 +3341,33 @@ public static class OmniBufSerializer
                     {
                         Array? prevArr = alreadySeen ? existing as Array : null;
                         int prevLen = prevArr?.Length ?? 0;
+                        if ((long)prevLen + count > Array.MaxLength)
+                        {
+                            throw new OmniBufException("omnibuf: concatenated array exceeds maximum length");
+                        }
+
+                        if (count > 4096 && OmniBufConstants.FixedElementWidth(plan.ElemWireType) == 0)
+                        {
+                            IList staged = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(plan.ElemType!), Math.Min(prevLen + 4096, Array.MaxLength))!;
+                            if (prevArr is not null)
+                            {
+                                foreach (object? item in prevArr)
+                                {
+                                    staged.Add(item);
+                                }
+                            }
+
+                            AppendArrayElementsToList(body, ref p, count, plan, staged, depth, maxDepth);
+                            if (p != body.Length)
+                            {
+                                throw new OmniBufException("omnibuf: trailing bytes in WireArray");
+                            }
+
+                            Array stagedArr = Array.CreateInstance(plan.ElemType!, staged.Count);
+                            staged.CopyTo(stagedArr, 0);
+                            return stagedArr;
+                        }
+
                         Array nextArr = Array.CreateInstance(plan.ElemType!, prevLen + count);
                         if (prevArr is not null && prevLen > 0)
                         {
@@ -2867,10 +3413,22 @@ public static class OmniBufSerializer
                     }
 
                     markedSeen = true;
-                    IDictionary map = existing as IDictionary ?? plan.MapFactory!();
-                    if (!alreadySeen)
+                    IDictionary map;
+                    if (existing is IDictionary existingMap && !existingMap.IsReadOnly && !existingMap.IsFixedSize)
                     {
-                        map.Clear();
+                        map = existingMap;
+                        if (!alreadySeen)
+                        {
+                            map.Clear();
+                        }
+                    }
+                    else
+                    {
+                        map = plan.MapFactory!();
+                        if (alreadySeen && existing is not null)
+                        {
+                            CopyEntriesIntoDictionary(existing, plan.MapKeyType!, plan.MapValType!, map);
+                        }
                     }
 
                     for (int i = 0; i < count; i++)
@@ -2905,32 +3463,75 @@ public static class OmniBufSerializer
                         return decoded;
                     }
 
-                    if (plan.ContainerNode!.Kind == ValueNodeKind.List && existing is IList prevList && decoded is IList nextList)
+                    if (plan.ContainerNode!.Kind == ValueNodeKind.List && decoded is IList nextList)
                     {
-                        foreach (object? item in nextList)
+                        if (existing is IList prevList && !prevList.IsReadOnly && !prevList.IsFixedSize)
                         {
-                            prevList.Add(item);
+                            foreach (object? item in nextList)
+                            {
+                                prevList.Add(item);
+                            }
+
+                            return prevList;
                         }
 
-                        return prevList;
+                        if (existing is IEnumerable prevEnum)
+                        {
+                            IList mergedList = plan.ContainerNode.ListFactory!();
+                            foreach (object? item in prevEnum)
+                            {
+                                mergedList.Add(item);
+                            }
+
+                            foreach (object? item in nextList)
+                            {
+                                mergedList.Add(item);
+                            }
+
+                            return mergedList;
+                        }
                     }
 
                     if (plan.ContainerNode.Kind == ValueNodeKind.Array && existing is Array prevArr && decoded is Array nextArr)
                     {
+                        if ((long)prevArr.Length + nextArr.Length > Array.MaxLength)
+                        {
+                            throw new OmniBufException("omnibuf: concatenated array exceeds maximum length");
+                        }
+
                         Array merged = Array.CreateInstance(plan.ElemType!, prevArr.Length + nextArr.Length);
                         Array.Copy(prevArr, merged, prevArr.Length);
                         Array.Copy(nextArr, 0, merged, prevArr.Length, nextArr.Length);
                         return merged;
                     }
 
-                    if (plan.ContainerNode.Kind == ValueNodeKind.Map && existing is IDictionary prevMap && decoded is IDictionary nextMap)
+                    if (plan.ContainerNode.Kind == ValueNodeKind.Map && decoded is IDictionary nextMap)
                     {
-                        foreach (DictionaryEntry kv in nextMap)
+                        if (existing is IDictionary prevMap && !prevMap.IsReadOnly && !prevMap.IsFixedSize)
                         {
-                            prevMap[kv.Key] = kv.Value;
+                            foreach (DictionaryEntry kv in nextMap)
+                            {
+                                prevMap[kv.Key] = kv.Value;
+                            }
+
+                            return prevMap;
                         }
 
-                        return prevMap;
+                        if (plan.ContainerNode.MapEntryExtractor is not null)
+                        {
+                            IDictionary mergedMap = plan.ContainerNode.MapFactory!();
+                            foreach (KeyValuePair<object, object?> kv in plan.ContainerNode.MapEntryExtractor(existing))
+                            {
+                                mergedMap[kv.Key] = kv.Value;
+                            }
+
+                            foreach (DictionaryEntry kv in nextMap)
+                            {
+                                mergedMap[kv.Key] = kv.Value;
+                            }
+
+                            return mergedMap;
+                        }
                     }
 
                     return decoded;
@@ -3157,22 +3758,75 @@ public static class OmniBufSerializer
         _ => null,
     };
 
-    private static void SortMapKeys(object[] keys, ScalarKind keyScalar)
+    private static void CopyEntriesIntoDictionary(object source, Type keyType, Type valType, IDictionary dest)
     {
-        Array.Sort(keys, (a, b) => keyScalar switch
+        if (source is IDictionary srcDict)
         {
-            ScalarKind.String => StringComparer.Ordinal.Compare((string)a, (string)b),
+            foreach (DictionaryEntry kv in srcDict)
+            {
+                dest[kv.Key] = kv.Value;
+            }
+
+            return;
+        }
+
+        MethodInfo helper = typeof(OmniBufSerializer)
+            .GetMethod(nameof(CopyEntriesIntoDictionaryCore), BindingFlags.NonPublic | BindingFlags.Static)!
+            .MakeGenericMethod(keyType, valType);
+        helper.Invoke(null, new object[] { source, dest });
+    }
+
+    private static void CopyEntriesIntoDictionaryCore<TKey, TVal>(object source, IDictionary dest)
+        where TKey : notnull
+    {
+        if (source is IEnumerable<KeyValuePair<TKey, TVal>> pairs)
+        {
+            foreach (KeyValuePair<TKey, TVal> kv in pairs)
+            {
+                dest[kv.Key] = kv.Value;
+            }
+        }
+    }
+
+    private static void SortMapKeys(object[] keys, ScalarKind keyScalar, OmniBufWireType keyWt)
+    {
+        Array.Sort(keys, (a, b) => CompareMapKeys(a, b, keyScalar, keyWt));
+    }
+
+    private static void SortMapKeyIndices(object[] keys, int[] order, ScalarKind keyScalar, OmniBufWireType keyWt)
+    {
+        Array.Sort(order, (ia, ib) => CompareMapKeys(keys[ia], keys[ib], keyScalar, keyWt));
+    }
+
+    private static int CompareMapKeys(object a, object b, ScalarKind keyScalar, OmniBufWireType keyWt)
+    {
+        bool unsignedWire = keyWt is OmniBufWireType.Uint or OmniBufWireType.Fixed32 or OmniBufWireType.Fixed64;
+        return keyScalar switch
+        {
+            ScalarKind.String => Utf8OrdinalStringComparer.CompareStatic((string)a, (string)b),
             ScalarKind.Bool => ((bool)a).CompareTo((bool)b),
             ScalarKind.Byte => UnboxByte(a).CompareTo(UnboxByte(b)),
             ScalarKind.UInt16 => UnboxUInt16(a).CompareTo(UnboxUInt16(b)),
-            ScalarKind.UInt32 => UnboxUInt32(a).CompareTo(UnboxUInt32(b)),
-            ScalarKind.UInt64 => UnboxUInt64(a).CompareTo(UnboxUInt64(b)),
-            ScalarKind.SByte => UnboxSByte(a).CompareTo(UnboxSByte(b)),
-            ScalarKind.Int16 => UnboxInt16(a).CompareTo(UnboxInt16(b)),
-            ScalarKind.Int32 => UnboxInt32(a).CompareTo(UnboxInt32(b)),
-            ScalarKind.Int64 => UnboxInt64(a).CompareTo(UnboxInt64(b)),
+            ScalarKind.UInt32 => keyWt == OmniBufWireType.Sfixed32
+                ? unchecked((int)UnboxUInt32(a)).CompareTo(unchecked((int)UnboxUInt32(b)))
+                : UnboxUInt32(a).CompareTo(UnboxUInt32(b)),
+            ScalarKind.UInt64 => keyWt is OmniBufWireType.Sint or OmniBufWireType.Sfixed64
+                ? unchecked((long)UnboxUInt64(a)).CompareTo(unchecked((long)UnboxUInt64(b)))
+                : UnboxUInt64(a).CompareTo(UnboxUInt64(b)),
+            ScalarKind.SByte => unsignedWire
+                ? unchecked((byte)UnboxSByte(a)).CompareTo(unchecked((byte)UnboxSByte(b)))
+                : UnboxSByte(a).CompareTo(UnboxSByte(b)),
+            ScalarKind.Int16 => unsignedWire
+                ? unchecked((ushort)UnboxInt16(a)).CompareTo(unchecked((ushort)UnboxInt16(b)))
+                : UnboxInt16(a).CompareTo(UnboxInt16(b)),
+            ScalarKind.Int32 => unsignedWire
+                ? unchecked((uint)UnboxInt32(a)).CompareTo(unchecked((uint)UnboxInt32(b)))
+                : UnboxInt32(a).CompareTo(UnboxInt32(b)),
+            ScalarKind.Int64 => unsignedWire
+                ? unchecked((ulong)UnboxInt64(a)).CompareTo(unchecked((ulong)UnboxInt64(b)))
+                : UnboxInt64(a).CompareTo(UnboxInt64(b)),
             _ => Comparer.DefaultInvariant.Compare(a, b),
-        });
+        };
     }
 
     private static Func<object, object?> CompileGetter(PropertyInfo prop)
@@ -3203,6 +3857,27 @@ public static class OmniBufSerializer
         // Reject C# init-only setters for post-construction mutation.
         Type[] modReq = setMethod.ReturnParameter.GetRequiredCustomModifiers();
         if (Array.Exists(modReq, t => t.FullName == "System.Runtime.CompilerServices.IsExternalInit"))
+        {
+            return null;
+        }
+
+        if (prop.DeclaringType!.IsValueType)
+        {
+            return (obj, val) => prop.SetValue(obj, val);
+        }
+
+        ParameterExpression objParam = Expression.Parameter(typeof(object), "obj");
+        ParameterExpression valParam = Expression.Parameter(typeof(object), "val");
+        UnaryExpression castObj = Expression.Convert(objParam, prop.DeclaringType);
+        UnaryExpression castVal = Expression.Convert(valParam, prop.PropertyType);
+        MethodCallExpression call = Expression.Call(castObj, setMethod, castVal);
+        return Expression.Lambda<Action<object, object?>>(call, objParam, valParam).Compile();
+    }
+
+    private static Action<object, object?>? CompileInitSetter(PropertyInfo prop)
+    {
+        MethodInfo? setMethod = prop.GetSetMethod();
+        if (setMethod is null)
         {
             return null;
         }
@@ -3702,7 +4377,7 @@ public static class OmniBufSerializer
                         List<string>? list = get(target);
                         if (list is null)
                         {
-                            list = new List<string>(count);
+                            list = new List<string>(Math.Min(count, 4096));
                             set(target, list);
                         }
                         else if (!alreadySeen)
@@ -3710,7 +4385,12 @@ public static class OmniBufSerializer
                             list.Clear();
                         }
 
-                        list.EnsureCapacity(list.Count + count);
+                        if ((long)list.Count + count > Array.MaxLength)
+                        {
+                            throw new OmniBufException("omnibuf: concatenated list exceeds maximum length");
+                        }
+
+                        list.EnsureCapacity((int)Math.Min((long)list.Count + Math.Min(count, 4096), Array.MaxLength));
                         for (int i = 0; i < count; i++)
                         {
                             list.Add(OmniBufDecoder.ReadString(body, ref p));
@@ -3751,7 +4431,7 @@ public static class OmniBufSerializer
                         List<uint>? list = get(target);
                         if (list is null)
                         {
-                            list = new List<uint>(count);
+                            list = new List<uint>(Math.Min(count, 4096));
                             set(target, list);
                         }
                         else if (!alreadySeen)
@@ -3759,7 +4439,12 @@ public static class OmniBufSerializer
                             list.Clear();
                         }
 
-                        list.EnsureCapacity(list.Count + count);
+                        if ((long)list.Count + count > Array.MaxLength)
+                        {
+                            throw new OmniBufException("omnibuf: concatenated list exceeds maximum length");
+                        }
+
+                        list.EnsureCapacity((int)Math.Min((long)list.Count + Math.Min(count, 4096), Array.MaxLength));
                         for (int i = 0; i < count; i++)
                         {
                             list.Add((uint)OmniBufDecoder.ReadVarint(body, ref p));
@@ -3800,7 +4485,7 @@ public static class OmniBufSerializer
                         List<int>? list = get(target);
                         if (list is null)
                         {
-                            list = new List<int>(count);
+                            list = new List<int>(Math.Min(count, 4096));
                             set(target, list);
                         }
                         else if (!alreadySeen)
@@ -3808,7 +4493,12 @@ public static class OmniBufSerializer
                             list.Clear();
                         }
 
-                        list.EnsureCapacity(list.Count + count);
+                        if ((long)list.Count + count > Array.MaxLength)
+                        {
+                            throw new OmniBufException("omnibuf: concatenated list exceeds maximum length");
+                        }
+
+                        list.EnsureCapacity((int)Math.Min((long)list.Count + Math.Min(count, 4096), Array.MaxLength));
                         for (int i = 0; i < count; i++)
                         {
                             list.Add((int)OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(body, ref p)));
@@ -3858,8 +4548,13 @@ public static class OmniBufSerializer
             List<TElem>? list = get(target);
             if (list is null)
             {
-                list = new List<TElem>(count);
+                list = new List<TElem>(Math.Min(count, 4096));
                 set(target, list);
+            }
+
+            if (alreadySeen && (long)list.Count + count > Array.MaxLength)
+            {
+                throw new OmniBufException("omnibuf: concatenated list exceeds maximum length");
             }
 
             if (!alreadySeen && subCodec.CanDecodeInPlace)
@@ -3871,7 +4566,7 @@ public static class OmniBufSerializer
                 }
                 else
                 {
-                    list.EnsureCapacity(count);
+                    list.EnsureCapacity(Math.Max(prevCount, Math.Min(count, 4096)));
                 }
 
                 for (int i = 0; i < count; i++)
@@ -3963,7 +4658,7 @@ public static class OmniBufSerializer
                     Func<IList> factory = plan.ListFactory!;
                     return target =>
                     {
-                        if (get(target) is IList list)
+                        if (get(target) is IList list && !list.IsReadOnly && !list.IsFixedSize)
                         {
                             list.Clear();
                         }
@@ -3981,7 +4676,7 @@ public static class OmniBufSerializer
                     Func<IDictionary> factory = plan.MapFactory!;
                     return target =>
                     {
-                        if (get(target) is IDictionary map)
+                        if (get(target) is IDictionary map && !map.IsReadOnly && !map.IsFixedSize)
                         {
                             map.Clear();
                         }

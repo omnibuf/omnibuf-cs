@@ -1,5 +1,8 @@
+using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.Unicode;
 
 namespace OmniBuf;
 
@@ -83,6 +86,7 @@ public static class OmniBufConstants
         && fieldNum <= MaxFieldNumber
         && (fieldNum < ReservedFieldMin || fieldNum > ReservedFieldMax);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static string DecodeUtf8Strict(ReadOnlySpan<byte> bytes)
     {
         if (bytes.IsEmpty)
@@ -90,15 +94,18 @@ public static class OmniBufConstants
             return string.Empty;
         }
 
-        try
+        if (!Utf8.IsValid(bytes))
         {
-            return StrictUtf8.GetString(bytes);
+            ThrowInvalidUtf8();
         }
-        catch (DecoderFallbackException ex)
-        {
-            throw new OmniBufException("omnibuf: invalid UTF-8 string payload", ex);
-        }
+
+        return Encoding.UTF8.GetString(bytes);
     }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowInvalidUtf8() =>
+        throw new OmniBufException("omnibuf: invalid UTF-8 string payload");
 
     public static int GetUtf8ByteCountStrict(string value)
     {
@@ -115,5 +122,72 @@ public static class OmniBufConstants
         {
             throw new OmniBufException("omnibuf: string contains invalid UTF-16 surrogates", ex);
         }
+    }
+}
+
+/// <summary>
+/// Compares UTF-16 strings in exact UTF-8 lexicographical byte order (Unicode scalar value order).
+/// </summary>
+public sealed class Utf8OrdinalStringComparer : IComparer<string>
+{
+    public static readonly Utf8OrdinalStringComparer Instance = new();
+
+    private Utf8OrdinalStringComparer()
+    {
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int Compare(string? x, string? y) => CompareStatic(x, y);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int CompareStatic(string? x, string? y)
+    {
+        if (ReferenceEquals(x, y))
+        {
+            return 0;
+        }
+
+        if (x is null)
+        {
+            return -1;
+        }
+
+        if (y is null)
+        {
+            return 1;
+        }
+
+        ReadOnlySpan<char> sx = x.AsSpan();
+        ReadOnlySpan<char> sy = y.AsSpan();
+        int common = sx.CommonPrefixLength(sy);
+        if (common == sx.Length || common == sy.Length)
+        {
+            return sx.Length.CompareTo(sy.Length);
+        }
+
+        if (common > 0 && char.IsHighSurrogate(sx[common - 1]))
+        {
+            common--;
+        }
+
+        char cx = sx[common];
+        char cy = sy[common];
+        if (cx < 0xD800 || cy < 0xD800)
+        {
+            return cx.CompareTo(cy);
+        }
+
+        return CompareSurrogateOrBmpTail(sx.Slice(common), sy.Slice(common), cx, cy);
+    }
+
+    private static int CompareSurrogateOrBmpTail(ReadOnlySpan<char> tx, ReadOnlySpan<char> ty, char cx, char cy)
+    {
+        if (Rune.DecodeFromUtf16(tx, out Rune rx, out _) == OperationStatus.Done
+            && Rune.DecodeFromUtf16(ty, out Rune ry, out _) == OperationStatus.Done)
+        {
+            return rx.Value.CompareTo(ry.Value);
+        }
+
+        return cx.CompareTo(cy);
     }
 }

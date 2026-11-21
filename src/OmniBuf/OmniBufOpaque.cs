@@ -47,9 +47,10 @@ public static class OmniBufOpaque
             pos += tn;
             uint fnum = (uint)(tag >> 4);
             var wt = (OmniBufWireType)(tag & 0x0Fu);
-            if (fnum == 0 && wt != OmniBufWireType.SubMsg)
+            if (fnum == 0)
             {
-                ThrowCorruptPacket("Field #0 requires SubMsg wire type", pos - tn);
+                SchemaMeta.ValidateField0(packet, ref pos, wt, 0, OmniBufConstants.MaxNestingDepth);
+                continue;
             }
 
             int valStart = pos;
@@ -67,6 +68,142 @@ public static class OmniBufOpaque
         }
 
         return found;
+    }
+
+    private const int MaxPackedValueLen = 0x07FF_FFFF;
+    private const long LargeValueSentinel = -2L;
+    private const long MultiSegmentSentinel = -3L;
+
+    public static long[] BuildFieldIndex(ReadOnlySpan<byte> packet, int maxField)
+    {
+        if (maxField <= 0)
+        {
+            return Array.Empty<long>();
+        }
+
+        var index = new long[maxField + 1];
+        Array.Fill(index, -1L);
+        int pos = 0;
+        while (pos < packet.Length)
+        {
+            if (!OmniBufDecoder.TryDecodeVarint(packet.Slice(pos), out ulong tag, out int tn)
+                || (tag >> 4) > OmniBufConstants.MaxFieldNumber)
+            {
+                ThrowCorruptPacket("invalid tag in Opaque packet", pos);
+            }
+
+            pos += tn;
+            uint fnum = (uint)(tag >> 4);
+            var wt = (OmniBufWireType)(tag & 0x0Fu);
+            if (fnum == 0)
+            {
+                SchemaMeta.ValidateField0(packet, ref pos, wt, 0, OmniBufConstants.MaxNestingDepth);
+                continue;
+            }
+
+            int valStart = pos;
+            if (!OmniBufDecoder.TryFastSkipValue(packet, ref pos, wt))
+            {
+                ThrowCorruptPacket("truncated or malformed field payload in Opaque packet", valStart);
+            }
+
+            if (fnum <= (uint)maxField)
+            {
+                long prev = index[fnum];
+                if (prev != -1L && wt is OmniBufWireType.SubMsg or OmniBufWireType.Array or OmniBufWireType.Map)
+                {
+                    index[fnum] = MultiSegmentSentinel;
+                }
+                else
+                {
+                    int valLen = pos - valStart;
+                    index[fnum] = valLen <= MaxPackedValueLen
+                        ? (((long)valStart << 32) | ((long)valLen << 4) | (long)wt)
+                        : LargeValueSentinel;
+                }
+            }
+        }
+
+        return index;
+    }
+
+    public static bool LocateFieldIndexed(
+        long[] index,
+        ReadOnlySpan<byte> packet,
+        uint targetField,
+        ushort expectedMask,
+        out ReadOnlySpan<byte> valueSlice,
+        out OmniBufWireType wireType)
+    {
+        if (targetField > 0 && targetField < (uint)index.Length)
+        {
+            long packed = index[targetField];
+            if (packed == -1L)
+            {
+                valueSlice = default;
+                wireType = default;
+                return false;
+            }
+
+            if (packed >= 0L)
+            {
+                var wt = (OmniBufWireType)(packed & 0x0FL);
+                if ((expectedMask & (1u << (byte)wt)) != 0)
+                {
+                    int valStart = (int)(packed >> 32);
+                    int valLen = (int)((uint)packed >> 4);
+                    valueSlice = packet.Slice(valStart, valLen);
+                    wireType = wt;
+                    return true;
+                }
+            }
+        }
+
+        return LocateFieldMask(packet, targetField, expectedMask, out valueSlice, out wireType);
+    }
+
+    public static uint LocateActiveOneof(
+        ReadOnlySpan<byte> packet,
+        ReadOnlySpan<uint> memberFields,
+        ReadOnlySpan<ushort> memberWireMasks)
+    {
+        uint active = 0u;
+        int pos = 0;
+        while (pos < packet.Length)
+        {
+            if (!OmniBufDecoder.TryDecodeVarint(packet.Slice(pos), out ulong tag, out int tn)
+                || (tag >> 4) > OmniBufConstants.MaxFieldNumber)
+            {
+                ThrowCorruptPacket("invalid tag in Opaque packet", pos);
+            }
+
+            pos += tn;
+            uint fnum = (uint)(tag >> 4);
+            var wt = (OmniBufWireType)(tag & 0x0Fu);
+            if (fnum == 0)
+            {
+                SchemaMeta.ValidateField0(packet, ref pos, wt, 0, OmniBufConstants.MaxNestingDepth);
+                continue;
+            }
+
+            int valStart = pos;
+            if (!OmniBufDecoder.TryFastSkipValue(packet, ref pos, wt))
+            {
+                ThrowCorruptPacket("truncated or malformed field payload in Opaque packet", valStart);
+            }
+
+            ushort bit = (ushort)(1u << (byte)wt);
+            for (int i = 0; i < memberFields.Length; i++)
+            {
+                if (memberFields[i] == fnum && (memberWireMasks[i] & bit) != 0)
+                {
+                    active = fnum;
+                    break;
+                }
+            }
+        }
+
+        return active;
     }
 
     public static bool TryReadUint(ReadOnlySpan<byte> packet, uint fieldNum, out ulong value)
@@ -165,7 +302,150 @@ public static class OmniBufOpaque
 
     public static bool TryReadBytes(ReadOnlySpan<byte> packet, uint fieldNum, out byte[] value)
     {
+        if (TryReadBytesSpan(packet, fieldNum, out ReadOnlySpan<byte> slice))
+        {
+            value = slice.ToArray();
+            return true;
+        }
+
+        value = Array.Empty<byte>();
+        return false;
+    }
+
+    public static bool TryReadBytesSpan(ReadOnlySpan<byte> packet, uint fieldNum, out ReadOnlySpan<byte> value)
+    {
         if (LocateFieldMask(packet, fieldNum, 1 << (byte)OmniBufWireType.Bytes, out ReadOnlySpan<byte> val, out _))
+        {
+            int p = 0;
+            value = OmniBufDecoder.ReadLenSlice(val, ref p, 0);
+            if (p != val.Length)
+            {
+                ThrowCorruptPacket("trailing bytes in Bytes field", p);
+            }
+
+            return true;
+        }
+
+        value = ReadOnlySpan<byte>.Empty;
+        return false;
+    }
+
+    public static bool TryReadStringSpan(ReadOnlySpan<byte> packet, uint fieldNum, out ReadOnlySpan<byte> utf8Bytes)
+    {
+        if (LocateFieldMask(packet, fieldNum, 1 << (byte)OmniBufWireType.String, out ReadOnlySpan<byte> val, out _))
+        {
+            int p = 0;
+            utf8Bytes = OmniBufDecoder.ReadLenSlice(val, ref p, 0);
+            if (p != val.Length)
+            {
+                ThrowCorruptPacket("trailing bytes in String field", p);
+            }
+
+            _ = OmniBufConstants.DecodeUtf8Strict(utf8Bytes);
+            return true;
+        }
+
+        utf8Bytes = ReadOnlySpan<byte>.Empty;
+        return false;
+    }
+
+    public static bool TryReadUintIndexed(long[] index, ReadOnlySpan<byte> packet, uint fieldNum, out ulong value)
+    {
+        if (LocateFieldIndexed(index, packet, fieldNum, 1 << (byte)OmniBufWireType.Uint, out ReadOnlySpan<byte> val, out _))
+        {
+            int p = 0;
+            value = OmniBufDecoder.ReadVarint(val, ref p);
+            if (p != val.Length)
+            {
+                ThrowCorruptPacket("trailing bytes in Uint field", p);
+            }
+
+            return true;
+        }
+
+        value = 0;
+        return false;
+    }
+
+    public static bool TryReadSintIndexed(long[] index, ReadOnlySpan<byte> packet, uint fieldNum, out long value)
+    {
+        if (LocateFieldIndexed(index, packet, fieldNum, 1 << (byte)OmniBufWireType.Sint, out ReadOnlySpan<byte> val, out _))
+        {
+            int p = 0;
+            ulong u = OmniBufDecoder.ReadVarint(val, ref p);
+            if (p != val.Length)
+            {
+                ThrowCorruptPacket("trailing bytes in Sint field", p);
+            }
+
+            value = OmniBufConstants.ZigZagDecode64(u);
+            return true;
+        }
+
+        value = 0;
+        return false;
+    }
+
+    public static bool TryReadBoolIndexed(long[] index, ReadOnlySpan<byte> packet, uint fieldNum, out bool value)
+    {
+        const ushort mask = (1 << (byte)OmniBufWireType.BoolFalse) | (1 << (byte)OmniBufWireType.BoolTrue);
+        if (LocateFieldIndexed(index, packet, fieldNum, mask, out _, out OmniBufWireType wt))
+        {
+            value = wt == OmniBufWireType.BoolTrue;
+            return true;
+        }
+
+        value = false;
+        return false;
+    }
+
+    public static bool TryReadFixed32Indexed(long[] index, ReadOnlySpan<byte> packet, uint fieldNum, OmniBufWireType expectedWt, out uint bits)
+    {
+        if (LocateFieldIndexed(index, packet, fieldNum, (ushort)(1u << (byte)expectedWt), out ReadOnlySpan<byte> val, out _))
+        {
+            int p = 0;
+            bits = OmniBufDecoder.ReadFixed32(val, ref p);
+            return true;
+        }
+
+        bits = 0;
+        return false;
+    }
+
+    public static bool TryReadFixed64Indexed(long[] index, ReadOnlySpan<byte> packet, uint fieldNum, OmniBufWireType expectedWt, out ulong bits)
+    {
+        if (LocateFieldIndexed(index, packet, fieldNum, (ushort)(1u << (byte)expectedWt), out ReadOnlySpan<byte> val, out _))
+        {
+            int p = 0;
+            bits = OmniBufDecoder.ReadFixed64(val, ref p);
+            return true;
+        }
+
+        bits = 0;
+        return false;
+    }
+
+    public static bool TryReadStringIndexed(long[] index, ReadOnlySpan<byte> packet, uint fieldNum, out string value)
+    {
+        if (LocateFieldIndexed(index, packet, fieldNum, 1 << (byte)OmniBufWireType.String, out ReadOnlySpan<byte> val, out _))
+        {
+            int p = 0;
+            value = OmniBufDecoder.ReadString(val, ref p);
+            if (p != val.Length)
+            {
+                ThrowCorruptPacket("trailing bytes in String field", p);
+            }
+
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    public static bool TryReadBytesIndexed(long[] index, ReadOnlySpan<byte> packet, uint fieldNum, out byte[] value)
+    {
+        if (LocateFieldIndexed(index, packet, fieldNum, 1 << (byte)OmniBufWireType.Bytes, out ReadOnlySpan<byte> val, out _))
         {
             int p = 0;
             ReadOnlySpan<byte> slice = OmniBufDecoder.ReadLenSlice(val, ref p, 0);
@@ -180,6 +460,74 @@ public static class OmniBufOpaque
 
         value = Array.Empty<byte>();
         return false;
+    }
+
+    public static bool TryReadSubMsgSpan(ReadOnlySpan<byte> packet, uint fieldNum, out ReadOnlySpan<byte> subMsgSpan)
+    {
+        ReadOnlySpan<byte> singleSlice = default;
+        List<byte>? merged = null;
+        int matchCount = 0;
+        int pos = 0;
+
+        while (pos < packet.Length)
+        {
+            if (!OmniBufDecoder.TryDecodeVarint(packet.Slice(pos), out ulong tag, out int tn)
+                || (tag >> 4) > OmniBufConstants.MaxFieldNumber)
+            {
+                ThrowCorruptPacket("invalid tag in TryReadSubMsgSpan", pos);
+            }
+
+            pos += tn;
+            uint fnum = (uint)(tag >> 4);
+            var wt = (OmniBufWireType)(tag & 0x0Fu);
+            if (fnum == 0)
+            {
+                SchemaMeta.ValidateField0(packet, ref pos, wt, 0, OmniBufConstants.MaxNestingDepth);
+                continue;
+            }
+
+            if (fnum == fieldNum && wt == OmniBufWireType.SubMsg)
+            {
+                ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(packet, ref pos, 0);
+                matchCount++;
+                if (matchCount == 1)
+                {
+                    singleSlice = body;
+                }
+                else
+                {
+                    if (merged is null)
+                    {
+                        OmniBufDecoder.ValidateMessage(singleSlice, 1, OmniBufConstants.MaxNestingDepth);
+                        OmniBufDecoder.ValidateMessage(body, 1, OmniBufConstants.MaxNestingDepth);
+                        merged = new List<byte>(singleSlice.Length + body.Length);
+                        merged.AddRange(singleSlice.ToArray());
+                    }
+                    else
+                    {
+                        OmniBufDecoder.ValidateMessage(body, 1, OmniBufConstants.MaxNestingDepth);
+                    }
+
+                    merged.AddRange(body.ToArray());
+                }
+
+                continue;
+            }
+
+            if (!OmniBufDecoder.TryFastSkipValue(packet, ref pos, wt))
+            {
+                ThrowCorruptPacket("truncated field payload in TryReadSubMsgSpan", pos);
+            }
+        }
+
+        if (matchCount == 0)
+        {
+            subMsgSpan = ReadOnlySpan<byte>.Empty;
+            return false;
+        }
+
+        subMsgSpan = matchCount == 1 ? singleSlice : merged!.ToArray();
+        return true;
     }
 
     /// <summary>
@@ -203,9 +551,10 @@ public static class OmniBufOpaque
             pos += tn;
             uint fnum = (uint)(tag >> 4);
             var wt = (OmniBufWireType)(tag & 0x0Fu);
-            if (fnum == 0 && wt != OmniBufWireType.SubMsg)
+            if (fnum == 0)
             {
-                ThrowCorruptPacket("Field #0 requires SubMsg wire type", pos - tn);
+                SchemaMeta.ValidateField0(packet, ref pos, wt, 0, OmniBufConstants.MaxNestingDepth);
+                continue;
             }
 
             if (fnum == subMsgField && wt == OmniBufWireType.SubMsg)
@@ -263,9 +612,10 @@ public static class OmniBufOpaque
             pos += tn;
             uint fnum = (uint)(tag >> 4);
             var wt = (OmniBufWireType)(tag & 0x0Fu);
-            if (fnum == 0 && wt != OmniBufWireType.SubMsg)
+            if (fnum == 0)
             {
-                ThrowCorruptPacket("Field #0 requires SubMsg wire type", pos - tn);
+                SchemaMeta.ValidateField0(packet, ref pos, wt, 0, OmniBufConstants.MaxNestingDepth);
+                continue;
             }
 
             if (fnum == fieldNum && wt == OmniBufWireType.SubMsg)
@@ -333,9 +683,10 @@ public static class OmniBufOpaque
             pos += tn;
             uint fnum = (uint)(tag >> 4);
             var wt = (OmniBufWireType)(tag & 0x0Fu);
-            if (fnum == 0 && wt != OmniBufWireType.SubMsg)
+            if (fnum == 0)
             {
-                ThrowCorruptPacket("Field #0 requires SubMsg wire type", pos - tn);
+                SchemaMeta.ValidateField0(packet, ref pos, wt, 0, OmniBufConstants.MaxNestingDepth);
+                continue;
             }
 
             if (fnum == fieldNum && wt == OmniBufWireType.Array)
@@ -396,9 +747,10 @@ public static class OmniBufOpaque
             pos += tn;
             uint fnum = (uint)(tag >> 4);
             var wt = (OmniBufWireType)(tag & 0x0Fu);
-            if (fnum == 0 && wt != OmniBufWireType.SubMsg)
+            if (fnum == 0)
             {
-                ThrowCorruptPacket("Field #0 requires SubMsg wire type", pos - tn);
+                SchemaMeta.ValidateField0(packet, ref pos, wt, 0, OmniBufConstants.MaxNestingDepth);
+                continue;
             }
 
             if (fnum == fieldNum && wt == OmniBufWireType.Map)

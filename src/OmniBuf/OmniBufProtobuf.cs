@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections;
 using System.Collections.Concurrent;
 using Google.Protobuf;
@@ -20,6 +21,22 @@ public static class OmniBufProtobuf
         {
             Marshal(encoder, message, options);
             return encoder.ToArray();
+        }
+        finally
+        {
+            OmniBufEncoder.ReturnThreadLocal(encoder, rented);
+        }
+    }
+
+    public static void Marshal(IBufferWriter<byte> writer, IMessage message, MarshalOptions options = default)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        ArgumentNullException.ThrowIfNull(message);
+        OmniBufEncoder encoder = OmniBufEncoder.RentThreadLocal(out bool rented);
+        try
+        {
+            Marshal(encoder, message, options);
+            encoder.CopyTo(writer);
         }
         finally
         {
@@ -83,9 +100,7 @@ public static class OmniBufProtobuf
             return;
         }
 
-        if (md.Extensions.UnorderedExtensions.Count > 0
-            || md.File.Extensions.UnorderedExtensions.Count > 0
-            || md.ToProto().ExtensionRange.Count > 0)
+        if (md.ToProto().ExtensionRange.Count > 0)
         {
             throw new OmniBufException($"omnibuf: Protobuf extensions on {md.FullName} are not supported");
         }
@@ -1008,7 +1023,7 @@ public static class OmniBufProtobuf
     {
         Array.Sort(keys, (a, b) => keyType switch
         {
-            FieldType.String => StringComparer.Ordinal.Compare((string)a, (string)b),
+            FieldType.String => Utf8OrdinalStringComparer.CompareStatic((string)a, (string)b),
             FieldType.Bool => ((bool)a).CompareTo((bool)b),
             FieldType.UInt32 or FieldType.Fixed32 => ((uint)a).CompareTo((uint)b),
             FieldType.UInt64 or FieldType.Fixed64 => ((ulong)a).CompareTo((ulong)b),
