@@ -2,4 +2,4 @@
 buf = "1.75.0"
 dotnet = "8.0.423"
 just = "1.59.0"
-protobuf = "35.1"
+protobuf = "36.2"
