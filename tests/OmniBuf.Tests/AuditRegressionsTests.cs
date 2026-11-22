@@ -696,6 +696,136 @@ public sealed class AuditRegressionsTests
         Assert.Equal(OmniBufConstants.MaxNestingDepth, callerEnc.ContainerDepth);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    [InlineData(5)]
+    [InlineData(15)]
+    [InlineData(127)]
+    public void Audit7_ReadContainer_DecodesCanonicalOneByteOddLengthSubMsg(int bodyLen)
+    {
+        byte[] body;
+        string expectedRegion;
+        if (bodyLen == 1)
+        {
+            // Field 7, WireType BoolTrue ((7 << 4) | 3 = 115 -> 1-byte varint 0xE7): valid 1-byte unknown field.
+            body = [0xE7];
+            expectedRegion = string.Empty;
+        }
+        else
+        {
+            // Location.Region (field 1, String, tag 0x35) + 1-byte string len + payload = bodyLen.
+            int strLen = bodyLen - 2;
+            expectedRegion = new string('r', strLen);
+            body = new byte[bodyLen];
+            body[0] = 0x35;
+            body[1] = (byte)((strLen << 1) | 1);
+            System.Text.Encoding.UTF8.GetBytes(expectedRegion, body.AsSpan(2));
+        }
+
+        // PeerUpdate: field 9 (Location, SubMsg, tag [0x72, 0x02]) + canonical 1-byte odd len + body
+        // + trailing field 11 (Sequence = 42, Uint, tag [0xC2, 0x02], value 0x55).
+        byte[] packet = new byte[2 + 1 + bodyLen + 3];
+        packet[0] = 0x72;
+        packet[1] = 0x02;
+        packet[2] = (byte)((bodyLen << 1) | 1);
+        body.CopyTo(packet.AsSpan(3));
+        packet[3 + bodyLen] = 0xC2;
+        packet[4 + bodyLen] = 0x02;
+        packet[5 + bodyLen] = (byte)((42 << 1) | 1);
+
+        PeerUpdate parsed = PeerUpdate.ParseOmniBuf(packet);
+        Assert.NotNull(parsed.Location);
+        Assert.Equal(expectedRegion, parsed.Location.Region);
+        Assert.Equal(42UL, parsed.Sequence);
+    }
+
+    [Fact]
+    public void Audit7_ReadContainer_RejectsCorruptSubMsgPayload0x03_0x00()
+    {
+        // PeerUpdate.Location (tag [0x72, 0x02]) with canonical 1-byte len=1 (0x03) and corrupt 1-byte body 0x00.
+        byte[] corrupt = [0x72, 0x02, 0x03, 0x00];
+        Assert.Throws<OmniBufException>(() => PeerUpdate.ParseOmniBuf(corrupt));
+    }
+
+    [Theory]
+    [InlineData(3)]
+    [InlineData(5)]
+    [InlineData(15)]
+    [InlineData(127)]
+    public void Audit7_ReadContainer_DecodesCanonicalOneByteOddLengthWireArray(int bodyLen)
+    {
+        // PeerUpdate.Prefixes (field 8, WireArray<Uint>, tag [0x36, 0x02]).
+        // Array body: elemType (Uint = 0x00) + 1-byte count + count * 1-byte uint values = bodyLen.
+        int count = bodyLen - 2;
+        byte[] body = new byte[bodyLen];
+        body[0] = (byte)OmniBufWireType.Uint;
+        body[1] = (byte)((count << 1) | 1);
+        for (int i = 0; i < count; i++)
+        {
+            uint v = (uint)(i % 120);
+            body[2 + i] = (byte)((v << 1) | 1);
+        }
+
+        // Append trailing field 11 (Sequence = 99) to verify exact container advancement.
+        byte[] packet = new byte[2 + 1 + bodyLen + 3];
+        packet[0] = 0x36;
+        packet[1] = 0x02;
+        packet[2] = (byte)((bodyLen << 1) | 1);
+        body.CopyTo(packet.AsSpan(3));
+        packet[3 + bodyLen] = 0xC2;
+        packet[4 + bodyLen] = 0x02;
+        packet[5 + bodyLen] = (byte)((99 << 1) | 1);
+
+        PeerUpdate parsed = PeerUpdate.ParseOmniBuf(packet);
+        Assert.Equal(count, parsed.Prefixes.Count);
+        for (int i = 0; i < count; i++)
+        {
+            Assert.Equal((uint)(i % 120), parsed.Prefixes[i]);
+        }
+
+        Assert.Equal(99UL, parsed.Sequence);
+    }
+
+    [Fact]
+    public void Audit7_ReadContainer_RejectsOneByteLengthWireArrayBelowMinBodyLen()
+    {
+        // PeerUpdate.Prefixes with canonical 1-byte len=1 (0x03) and 1-byte body [0x00] (< minBodyLen 2).
+        byte[] invalid = [0x36, 0x02, 0x03, 0x00];
+        Assert.Throws<OmniBufException>(() => PeerUpdate.ParseOmniBuf(invalid));
+    }
+
+    [Fact]
+    public void Audit8_DecoderRejectsNegativePosInMatchTag2AndTryFastSkipValue()
+    {
+        byte[] data = [0x72, 0x02, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+        Assert.False(OmniBufDecoder.MatchTag2(data, -1, 0x0272));
+        Assert.False(OmniBufDecoder.MatchTag2(data, int.MinValue, 0x0272));
+        Assert.False(OmniBufDecoder.MatchTag2(ReadOnlySpan<byte>.Empty, -1, 0x0272));
+
+        OmniBufWireType[] fixedTypes =
+        [
+            OmniBufWireType.Fixed32,
+            OmniBufWireType.Sfixed32,
+            OmniBufWireType.Float32,
+            OmniBufWireType.Fixed64,
+            OmniBufWireType.Sfixed64,
+            OmniBufWireType.Float64,
+        ];
+
+        foreach (OmniBufWireType wt in fixedTypes)
+        {
+            int negOne = -1;
+            Assert.False(OmniBufDecoder.TryFastSkipValue(data, ref negOne, wt));
+            Assert.Equal(-1, negOne);
+
+            int minPos = int.MinValue;
+            Assert.False(OmniBufDecoder.TryFastSkipValue(data, ref minPos, wt));
+            Assert.Equal(int.MinValue, minPos);
+        }
+    }
+
     private static ProtoTreeNode BuildProtoTreeChain(int edges)
     {
         var node = new ProtoTreeNode { Id = 1u, Name = "leaf" };

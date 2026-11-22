@@ -154,74 +154,77 @@ public sealed partial class Location
         encoder.WriteFloat32Field(6u, this.Longitude);
     }
 
+    private readonly struct OmniBufFreshDecoder : IOmniBufFreshDecoder<global::Omnibuf.Bench.Location>
+    {
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public global::Omnibuf.Bench.Location Decode(OmniBufSpanReader rd)
+        {
+            var msg = new global::Omnibuf.Bench.Location();
+            msg.DecodeOmniBufFresh(rd, 0, OmniBufConstants.MaxNestingDepth);
+            return msg;
+        }
+    }
+
     public static global::Omnibuf.Bench.Location ParseOmniBuf(ReadOnlySpan<byte> data)
     {
-        var msg = new global::Omnibuf.Bench.Location();
-        msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
-        return msg;
+        if (data.IsEmpty)
+        {
+            return new global::Omnibuf.Bench.Location();
+        }
+        return OmniBufSpanReader.ParsePinned<global::Omnibuf.Bench.Location, OmniBufFreshDecoder>(data);
     }
 
     public void UnmarshalOmniBuf(ReadOnlySpan<byte> data)
     {
-        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
+        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);
     }
 
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge) =>
-        DecodeOmniBuf(data, depth, maxDepth, merge, OmniBufConstants.GetThreadLocalCharScratch());
-
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge, char[] scratch)
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal void DecodeOmniBufFresh(OmniBufSpanReader rd, int depth, int maxDepth)
     {
         if (depth > maxDepth)
         {
             OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);
         }
-        ulong seenLow = 0;
-        int pos = 0;
-        if (!merge && pos < data.Length)
+        if (rd.MatchTag1(0x35))
         {
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x35))
-            {
-                pos += 1;
-                seenLow |= (1UL << 1);
-                this.Region = OmniBufDecoder.ReadString(data, ref pos, scratch);
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x55))
-            {
-                pos += 1;
-                seenLow |= (1UL << 2);
-                this.Datacenter = OmniBufDecoder.ReadString(data, ref pos, scratch);
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x75))
-            {
-                pos += 1;
-                seenLow |= (1UL << 3);
-                this.City = OmniBufDecoder.ReadString(data, ref pos, scratch);
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x81))
-            {
-                pos += 1;
-                seenLow |= (1UL << 4);
-                this.Rack = (uint)OmniBufDecoder.ReadVarint(data, ref pos);
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0xB1))
-            {
-                pos += 1;
-                seenLow |= (1UL << 5);
-                this.Latitude = BitConverter.UInt32BitsToSingle(OmniBufDecoder.ReadFixed32(data, ref pos));
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0xD1))
-            {
-                pos += 1;
-                seenLow |= (1UL << 6);
-                this.Longitude = BitConverter.UInt32BitsToSingle(OmniBufDecoder.ReadFixed32(data, ref pos));
-            }
-            if (pos == data.Length && seenLow == 0x7EUL) return;
+            this.Region = rd.ReadString();
         }
-        DecodeOmniBufSlow(data, pos, seenLow, depth, maxDepth, merge);
+        if (rd.MatchTag1(0x55))
+        {
+            this.Datacenter = rd.ReadString();
+        }
+        if (rd.MatchTag1(0x75))
+        {
+            this.City = rd.ReadString();
+        }
+        if (rd.MatchTag1(0x81))
+        {
+            this.Rack = (uint)rd.ReadVarint();
+        }
+        if (rd.MatchTag1(0xB1))
+        {
+            this.Latitude = BitConverter.UInt32BitsToSingle(rd.ReadFixed32());
+        }
+        if (rd.MatchTag1(0xD1))
+        {
+            this.Longitude = BitConverter.UInt32BitsToSingle(rd.ReadFixed32());
+        }
+        if (rd.IsAtEnd) return;
+        DecodeOmniBufSlow(rd.RemainingSpan(), 0, 0UL, depth, maxDepth, merge: false, isFresh: true);
+    }
+
+    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge)
+    {
+        if (depth > maxDepth)
+        {
+            OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);
+        }
+        DecodeOmniBufSlow(data, 0, 0UL, depth, maxDepth, merge, isFresh: false);
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private void DecodeOmniBufSlow(ReadOnlySpan<byte> data, int pos, ulong seenLow, int depth, int maxDepth, bool merge)
+    private void DecodeOmniBufSlow(ReadOnlySpan<byte> data, int pos, ulong seenLow, int depth, int maxDepth, bool merge, bool isFresh)
     {
         while (pos < data.Length)
         {
@@ -257,7 +260,7 @@ public sealed partial class Location
                     break;
             }
         }
-        if (!merge && seenLow != 0x7EUL)
+        if (!merge && !isFresh && seenLow != 0x7EUL)
         {
             if (((seenLow & (1UL << 1)) == 0))
             {
@@ -735,68 +738,73 @@ public sealed partial class Neighbor
         encoder.WriteBoolField(4u, this.Established);
     }
 
+    private readonly struct OmniBufFreshDecoder : IOmniBufFreshDecoder<global::Omnibuf.Bench.Neighbor>
+    {
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public global::Omnibuf.Bench.Neighbor Decode(OmniBufSpanReader rd)
+        {
+            var msg = new global::Omnibuf.Bench.Neighbor();
+            msg.DecodeOmniBufFresh(rd, 0, OmniBufConstants.MaxNestingDepth);
+            return msg;
+        }
+    }
+
     public static global::Omnibuf.Bench.Neighbor ParseOmniBuf(ReadOnlySpan<byte> data)
     {
-        var msg = new global::Omnibuf.Bench.Neighbor();
-        msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
-        return msg;
+        if (data.IsEmpty)
+        {
+            return new global::Omnibuf.Bench.Neighbor();
+        }
+        return OmniBufSpanReader.ParsePinned<global::Omnibuf.Bench.Neighbor, OmniBufFreshDecoder>(data);
     }
 
     public void UnmarshalOmniBuf(ReadOnlySpan<byte> data)
     {
-        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
+        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);
     }
 
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge) =>
-        DecodeOmniBuf(data, depth, maxDepth, merge, OmniBufConstants.GetThreadLocalCharScratch());
-
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge, char[] scratch)
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal void DecodeOmniBufFresh(OmniBufSpanReader rd, int depth, int maxDepth)
     {
         if (depth > maxDepth)
         {
             OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);
         }
-        ulong seenLow = 0;
-        int pos = 0;
-        if (!merge && pos < data.Length)
+        if (rd.MatchTag1(0x21))
         {
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x21))
-            {
-                pos += 1;
-                seenLow |= (1UL << 1);
-                this.PeerAsn = (uint)OmniBufDecoder.ReadVarint(data, ref pos);
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x55))
-            {
-                pos += 1;
-                seenLow |= (1UL << 2);
-                this.Router = OmniBufDecoder.ReadString(data, ref pos, scratch);
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x61))
-            {
-                pos += 1;
-                seenLow |= (1UL << 3);
-                this.LatencyUs = (uint)OmniBufDecoder.ReadVarint(data, ref pos);
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x87))
-            {
-                pos += 1;
-                seenLow |= (1UL << 4);
-                this.Established = true;
-            }
-            else if (OmniBufDecoder.MatchTag1(data, pos, 0x85))
-            {
-                pos += 1;
-                seenLow |= (1UL << 4);
-                this.Established = false;
-            }
-            if (pos == data.Length && seenLow == 0x1EUL) return;
+            this.PeerAsn = (uint)rd.ReadVarint();
         }
-        DecodeOmniBufSlow(data, pos, seenLow, depth, maxDepth, merge);
+        if (rd.MatchTag1(0x55))
+        {
+            this.Router = rd.ReadString();
+        }
+        if (rd.MatchTag1(0x61))
+        {
+            this.LatencyUs = (uint)rd.ReadVarint();
+        }
+        if (rd.MatchTag1(0x87))
+        {
+            this.Established = true;
+        }
+        else if (rd.MatchTag1(0x85))
+        {
+            this.Established = false;
+        }
+        if (rd.IsAtEnd) return;
+        DecodeOmniBufSlow(rd.RemainingSpan(), 0, 0UL, depth, maxDepth, merge: false, isFresh: true);
+    }
+
+    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge)
+    {
+        if (depth > maxDepth)
+        {
+            OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);
+        }
+        DecodeOmniBufSlow(data, 0, 0UL, depth, maxDepth, merge, isFresh: false);
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private void DecodeOmniBufSlow(ReadOnlySpan<byte> data, int pos, ulong seenLow, int depth, int maxDepth, bool merge)
+    private void DecodeOmniBufSlow(ReadOnlySpan<byte> data, int pos, ulong seenLow, int depth, int maxDepth, bool merge, bool isFresh)
     {
         while (pos < data.Length)
         {
@@ -828,7 +836,7 @@ public sealed partial class Neighbor
                     break;
             }
         }
-        if (!merge && seenLow != 0x1EUL)
+        if (!merge && !isFresh && seenLow != 0x1EUL)
         {
             if (((seenLow & (1UL << 1)) == 0))
             {
@@ -1372,152 +1380,133 @@ public sealed partial class PeerUpdate
         encoder.WriteUintField(11u, this.Sequence);
     }
 
+    private readonly struct OmniBufFreshDecoder : IOmniBufFreshDecoder<global::Omnibuf.Bench.PeerUpdate>
+    {
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public global::Omnibuf.Bench.PeerUpdate Decode(OmniBufSpanReader rd)
+        {
+            var msg = new global::Omnibuf.Bench.PeerUpdate();
+            msg.DecodeOmniBufFresh(rd, 0, OmniBufConstants.MaxNestingDepth);
+            return msg;
+        }
+    }
+
     public static global::Omnibuf.Bench.PeerUpdate ParseOmniBuf(ReadOnlySpan<byte> data)
     {
-        var msg = new global::Omnibuf.Bench.PeerUpdate();
-        msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
-        return msg;
+        if (data.IsEmpty)
+        {
+            return new global::Omnibuf.Bench.PeerUpdate();
+        }
+        return OmniBufSpanReader.ParsePinned<global::Omnibuf.Bench.PeerUpdate, OmniBufFreshDecoder>(data);
     }
 
     public void UnmarshalOmniBuf(ReadOnlySpan<byte> data)
     {
-        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
+        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);
     }
 
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge) =>
-        DecodeOmniBuf(data, depth, maxDepth, merge, OmniBufConstants.GetThreadLocalCharScratch());
-
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge, char[] scratch)
+    internal void DecodeOmniBufFresh(OmniBufSpanReader rd, int depth, int maxDepth)
     {
         if (depth > maxDepth)
         {
             OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);
         }
         ulong seenLow = 0;
-        int pos = 0;
-        if (!merge && pos < data.Length)
+        if (rd.MatchTag1(0x21))
         {
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x21))
-            {
-                pos += 1;
-                seenLow |= (1UL << 1);
-                this.Asn = (uint)OmniBufDecoder.ReadVarint(data, ref pos);
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x55))
-            {
-                pos += 1;
-                seenLow |= (1UL << 2);
-                this.RouterId = OmniBufDecoder.ReadString(data, ref pos, scratch);
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x67))
-            {
-                pos += 1;
-                seenLow |= (1UL << 3);
-                this.Active = true;
-            }
-            else if (OmniBufDecoder.MatchTag1(data, pos, 0x65))
-            {
-                pos += 1;
-                seenLow |= (1UL << 3);
-                this.Active = false;
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0x81))
-            {
-                pos += 1;
-                seenLow |= (1UL << 4);
-                this.UptimeSec = OmniBufDecoder.ReadVarint(data, ref pos);
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0xA3))
-            {
-                pos += 1;
-                seenLow |= (1UL << 5);
-                this.RssiDbm = (int)OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos));
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0xD3))
-            {
-                pos += 1;
-                seenLow |= (1UL << 6);
-                this.CpuLoad = BitConverter.UInt64BitsToDouble(OmniBufDecoder.ReadFixed64(data, ref pos));
-            }
-            if (OmniBufDecoder.MatchTag1(data, pos, 0xFB))
-            {
-                pos += 1;
-                if (depth + 1 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 1, maxDepth);
-                seenLow |= (1UL << 7);
-                ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);
-                if (!OmniBufDecoder.TryParseTypedArrayHeader(body, OmniBufWireType.String, out int count, out int p)) OmniBufDecoder.ThrowInvalidArrayHeader("PeerUpdate.tags");
-                if (this.Tags.Count > 0) this.Tags.Clear();
-                if (count > 0) OmniBufDecoder.ReadStringArray(body, ref p, count, this.Tags, scratch);
-                if (p != body.Length) OmniBufDecoder.ThrowTrailingArrayBytes();
-            }
-            if (OmniBufDecoder.MatchTag2(data, pos, 0x0236))
-            {
-                pos += 2;
-                if (depth + 1 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 1, maxDepth);
-                seenLow |= (1UL << 8);
-                ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);
-                if (!OmniBufDecoder.TryParseTypedArrayHeader(body, OmniBufWireType.Uint, out int count, out int p)) OmniBufDecoder.ThrowInvalidArrayHeader("PeerUpdate.prefixes");
-                if (this.Prefixes.Count > 0) this.Prefixes.Clear();
-                if (count > 0) OmniBufDecoder.ReadUint32Array(body, ref p, count, this.Prefixes);
-                if (p != body.Length) OmniBufDecoder.ThrowTrailingArrayBytes();
-            }
-            if (OmniBufDecoder.MatchTag2(data, pos, 0x0272))
-            {
-                pos += 2;
-                seenLow |= (1UL << 9);
-                ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                var subMsg = this.Location;
-                if (subMsg is null) { subMsg = new global::Omnibuf.Bench.Location(); this.Location = subMsg; }
-                subMsg.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: false, scratch);
-            }
-            if (OmniBufDecoder.MatchTag2(data, pos, 0x02B6))
-            {
-                pos += 2;
-                if (depth + 1 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 1, maxDepth);
-                seenLow |= (1UL << 10);
-                ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);
-                if (!OmniBufDecoder.TryParseTypedArrayHeader(body, OmniBufWireType.SubMsg, out int count, out int p)) OmniBufDecoder.ThrowInvalidArrayHeader("PeerUpdate.neighbors");
-                int prevCount = this.Neighbors.Count;
-                if (prevCount == 0)
-                {
-                    if (count > 0)
-                    {
-                        int targetCap = count <= 4096 ? count : 4096;
-                        if (this.Neighbors.Capacity < targetCap) this.Neighbors.Capacity = targetCap;
-                        for (int i = 0; i < count; i++)
-                        {
-                            ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);
-                            var elem = new global::Omnibuf.Bench.Neighbor();
-                            elem.DecodeOmniBuf(sub, depth + 2, maxDepth, merge: false, scratch);
-                            this.Neighbors.Add(elem);
-                        }
-                    }
-                }
-                else
-                {
-                    for (int i = 0; i < count; i++)
-                    {
-                        ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);
-                        if (i < prevCount) this.Neighbors[i].DecodeOmniBuf(sub, depth + 2, maxDepth, merge: false, scratch);
-                        else { var elem = new global::Omnibuf.Bench.Neighbor(); elem.DecodeOmniBuf(sub, depth + 2, maxDepth, merge: false, scratch); this.Neighbors.Add(elem); }
-                    }
-                    for (int r = prevCount - 1; r >= count; r--) this.Neighbors.RemoveAt(r);
-                }
-                if (p != body.Length) OmniBufDecoder.ThrowTrailingArrayBytes();
-            }
-            if (OmniBufDecoder.MatchTag2(data, pos, 0x02C2))
-            {
-                pos += 2;
-                seenLow |= (1UL << 11);
-                this.Sequence = OmniBufDecoder.ReadVarint(data, ref pos);
-            }
-            if (pos == data.Length && seenLow == 0xFFEUL) return;
+            this.Asn = (uint)rd.ReadVarint();
         }
-        DecodeOmniBufSlow(data, pos, seenLow, depth, maxDepth, merge);
+        if (rd.MatchTag1(0x55))
+        {
+            this.RouterId = rd.ReadString();
+        }
+        if (rd.MatchTag1(0x67))
+        {
+            this.Active = true;
+        }
+        else if (rd.MatchTag1(0x65))
+        {
+            this.Active = false;
+        }
+        if (rd.MatchTag1(0x81))
+        {
+            this.UptimeSec = rd.ReadVarint();
+        }
+        if (rd.MatchTag1(0xA3))
+        {
+            this.RssiDbm = (int)OmniBufConstants.ZigZagDecode64(rd.ReadVarint());
+        }
+        if (rd.MatchTag1(0xD3))
+        {
+            this.CpuLoad = BitConverter.UInt64BitsToDouble(rd.ReadFixed64());
+        }
+        if (rd.MatchTag1(0xFB))
+        {
+            if (depth + 1 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 1, maxDepth);
+            seenLow |= (1UL << 7);
+            var body = rd.ReadContainer(2);
+            if (!body.TryParseTypedArrayHeader(OmniBufWireType.String, out int count)) OmniBufDecoder.ThrowInvalidArrayHeader("PeerUpdate.tags");
+            if (count > 0) body.ReadStringArray(count, this.Tags);
+            if (!body.IsAtEnd) OmniBufDecoder.ThrowTrailingArrayBytes();
+        }
+        if (rd.MatchTag2(0x0236))
+        {
+            if (depth + 1 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 1, maxDepth);
+            seenLow |= (1UL << 8);
+            var body = rd.ReadContainer(2);
+            if (!body.TryParseTypedArrayHeader(OmniBufWireType.Uint, out int count)) OmniBufDecoder.ThrowInvalidArrayHeader("PeerUpdate.prefixes");
+            if (count > 0) body.ReadUint32Array(count, this.Prefixes);
+            if (!body.IsAtEnd) OmniBufDecoder.ThrowTrailingArrayBytes();
+        }
+        if (rd.MatchTag2(0x0272))
+        {
+            seenLow |= (1UL << 9);
+            if (depth + 1 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 1, maxDepth);
+            var sub = rd.ReadContainer(0);
+            var subMsg = new global::Omnibuf.Bench.Location();
+            this.Location = subMsg;
+            if (!sub.IsAtEnd) subMsg.DecodeOmniBufFresh(sub, depth + 1, maxDepth);
+        }
+        if (rd.MatchTag2(0x02B6))
+        {
+            if (depth + 1 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 1, maxDepth);
+            seenLow |= (1UL << 10);
+            var body = rd.ReadContainer(2);
+            if (!body.TryParseTypedArrayHeader(OmniBufWireType.SubMsg, out int count)) OmniBufDecoder.ThrowInvalidArrayHeader("PeerUpdate.neighbors");
+            if (count > 0)
+            {
+                if (depth + 2 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 2, maxDepth);
+                int targetCap = count <= 4096 ? count : 4096;
+                if (this.Neighbors.Capacity < targetCap) this.Neighbors.Capacity = targetCap;
+                for (int i = 0; i < count; i++)
+                {
+                    var sub = body.ReadContainer(0);
+                    var elem = new global::Omnibuf.Bench.Neighbor();
+                    if (!sub.IsAtEnd) elem.DecodeOmniBufFresh(sub, depth + 2, maxDepth);
+                    this.Neighbors.Add(elem);
+                }
+            }
+            if (!body.IsAtEnd) OmniBufDecoder.ThrowTrailingArrayBytes();
+        }
+        if (rd.MatchTag2(0x02C2))
+        {
+            this.Sequence = rd.ReadVarint();
+        }
+        if (rd.IsAtEnd) return;
+        DecodeOmniBufSlow(rd.RemainingSpan(), 0, seenLow, depth, maxDepth, merge: false, isFresh: true);
+    }
+
+    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge)
+    {
+        if (depth > maxDepth)
+        {
+            OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);
+        }
+        DecodeOmniBufSlow(data, 0, 0UL, depth, maxDepth, merge, isFresh: false);
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private void DecodeOmniBufSlow(ReadOnlySpan<byte> data, int pos, ulong seenLow, int depth, int maxDepth, bool merge)
+    private void DecodeOmniBufSlow(ReadOnlySpan<byte> data, int pos, ulong seenLow, int depth, int maxDepth, bool merge, bool isFresh)
     {
         while (pos < data.Length)
         {
@@ -1690,7 +1679,7 @@ public sealed partial class PeerUpdate
                     break;
             }
         }
-        if (!merge && seenLow != 0xFFEUL)
+        if (!merge && !isFresh && seenLow != 0xFFEUL)
         {
             if (((seenLow & (1UL << 1)) == 0))
             {

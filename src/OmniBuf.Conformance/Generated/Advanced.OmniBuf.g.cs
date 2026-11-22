@@ -1129,19 +1129,16 @@ public sealed partial class OuterEnvelope
     public static global::Omnibuf.Conformance.OuterEnvelope ParseOmniBuf(ReadOnlySpan<byte> data)
     {
         var msg = new global::Omnibuf.Conformance.OuterEnvelope();
-        msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
+        msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);
         return msg;
     }
 
     public void UnmarshalOmniBuf(ReadOnlySpan<byte> data)
     {
-        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
+        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);
     }
 
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge) =>
-        DecodeOmniBuf(data, depth, maxDepth, merge, OmniBufConstants.GetThreadLocalCharScratch());
-
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge, char[] scratch)
+    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge)
     {
         if (depth > maxDepth)
         {
@@ -2358,56 +2355,65 @@ public sealed partial class OuterEnvelope
                 encoder.WriteSintField(3u, (int)this.Mode);
             }
 
+            private readonly struct OmniBufFreshDecoder : IOmniBufFreshDecoder<global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload>
+            {
+                [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+                public global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload Decode(OmniBufSpanReader rd)
+                {
+                    var msg = new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
+                    msg.DecodeOmniBufFresh(rd, 0, OmniBufConstants.MaxNestingDepth);
+                    return msg;
+                }
+            }
+
             public static global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload ParseOmniBuf(ReadOnlySpan<byte> data)
             {
-                var msg = new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
-                msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
-                return msg;
+                if (data.IsEmpty)
+                {
+                    return new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
+                }
+                return OmniBufSpanReader.ParsePinned<global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload, OmniBufFreshDecoder>(data);
             }
 
             public void UnmarshalOmniBuf(ReadOnlySpan<byte> data)
             {
-                DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
+                DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);
             }
 
-            internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge) =>
-                DecodeOmniBuf(data, depth, maxDepth, merge, OmniBufConstants.GetThreadLocalCharScratch());
-
-            internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge, char[] scratch)
+            [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+            internal void DecodeOmniBufFresh(OmniBufSpanReader rd, int depth, int maxDepth)
             {
                 if (depth > maxDepth)
                 {
                     OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);
                 }
-                ulong seenLow = 0;
-                int pos = 0;
-                if (!merge && pos < data.Length)
+                if (rd.MatchTag1(0x21))
                 {
-                    if (OmniBufDecoder.MatchTag1(data, pos, 0x21))
-                    {
-                        pos += 1;
-                        seenLow |= (1UL << 1);
-                        this.Code = (uint)OmniBufDecoder.ReadVarint(data, ref pos);
-                    }
-                    if (OmniBufDecoder.MatchTag1(data, pos, 0x55))
-                    {
-                        pos += 1;
-                        seenLow |= (1UL << 2);
-                        this.Detail = OmniBufDecoder.ReadString(data, ref pos, scratch);
-                    }
-                    if (OmniBufDecoder.MatchTag1(data, pos, 0x63))
-                    {
-                        pos += 1;
-                        seenLow |= (1UL << 3);
-                        this.Mode = (global::Omnibuf.Conformance.OuterEnvelope.Types.NestedMode)(int)OmniBufConstants.ZigZagDecode64(OmniBufDecoder.ReadVarint(data, ref pos));
-                    }
-                    if (pos == data.Length && seenLow == 0xEUL) return;
+                    this.Code = (uint)rd.ReadVarint();
                 }
-                DecodeOmniBufSlow(data, pos, seenLow, depth, maxDepth, merge);
+                if (rd.MatchTag1(0x55))
+                {
+                    this.Detail = rd.ReadString();
+                }
+                if (rd.MatchTag1(0x63))
+                {
+                    this.Mode = (global::Omnibuf.Conformance.OuterEnvelope.Types.NestedMode)(int)OmniBufConstants.ZigZagDecode64(rd.ReadVarint());
+                }
+                if (rd.IsAtEnd) return;
+                DecodeOmniBufSlow(rd.RemainingSpan(), 0, 0UL, depth, maxDepth, merge: false, isFresh: true);
+            }
+
+            internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge)
+            {
+                if (depth > maxDepth)
+                {
+                    OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);
+                }
+                DecodeOmniBufSlow(data, 0, 0UL, depth, maxDepth, merge, isFresh: false);
             }
 
             [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-            private void DecodeOmniBufSlow(ReadOnlySpan<byte> data, int pos, ulong seenLow, int depth, int maxDepth, bool merge)
+            private void DecodeOmniBufSlow(ReadOnlySpan<byte> data, int pos, ulong seenLow, int depth, int maxDepth, bool merge, bool isFresh)
             {
                 while (pos < data.Length)
                 {
@@ -2431,7 +2437,7 @@ public sealed partial class OuterEnvelope
                             break;
                     }
                 }
-                if (!merge && seenLow != 0xEUL)
+                if (!merge && !isFresh && seenLow != 0xEUL)
                 {
                     if (((seenLow & (1UL << 1)) == 0))
                     {
@@ -5326,19 +5332,16 @@ public sealed partial class ProtoTreeNode
     public static global::Omnibuf.Conformance.ProtoTreeNode ParseOmniBuf(ReadOnlySpan<byte> data)
     {
         var msg = new global::Omnibuf.Conformance.ProtoTreeNode();
-        msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
+        msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);
         return msg;
     }
 
     public void UnmarshalOmniBuf(ReadOnlySpan<byte> data)
     {
-        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
+        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);
     }
 
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge) =>
-        DecodeOmniBuf(data, depth, maxDepth, merge, OmniBufConstants.GetThreadLocalCharScratch());
-
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge, char[] scratch)
+    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge)
     {
         if (depth > maxDepth)
         {
@@ -6320,19 +6323,16 @@ public sealed partial class WideMessage
     public static global::Omnibuf.Conformance.WideMessage ParseOmniBuf(ReadOnlySpan<byte> data)
     {
         var msg = new global::Omnibuf.Conformance.WideMessage();
-        msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
+        msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);
         return msg;
     }
 
     public void UnmarshalOmniBuf(ReadOnlySpan<byte> data)
     {
-        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());
+        DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);
     }
 
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge) =>
-        DecodeOmniBuf(data, depth, maxDepth, merge, OmniBufConstants.GetThreadLocalCharScratch());
-
-    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge, char[] scratch)
+    internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge)
     {
         if (depth > maxDepth)
         {

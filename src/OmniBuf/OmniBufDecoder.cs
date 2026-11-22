@@ -208,20 +208,50 @@ public ref struct OmniBufDecoder
                 return (ulong)(b0 >> 1);
             }
 
-            if ((b0 & 2) != 0 && len - p >= 2)
+            int rem = len - p;
+            if ((b0 & 2) != 0)
             {
-                ushort u16 = Unsafe.ReadUnaligned<ushort>(ref r);
+                if (rem >= 2)
+                {
+                    ushort u16 = Unsafe.ReadUnaligned<ushort>(ref r);
+                    if (!BitConverter.IsLittleEndian)
+                    {
+                        u16 = BinaryPrimitives.ReverseEndianness(u16);
+                    }
+
+                    pos = p + 2;
+                    return (ulong)(u16 >> 2);
+                }
+            }
+            else if ((b0 & 4) != 0)
+            {
+                if (rem >= 4)
+                {
+                    uint u32 = Unsafe.ReadUnaligned<uint>(ref r);
+                    if (!BitConverter.IsLittleEndian)
+                    {
+                        u32 = BinaryPrimitives.ReverseEndianness(u32);
+                    }
+
+                    pos = p + 4;
+                    return (ulong)(u32 >> 3);
+                }
+            }
+            else if (b0 == 0 && rem >= 9)
+            {
+                ulong u64 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref r, 1));
                 if (!BitConverter.IsLittleEndian)
                 {
-                    u16 = BinaryPrimitives.ReverseEndianness(u16);
+                    u64 = BinaryPrimitives.ReverseEndianness(u64);
                 }
 
-                pos = p + 2;
-                return (ulong)(u16 >> 2);
+                pos = p + 9;
+                return u64;
             }
         }
 
-        return ReadVarintSlow(data, ref pos);
+        ThrowInvalidVarint(p);
+        return 0;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -285,7 +315,7 @@ public ref struct OmniBufDecoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool MatchTag2(ReadOnlySpan<byte> data, int pos, ushort encodedTagLE)
     {
-        if (data.Length - pos < 2)
+        if ((uint)pos > (uint)data.Length || data.Length - pos < 2)
         {
             return false;
         }
@@ -385,11 +415,23 @@ public ref struct OmniBufDecoder
         ulong byteLen;
         if ((uint)p < (uint)totalLen)
         {
-            byte b0 = Unsafe.Add(ref MemoryMarshal.GetReference(data), p);
+            ref byte r = ref Unsafe.Add(ref MemoryMarshal.GetReference(data), p);
+            byte b0 = r;
             if ((b0 & 1) != 0)
             {
                 byteLen = (ulong)(b0 >> 1);
                 p++;
+            }
+            else if ((b0 & 2) != 0 && totalLen - p >= 2)
+            {
+                ushort u16 = Unsafe.ReadUnaligned<ushort>(ref r);
+                if (!BitConverter.IsLittleEndian)
+                {
+                    u16 = BinaryPrimitives.ReverseEndianness(u16);
+                }
+
+                byteLen = (ulong)(u16 >> 2);
+                p += 2;
             }
             else
             {
@@ -977,7 +1019,7 @@ public ref struct OmniBufDecoder
             case OmniBufWireType.Fixed32:
             case OmniBufWireType.Sfixed32:
             case OmniBufWireType.Float32:
-                if (n - pos < 4)
+                if ((uint)pos > (uint)n || n - pos < 4)
                 {
                     return false;
                 }
@@ -988,7 +1030,7 @@ public ref struct OmniBufDecoder
             case OmniBufWireType.Fixed64:
             case OmniBufWireType.Sfixed64:
             case OmniBufWireType.Float64:
-                if (n - pos < 8)
+                if ((uint)pos > (uint)n || n - pos < 8)
                 {
                     return false;
                 }
