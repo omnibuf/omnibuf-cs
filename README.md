@@ -102,24 +102,7 @@ PeerUpdate copy = OmniBufProtobuf.Unmarshal<PeerUpdate>(wire);
 
 ## Benchmarks
 
-`src/OmniBuf.Benchmarks` (`just bench`, output saved to `testdata/benchmarks.json`) measures six categories on the 11-field `PeerUpdate` BGP workload in Release mode after RyuJIT Dynamic PGO warmup:
-
-1. **Full Message Encode Speed**: Serializes all 11 fields to a fresh `byte[]` (366 B OmniBuf, 341 B Protobuf).
-2. **Full Message Decode Speed**: Deserializes a fresh instance and folds all 11 fields into a non-inlined checksum sink.
-3. **Read a Single Nested Field**: Extracts `peer.location.city` from the raw packet.
-4. **Selective Single-Field Mutation**: Verifies `peer.location.city`, increments `peer.sequence` from the input packet, and emits an updated `byte[]`.
-5. **Large Embedded Message Encode**: Encodes a packet where `location.datacenter` (20 KiB) and `neighbors[0].router` (18 KiB) exceed the 2-byte 16,383 B length reservation and trigger forward container shifts.
-6. **Embedded Message Growth**: Expands `peer.location.datacenter` past 16 KiB ahead of 32 trailing `Neighbor` entries.
-
-| Category | OmniBuf Generated | OmniBuf Attributes | Google.Protobuf | MessagePack-CSharp | System.Text.Json |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Wire Size | 366 B | 366 B | 341 B | 626 B | 803 B |
-| Full Message Encode Speed | **308 ns** | 478 ns | 655 ns | 607 ns | 1,122 ns |
-| Full Message Decode Speed | **743 ns** | 896 ns | 900 ns | 1,300 ns | 3,279 ns |
-| Read a Single Nested Field | **144 ns** | n/a | 820 ns | 1,200 ns | 3,169 ns |
-| Selective Single-Field Mutation | **365 ns** | n/a | 1,499 ns | 1,845 ns | 4,370 ns |
-| Large Embedded Message Encode | 6,649 ns | 6,946 ns | 26,575 ns | **6,186 ns** | 9,047 ns |
-| Embedded Message Growth | **6,629 ns** | n/a | 19,480 ns | 9,000 ns | 20,479 ns |
+C# (.NET 8) benchmark results, methodology, and cross-language comparisons live at [omnibuf.com/benchmarks?lang=cs](https://omnibuf.com/benchmarks?lang=cs) (all languages at [omnibuf.com/benchmarks](https://omnibuf.com/benchmarks)). Run `just bench` to execute `src/OmniBuf.Benchmarks` locally and update [`testdata/benchmarks.json`](testdata/benchmarks.json).
 
 ## Development Commands
 
