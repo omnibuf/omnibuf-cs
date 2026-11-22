@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Unicode;
 
@@ -182,25 +183,39 @@ public sealed class OmniBufEncoder
         if (v <= 127)
         {
             EnsureSpace(1);
-            _buf[_pos++] = (byte)((v << 1) | 1);
+            Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos++) = (byte)((v << 1) | 1);
         }
         else if (v <= 16_383)
         {
             EnsureSpace(2);
-            BinaryPrimitives.WriteUInt16LittleEndian(_buf.AsSpan(_pos, 2), (ushort)((v << 2) | 2));
+            ushort enc = (ushort)((v << 2) | 2);
+            if (!BitConverter.IsLittleEndian)
+            {
+                enc = BinaryPrimitives.ReverseEndianness(enc);
+            }
+
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos), enc);
             _pos += 2;
         }
         else if (v <= 536_870_911)
         {
             EnsureSpace(4);
-            BinaryPrimitives.WriteUInt32LittleEndian(_buf.AsSpan(_pos, 4), (uint)((v << 3) | 4));
+            uint enc = (uint)((v << 3) | 4);
+            if (!BitConverter.IsLittleEndian)
+            {
+                enc = BinaryPrimitives.ReverseEndianness(enc);
+            }
+
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos), enc);
             _pos += 4;
         }
         else
         {
             EnsureSpace(9);
-            _buf[_pos] = 0;
-            BinaryPrimitives.WriteUInt64LittleEndian(_buf.AsSpan(_pos + 1, 8), v);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            dst = 0;
+            ulong enc = BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 1), enc);
             _pos += 9;
         }
     }
@@ -210,12 +225,16 @@ public sealed class OmniBufEncoder
     {
         if (fieldNum == 0 || fieldNum > OmniBufConstants.MaxFieldNumber)
         {
-            throw new OmniBufException($"omnibuf: invalid field number {fieldNum}");
+            ThrowInvalidFieldNumber(fieldNum);
         }
 
         ulong tag = ((ulong)fieldNum << 4) | ((byte)wireType & 0x0Fu);
         WriteVarint(tag);
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowInvalidFieldNumber(uint fieldNum) =>
+        throw new OmniBufException($"omnibuf: invalid field number {fieldNum}");
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void WriteField0Tag()
@@ -236,7 +255,8 @@ public sealed class OmniBufEncoder
     public void WriteFixed32Value(uint v)
     {
         EnsureSpace(4);
-        BinaryPrimitives.WriteUInt32LittleEndian(_buf.AsSpan(_pos, 4), v);
+        uint enc = BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos), enc);
         _pos += 4;
     }
 
@@ -250,7 +270,8 @@ public sealed class OmniBufEncoder
     public void WriteFixed64Value(ulong v)
     {
         EnsureSpace(8);
-        BinaryPrimitives.WriteUInt64LittleEndian(_buf.AsSpan(_pos, 8), v);
+        ulong enc = BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos), enc);
         _pos += 8;
     }
 
@@ -436,6 +457,7 @@ public sealed class OmniBufEncoder
         WriteFloat64Value(v);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteStringField(uint fieldNum, string? value)
     {
         WriteTag(fieldNum, OmniBufWireType.String);

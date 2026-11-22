@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text.Unicode;
 
 namespace OmniBuf;
@@ -115,52 +117,64 @@ public ref struct OmniBufDecoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool TryDecodeVarint(ReadOnlySpan<byte> data, out ulong value, out int bytesRead)
     {
-        if (data.IsEmpty)
+        int len = data.Length;
+        if (len == 0)
         {
             value = 0;
             bytesRead = 0;
             return false;
         }
 
-        byte b0 = data[0];
-        uint low3 = (uint)(b0 & 0x07);
-        if (low3 != 0)
+        ref byte r = ref MemoryMarshal.GetReference(data);
+        byte b0 = r;
+        if ((b0 & 1) != 0)
         {
-            int tz = BitOperations.TrailingZeroCount(low3);
-            if (tz == 0)
-            {
-                value = (ulong)(b0 >> 1);
-                bytesRead = 1;
-                return true;
-            }
+            value = (ulong)(b0 >> 1);
+            bytesRead = 1;
+            return true;
+        }
 
-            if (tz == 1)
-            {
-                if (data.Length < 2)
-                {
-                    value = 0;
-                    bytesRead = 0;
-                    return false;
-                }
-
-                value = (ulong)(BinaryPrimitives.ReadUInt16LittleEndian(data) >> 2);
-                bytesRead = 2;
-                return true;
-            }
-
-            if (data.Length < 4)
+        if ((b0 & 2) != 0)
+        {
+            if (len < 2)
             {
                 value = 0;
                 bytesRead = 0;
                 return false;
             }
 
-            value = (ulong)(BinaryPrimitives.ReadUInt32LittleEndian(data) >> 3);
+            ushort u16 = Unsafe.ReadUnaligned<ushort>(ref r);
+            if (!BitConverter.IsLittleEndian)
+            {
+                u16 = BinaryPrimitives.ReverseEndianness(u16);
+            }
+
+            value = (ulong)(u16 >> 2);
+            bytesRead = 2;
+            return true;
+        }
+
+        if ((b0 & 4) != 0)
+        {
+            if (len < 4)
+            {
+                value = 0;
+                bytesRead = 0;
+                return false;
+            }
+
+            uint u32 = Unsafe.ReadUnaligned<uint>(ref r);
+            if (!BitConverter.IsLittleEndian)
+            {
+                u32 = BinaryPrimitives.ReverseEndianness(u32);
+            }
+
+            value = (ulong)(u32 >> 3);
             bytesRead = 4;
             return true;
         }
 
-        if (b0 != 0 || data.Length < 9)
+        if (b0 != 0 || len < 9)
         {
             // Reserved marker ((b0 & 0x07) == 0 && b0 != 0) or truncated 9-byte varint.
             value = 0;
@@ -168,7 +182,13 @@ public ref struct OmniBufDecoder
             return false;
         }
 
-        value = BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(1, 8));
+        ulong u64 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref r, 1));
+        if (!BitConverter.IsLittleEndian)
+        {
+            u64 = BinaryPrimitives.ReverseEndianness(u64);
+        }
+
+        value = u64;
         bytesRead = 9;
         return true;
     }
@@ -176,14 +196,133 @@ public ref struct OmniBufDecoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static ulong ReadVarint(ReadOnlySpan<byte> data, ref int pos)
     {
-        if ((uint)pos >= (uint)data.Length || !TryDecodeVarint(data.Slice(pos), out ulong v, out int n))
+        int p = pos;
+        int len = data.Length;
+        if ((uint)p < (uint)len)
         {
-            throw new OmniBufException($"omnibuf: invalid or truncated Prefix-Varint at byte {pos}");
+            ref byte r = ref Unsafe.Add(ref MemoryMarshal.GetReference(data), p);
+            byte b0 = r;
+            if ((b0 & 1) != 0)
+            {
+                pos = p + 1;
+                return (ulong)(b0 >> 1);
+            }
+
+            if ((b0 & 2) != 0 && len - p >= 2)
+            {
+                ushort u16 = Unsafe.ReadUnaligned<ushort>(ref r);
+                if (!BitConverter.IsLittleEndian)
+                {
+                    u16 = BinaryPrimitives.ReverseEndianness(u16);
+                }
+
+                pos = p + 2;
+                return (ulong)(u16 >> 2);
+            }
         }
 
-        pos += n;
-        return v;
+        return ReadVarintSlow(data, ref pos);
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ulong ReadVarintSlow(ReadOnlySpan<byte> data, ref int pos)
+    {
+        int p = pos;
+        int len = data.Length;
+        if ((uint)p < (uint)len)
+        {
+            ref byte r = ref Unsafe.Add(ref MemoryMarshal.GetReference(data), p);
+            byte b0 = r;
+            if ((b0 & 2) != 0)
+            {
+                if (len - p >= 2)
+                {
+                    ushort u16 = Unsafe.ReadUnaligned<ushort>(ref r);
+                    if (!BitConverter.IsLittleEndian)
+                    {
+                        u16 = BinaryPrimitives.ReverseEndianness(u16);
+                    }
+
+                    pos = p + 2;
+                    return (ulong)(u16 >> 2);
+                }
+            }
+            else if ((b0 & 4) != 0)
+            {
+                if (len - p >= 4)
+                {
+                    uint u32 = Unsafe.ReadUnaligned<uint>(ref r);
+                    if (!BitConverter.IsLittleEndian)
+                    {
+                        u32 = BinaryPrimitives.ReverseEndianness(u32);
+                    }
+
+                    pos = p + 4;
+                    return (ulong)(u32 >> 3);
+                }
+            }
+            else if (b0 == 0 && len - p >= 9)
+            {
+                ulong u64 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref r, 1));
+                if (!BitConverter.IsLittleEndian)
+                {
+                    u64 = BinaryPrimitives.ReverseEndianness(u64);
+                }
+
+                pos = p + 9;
+                return u64;
+            }
+        }
+
+        ThrowInvalidVarint(p);
+        return 0;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool MatchTag1(ReadOnlySpan<byte> data, int pos, byte encodedTag) =>
+        (uint)pos < (uint)data.Length && Unsafe.Add(ref MemoryMarshal.GetReference(data), pos) == encodedTag;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool MatchTag2(ReadOnlySpan<byte> data, int pos, ushort encodedTagLE)
+    {
+        if (data.Length - pos < 2)
+        {
+            return false;
+        }
+
+        ushort v = Unsafe.ReadUnaligned<ushort>(ref Unsafe.Add(ref MemoryMarshal.GetReference(data), pos));
+        if (!BitConverter.IsLittleEndian)
+        {
+            v = BinaryPrimitives.ReverseEndianness(v);
+        }
+
+        return v == encodedTagLE;
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void ThrowMaxDepthExceeded(int depth, int maxDepth) =>
+        throw new OmniBufException($"omnibuf: nesting depth {depth} exceeds maximum {maxDepth}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void ThrowInvalidArrayHeader(string fieldDesc) =>
+        throw new OmniBufException($"omnibuf: invalid WireArray header on {fieldDesc}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void ThrowInvalidMapHeader(string fieldDesc) =>
+        throw new OmniBufException($"omnibuf: invalid WireMap header on {fieldDesc}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void ThrowTrailingArrayBytes() =>
+        throw new OmniBufException("omnibuf: trailing bytes in WireArray");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void ThrowTrailingMapBytes() =>
+        throw new OmniBufException("omnibuf: trailing bytes in WireMap");
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static (uint FieldNum, OmniBufWireType WireType) ReadTag(ReadOnlySpan<byte> data, ref int pos)
@@ -192,47 +331,102 @@ public ref struct OmniBufDecoder
         ulong fieldNum64 = tag >> 4;
         if (fieldNum64 > OmniBufConstants.MaxFieldNumber)
         {
-            throw new OmniBufException($"omnibuf: field number {fieldNum64} exceeds maximum {OmniBufConstants.MaxFieldNumber}");
+            ThrowFieldNumExceedsMax(fieldNum64);
         }
 
         uint fieldNum = (uint)fieldNum64;
         var wt = (OmniBufWireType)(tag & 0x0Fu);
         if (fieldNum == 0 && wt != OmniBufWireType.SubMsg)
         {
-            throw new OmniBufException($"omnibuf: Field #0 requires SubMsg wire type, got {wt}");
+            ThrowInvalidField0WireType(wt);
         }
 
         return (fieldNum, wt);
     }
 
+    /// <summary>
+    /// Validates and skips an unknown field, mismatched-wire-type field, or Field #0 SchemaMeta tag
+    /// after switching directly on the raw tag varint.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void SkipUnknownOrField0Tag(
+        ReadOnlySpan<byte> data,
+        ref int pos,
+        ulong tag,
+        int depth,
+        int maxDepth)
+    {
+        ulong fieldNum64 = tag >> 4;
+        if (fieldNum64 > OmniBufConstants.MaxFieldNumber)
+        {
+            ThrowFieldNumExceedsMax(fieldNum64);
+        }
+
+        var wt = (OmniBufWireType)(tag & 0x0Fu);
+        if (fieldNum64 == 0)
+        {
+            if (wt != OmniBufWireType.SubMsg)
+            {
+                ThrowInvalidField0WireType(wt);
+            }
+
+            SchemaMeta.ValidateField0(data, ref pos, wt, depth, maxDepth);
+            return;
+        }
+
+        ValidateValue(data, ref pos, wt, depth, maxDepth);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static ReadOnlySpan<byte> ReadLenSlice(ReadOnlySpan<byte> data, scoped ref int pos, int minBodyLen = 0)
     {
-        ulong byteLen = ReadVarint(data, ref pos);
-        int remaining = data.Length - pos;
+        int p = pos;
+        int totalLen = data.Length;
+        ulong byteLen;
+        if ((uint)p < (uint)totalLen)
+        {
+            byte b0 = Unsafe.Add(ref MemoryMarshal.GetReference(data), p);
+            if ((b0 & 1) != 0)
+            {
+                byteLen = (ulong)(b0 >> 1);
+                p++;
+            }
+            else
+            {
+                byteLen = ReadVarintSlow(data, ref p);
+            }
+        }
+        else
+        {
+            ThrowInvalidVarint(p);
+            return default;
+        }
+
+        int remaining = totalLen - p;
         if (byteLen < (ulong)minBodyLen || byteLen > (ulong)remaining)
         {
-            throw new OmniBufException($"omnibuf: length-prefixed payload ({byteLen}B) out of bounds at {pos}");
+            ThrowLenOutOfBounds(byteLen, p);
         }
 
         int len = (int)byteLen;
-        ReadOnlySpan<byte> slice = data.Slice(pos, len);
-        pos += len;
-        return slice;
+        pos = p + len;
+        return MemoryMarshal.CreateReadOnlySpan(ref Unsafe.Add(ref MemoryMarshal.GetReference(data), p), len);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool ReadBoolElement(ReadOnlySpan<byte> data, ref int pos)
     {
-        if ((uint)pos >= (uint)data.Length)
+        int p = pos;
+        if ((uint)p >= (uint)data.Length)
         {
-            throw new OmniBufException($"omnibuf: truncated bool element at {pos}");
+            ThrowTruncatedBool(p);
         }
 
-        byte b = data[pos++];
+        byte b = Unsafe.Add(ref MemoryMarshal.GetReference(data), p);
+        pos = p + 1;
         if (b > 1)
         {
-            throw new OmniBufException($"omnibuf: invalid bool padding bits (0x{b:x2}) at {pos - 1}");
+            ThrowInvalidBoolPadding(b, p);
         }
 
         return b == 1;
@@ -241,26 +435,38 @@ public ref struct OmniBufDecoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint ReadFixed32(ReadOnlySpan<byte> data, ref int pos)
     {
-        if (data.Length - pos < 4)
+        int p = pos;
+        if ((uint)p > (uint)data.Length || data.Length - p < 4)
         {
-            throw new OmniBufException($"omnibuf: truncated 32-bit fixed value at {pos}");
+            ThrowTruncatedFixed32(p);
         }
 
-        uint v = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(pos, 4));
-        pos += 4;
+        uint v = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref MemoryMarshal.GetReference(data), p));
+        if (!BitConverter.IsLittleEndian)
+        {
+            v = BinaryPrimitives.ReverseEndianness(v);
+        }
+
+        pos = p + 4;
         return v;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static ulong ReadFixed64(ReadOnlySpan<byte> data, ref int pos)
     {
-        if (data.Length - pos < 8)
+        int p = pos;
+        if ((uint)p > (uint)data.Length || data.Length - p < 8)
         {
-            throw new OmniBufException($"omnibuf: truncated 64-bit fixed value at {pos}");
+            ThrowTruncatedFixed64(p);
         }
 
-        ulong v = BinaryPrimitives.ReadUInt64LittleEndian(data.Slice(pos, 8));
-        pos += 8;
+        ulong v = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref MemoryMarshal.GetReference(data), p));
+        if (!BitConverter.IsLittleEndian)
+        {
+            v = BinaryPrimitives.ReverseEndianness(v);
+        }
+
+        pos = p + 8;
         return v;
     }
 
@@ -269,6 +475,325 @@ public ref struct OmniBufDecoder
     {
         ReadOnlySpan<byte> strBytes = ReadLenSlice(data, ref pos, 0);
         return OmniBufConstants.DecodeUtf8Strict(strBytes);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string ReadString(ReadOnlySpan<byte> data, ref int pos, char[] scratch)
+    {
+        ReadOnlySpan<byte> strBytes = ReadLenSlice(data, ref pos, 0);
+        return OmniBufConstants.DecodeUtf8Strict(strBytes, scratch);
+    }
+
+    public static void ReadStringArray(
+        ReadOnlySpan<byte> body,
+        ref int pos,
+        int count,
+        Google.Protobuf.Collections.RepeatedField<string> target,
+        char[] scratch)
+    {
+        int targetCap = target.Count + (count <= 4096 ? count : 4096);
+        if (target.Capacity < targetCap)
+        {
+            target.Capacity = targetCap;
+        }
+
+        int p = pos;
+        int totalLen = body.Length;
+        ref byte start = ref MemoryMarshal.GetReference(body);
+        for (int i = 0; i < count; i++)
+        {
+            ulong byteLen;
+            if ((uint)p < (uint)totalLen)
+            {
+                byte b0 = Unsafe.Add(ref start, p);
+                if ((b0 & 1) != 0)
+                {
+                    byteLen = (ulong)(b0 >> 1);
+                    p++;
+                }
+                else
+                {
+                    byteLen = ReadVarintSlow(body, ref p);
+                }
+            }
+            else
+            {
+                ThrowInvalidVarint(p);
+                return;
+            }
+
+            if (byteLen > (ulong)(totalLen - p))
+            {
+                ThrowLenOutOfBounds(byteLen, p);
+            }
+
+            int len = (int)byteLen;
+            ReadOnlySpan<byte> strBytes = MemoryMarshal.CreateReadOnlySpan(ref Unsafe.Add(ref start, p), len);
+            p += len;
+            target.Add(OmniBufConstants.DecodeUtf8Strict(strBytes, scratch));
+        }
+
+        pos = p;
+    }
+
+    public static void ReadUint32Array(
+        ReadOnlySpan<byte> body,
+        ref int pos,
+        int count,
+        Google.Protobuf.Collections.RepeatedField<uint> target)
+    {
+        int targetCap = target.Count + (count <= 4096 ? count : 4096);
+        if (target.Capacity < targetCap)
+        {
+            target.Capacity = targetCap;
+        }
+
+        int p = pos;
+        int totalLen = body.Length;
+        ref byte start = ref MemoryMarshal.GetReference(body);
+        for (int i = 0; i < count; i++)
+        {
+            if ((uint)p >= (uint)totalLen)
+            {
+                ThrowInvalidVarint(p);
+            }
+
+            ref byte r = ref Unsafe.Add(ref start, p);
+            byte b0 = r;
+            ulong v;
+            if ((b0 & 1) != 0)
+            {
+                v = (ulong)(b0 >> 1);
+                p += 1;
+            }
+            else if ((b0 & 2) != 0 && totalLen - p >= 2)
+            {
+                ushort u16 = Unsafe.ReadUnaligned<ushort>(ref r);
+                if (!BitConverter.IsLittleEndian) u16 = BinaryPrimitives.ReverseEndianness(u16);
+                v = (ulong)(u16 >> 2);
+                p += 2;
+            }
+            else if ((b0 & 4) != 0 && totalLen - p >= 4)
+            {
+                uint u32 = Unsafe.ReadUnaligned<uint>(ref r);
+                if (!BitConverter.IsLittleEndian) u32 = BinaryPrimitives.ReverseEndianness(u32);
+                v = (ulong)(u32 >> 3);
+                p += 4;
+            }
+            else if (b0 == 0 && totalLen - p >= 9)
+            {
+                ulong u64 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref r, 1));
+                if (!BitConverter.IsLittleEndian) u64 = BinaryPrimitives.ReverseEndianness(u64);
+                v = u64;
+                p += 9;
+            }
+            else
+            {
+                ThrowInvalidVarint(p);
+                return;
+            }
+
+            target.Add((uint)v);
+        }
+
+        pos = p;
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowInvalidVarint(int pos) =>
+        throw new OmniBufException($"omnibuf: invalid or truncated Prefix-Varint at byte {pos}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowFieldNumExceedsMax(ulong fieldNum64) =>
+        throw new OmniBufException($"omnibuf: field number {fieldNum64} exceeds maximum {OmniBufConstants.MaxFieldNumber}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowInvalidField0WireType(OmniBufWireType wt) =>
+        throw new OmniBufException($"omnibuf: Field #0 requires SubMsg wire type, got {wt}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowLenOutOfBounds(ulong byteLen, int pos) =>
+        throw new OmniBufException($"omnibuf: length-prefixed payload ({byteLen}B) out of bounds at {pos}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowTruncatedBool(int pos) =>
+        throw new OmniBufException($"omnibuf: truncated bool element at {pos}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowInvalidBoolPadding(byte b, int pos) =>
+        throw new OmniBufException($"omnibuf: invalid bool padding bits (0x{b:x2}) at {pos}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowTruncatedFixed32(int pos) =>
+        throw new OmniBufException($"omnibuf: truncated 32-bit fixed value at {pos}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowTruncatedFixed64(int pos) =>
+        throw new OmniBufException($"omnibuf: truncated 64-bit fixed value at {pos}");
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool TryParseTypedArrayHeader(
+        ReadOnlySpan<byte> body,
+        OmniBufWireType expectedElemType,
+        out int count,
+        out int payloadOffset)
+    {
+        int bodyLen = body.Length;
+        if (bodyLen < 2)
+        {
+            count = 0;
+            payloadOffset = 0;
+            return false;
+        }
+
+        ref byte r = ref MemoryMarshal.GetReference(body);
+        if ((OmniBufWireType)r != expectedElemType)
+        {
+            count = 0;
+            payloadOffset = 0;
+            return false;
+        }
+
+        byte b1 = Unsafe.Add(ref r, 1);
+        ulong countU;
+        int cn;
+        if ((b1 & 1) != 0)
+        {
+            countU = (ulong)(b1 >> 1);
+            cn = 1;
+        }
+        else if (!TryDecodeVarint(body.Slice(1), out countU, out cn))
+        {
+            count = 0;
+            payloadOffset = 0;
+            return false;
+        }
+
+        payloadOffset = 1 + cn;
+        int remaining = bodyLen - payloadOffset;
+        if (remaining < 0)
+        {
+            count = 0;
+            return false;
+        }
+
+        int width = OmniBufConstants.FixedElementWidth(expectedElemType);
+        if (width == 1)
+        {
+            if (countU != (ulong)remaining)
+            {
+                count = 0;
+                return false;
+            }
+        }
+        else if (width == 4)
+        {
+            if ((remaining & 3) != 0 || countU != (ulong)(remaining >> 2))
+            {
+                count = 0;
+                return false;
+            }
+        }
+        else if (width == 8)
+        {
+            if ((remaining & 7) != 0 || countU != (ulong)(remaining >> 3))
+            {
+                count = 0;
+                return false;
+            }
+        }
+        else
+        {
+            if (countU == 0)
+            {
+                if (remaining != 0)
+                {
+                    count = 0;
+                    return false;
+                }
+            }
+            else if (countU > (ulong)remaining)
+            {
+                count = 0;
+                return false;
+            }
+        }
+
+        count = (int)countU;
+        return true;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool TryParseTypedMapHeader(
+        ReadOnlySpan<byte> body,
+        OmniBufWireType expectedKeyType,
+        OmniBufWireType expectedValType,
+        out int count,
+        out int payloadOffset)
+    {
+        int bodyLen = body.Length;
+        if (bodyLen < 3)
+        {
+            count = 0;
+            payloadOffset = 0;
+            return false;
+        }
+
+        ref byte r = ref MemoryMarshal.GetReference(body);
+        if ((OmniBufWireType)r != expectedKeyType || (OmniBufWireType)Unsafe.Add(ref r, 1) != expectedValType)
+        {
+            count = 0;
+            payloadOffset = 0;
+            return false;
+        }
+
+        byte b2 = Unsafe.Add(ref r, 2);
+        ulong countU;
+        int cn;
+        if ((b2 & 1) != 0)
+        {
+            countU = (ulong)(b2 >> 1);
+            cn = 1;
+        }
+        else if (!TryDecodeVarint(body.Slice(2), out countU, out cn))
+        {
+            count = 0;
+            payloadOffset = 0;
+            return false;
+        }
+
+        payloadOffset = 2 + cn;
+        int remaining = bodyLen - payloadOffset;
+        if (remaining < 0)
+        {
+            count = 0;
+            return false;
+        }
+
+        if (countU == 0)
+        {
+            if (remaining != 0)
+            {
+                count = 0;
+                return false;
+            }
+        }
+        else if (countU > (ulong)(remaining >> 1))
+        {
+            count = 0;
+            return false;
+        }
+
+        count = (int)countU;
+        return true;
     }
 
     public static bool TryParseArrayHeader(
@@ -409,12 +934,39 @@ public ref struct OmniBufDecoder
             case OmniBufWireType.Uint:
             case OmniBufWireType.Sint:
                 {
-                    if ((uint)pos >= (uint)n || !TryDecodeVarint(data.Slice(pos), out _, out int vn))
+                    int p = pos;
+                    if ((uint)p >= (uint)n)
                     {
                         return false;
                     }
 
-                    pos += vn;
+                    byte b0 = Unsafe.Add(ref MemoryMarshal.GetReference(data), p);
+                    if ((b0 & 1) != 0)
+                    {
+                        pos = p + 1;
+                        return true;
+                    }
+
+                    if ((b0 & 2) != 0)
+                    {
+                        if (n - p < 2) return false;
+                        pos = p + 2;
+                        return true;
+                    }
+
+                    if ((b0 & 4) != 0)
+                    {
+                        if (n - p < 4) return false;
+                        pos = p + 4;
+                        return true;
+                    }
+
+                    if (b0 != 0 || n - p < 9)
+                    {
+                        return false;
+                    }
+
+                    pos = p + 9;
                     return true;
                 }
 
@@ -448,18 +1000,35 @@ public ref struct OmniBufDecoder
             case OmniBufWireType.Bytes:
             case OmniBufWireType.SubMsg:
                 {
-                    if ((uint)pos >= (uint)n || !TryDecodeVarint(data.Slice(pos), out ulong len, out int ln))
+                    int p = pos;
+                    if ((uint)p >= (uint)n)
                     {
                         return false;
                     }
 
-                    pos += ln;
-                    if (len > (ulong)(n - pos))
+                    byte b0 = Unsafe.Add(ref MemoryMarshal.GetReference(data), p);
+                    ulong len;
+                    if ((b0 & 1) != 0)
+                    {
+                        len = (ulong)(b0 >> 1);
+                        p++;
+                    }
+                    else
+                    {
+                        if (!TryDecodeVarint(data.Slice(p), out len, out int ln))
+                        {
+                            return false;
+                        }
+
+                        p += ln;
+                    }
+
+                    if (len > (ulong)(n - p))
                     {
                         return false;
                     }
 
-                    pos += (int)len;
+                    pos = p + (int)len;
                     return true;
                 }
 

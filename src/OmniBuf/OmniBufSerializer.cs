@@ -48,12 +48,29 @@ public static class OmniBufSerializer
         }
     }
 
+    private static class CodecCache<T>
+    {
+        public static MessageCodec? Codec;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private static MessageCodec GetCodec<T>() =>
+        CodecCache<T>.Codec ?? GetCodecSlow<T>();
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static MessageCodec GetCodecSlow<T>()
+    {
+        MessageCodec codec = GetOrCreateCodec(typeof(T));
+        CodecCache<T>.Codec = codec;
+        return codec;
+    }
+
     public static void Marshal<T>(OmniBufEncoder encoder, T value, MarshalOptions options = default)
         where T : notnull
     {
         ArgumentNullException.ThrowIfNull(encoder);
         ArgumentNullException.ThrowIfNull(value);
-        MessageCodec codec = GetOrCreateCodec(typeof(T));
+        MessageCodec codec = GetCodec<T>();
         if (options.SelfDescribing)
         {
             SchemaMeta? meta = codec.BuildSchemaMeta(depth: 1, active: null, out bool cyclic);
@@ -73,7 +90,7 @@ public static class OmniBufSerializer
 
     public static T Unmarshal<T>(ReadOnlySpan<byte> data)
     {
-        MessageCodec codec = GetOrCreateCodec(typeof(T));
+        MessageCodec codec = GetCodec<T>();
         object instance = codec.DecodeNew(data, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);
         return (T)instance;
     }
@@ -82,7 +99,7 @@ public static class OmniBufSerializer
         where T : class
     {
         ArgumentNullException.ThrowIfNull(target);
-        MessageCodec codec = GetOrCreateCodec(typeof(T));
+        MessageCodec codec = GetCodec<T>();
         codec.DecodeInto(data, target, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth, merge: false);
     }
 
@@ -4395,8 +4412,7 @@ public static class OmniBufSerializer
                         }
 
                         ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);
-                        if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out int count, out int p)
-                            || elemWt != OmniBufWireType.String)
+                        if (!OmniBufDecoder.TryParseTypedArrayHeader(body, OmniBufWireType.String, out int count, out int p))
                         {
                             throw new OmniBufException($"omnibuf: invalid WireArray header on field #{fnum}");
                         }
@@ -4449,8 +4465,7 @@ public static class OmniBufSerializer
                         }
 
                         ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);
-                        if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out int count, out int p)
-                            || elemWt != OmniBufWireType.Uint)
+                        if (!OmniBufDecoder.TryParseTypedArrayHeader(body, OmniBufWireType.Uint, out int count, out int p))
                         {
                             throw new OmniBufException($"omnibuf: invalid WireArray header on field #{fnum}");
                         }
@@ -4566,8 +4581,7 @@ public static class OmniBufSerializer
             }
 
             ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);
-            if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out int count, out int p)
-                || elemWt != OmniBufWireType.SubMsg)
+            if (!OmniBufDecoder.TryParseTypedArrayHeader(body, OmniBufWireType.SubMsg, out int count, out int p))
             {
                 throw new OmniBufException($"omnibuf: invalid WireArray header on field #{fnum}");
             }

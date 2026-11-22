@@ -38,15 +38,15 @@ public static class OmniBufOpaque
         bool found = false;
 
         int pos = 0;
-        while (pos < packet.Length)
+        int len = packet.Length;
+        while (pos < len)
         {
-            if (!OmniBufDecoder.TryDecodeVarint(packet.Slice(pos), out ulong tag, out int tn)
-                || (tag >> 4) > OmniBufConstants.MaxFieldNumber)
+            ulong tag = OmniBufDecoder.ReadVarint(packet, ref pos);
+            if ((tag >> 4) > OmniBufConstants.MaxFieldNumber)
             {
                 ThrowCorruptPacket("invalid tag in Opaque packet", pos);
             }
 
-            pos += tn;
             uint fnum = (uint)(tag >> 4);
             var wt = (OmniBufWireType)(tag & 0x0Fu);
             if (fnum == 0)
@@ -541,16 +541,15 @@ public static class OmniBufOpaque
         ReadOnlySpan<byte> lastBytes = default;
         bool found = false;
         int pos = 0;
-
-        while (pos < packet.Length)
+        int len = packet.Length;
+        while (pos < len)
         {
-            if (!OmniBufDecoder.TryDecodeVarint(packet.Slice(pos), out ulong tag, out int tn)
-                || (tag >> 4) > OmniBufConstants.MaxFieldNumber)
+            ulong tag = OmniBufDecoder.ReadVarint(packet, ref pos);
+            if ((tag >> 4) > OmniBufConstants.MaxFieldNumber)
             {
                 ThrowCorruptPacket("invalid outer tag in TryReadNestedString", pos);
             }
 
-            pos += tn;
             uint fnum = (uint)(tag >> 4);
             var wt = (OmniBufWireType)(tag & 0x0Fu);
             if (fnum == 0)

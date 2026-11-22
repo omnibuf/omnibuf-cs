@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Unicode;
 
@@ -86,20 +87,87 @@ public static class OmniBufConstants
         && fieldNum <= MaxFieldNumber
         && (fieldNum < ReservedFieldMin || fieldNum > ReservedFieldMax);
 
+    [ThreadStatic]
+    private static char[]? t_utf16Scratch;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static char[] GetThreadLocalCharScratch() => t_utf16Scratch ??= new char[256];
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static string DecodeUtf8Strict(ReadOnlySpan<byte> bytes)
     {
-        if (bytes.IsEmpty)
+        int len = bytes.Length;
+        if (len == 0)
         {
             return string.Empty;
         }
 
-        if (!Utf8.IsValid(bytes))
+        if (len <= 256)
+        {
+            return DecodeUtf8StrictWithScratch(bytes, t_utf16Scratch ??= new char[256]);
+        }
+
+        return DecodeUtf8StrictNonAscii(bytes);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static string DecodeUtf8Strict(ReadOnlySpan<byte> bytes, char[] scratch)
+    {
+        int len = bytes.Length;
+        if (len == 0)
+        {
+            return string.Empty;
+        }
+
+        if (len <= scratch.Length)
+        {
+            return DecodeUtf8StrictWithScratch(bytes, scratch);
+        }
+
+        return DecodeUtf8StrictNonAscii(bytes);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static string DecodeUtf8StrictWithScratch(ReadOnlySpan<byte> bytes, char[] scratch)
+    {
+        if (Ascii.ToUtf16(bytes, scratch, out int written) == OperationStatus.Done)
+        {
+            return new string(MemoryMarshal.CreateReadOnlySpan(ref MemoryMarshal.GetArrayDataReference(scratch), written));
+        }
+
+        return DecodeUtf8NonAsciiScratch(bytes, scratch, written);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string DecodeUtf8NonAsciiScratch(ReadOnlySpan<byte> bytes, char[] scratch, int asciiWritten)
+    {
+        OperationStatus status = Utf8.ToUtf16(
+            bytes.Slice(asciiWritten),
+            scratch.AsSpan(asciiWritten),
+            out _,
+            out int remWritten,
+            replaceInvalidSequences: false,
+            isFinalBlock: true);
+        if (status != OperationStatus.Done)
         {
             ThrowInvalidUtf8();
         }
 
-        return Encoding.UTF8.GetString(bytes);
+        return new string(MemoryMarshal.CreateReadOnlySpan(ref MemoryMarshal.GetArrayDataReference(scratch), asciiWritten + remWritten));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string DecodeUtf8StrictNonAscii(ReadOnlySpan<byte> bytes)
+    {
+        try
+        {
+            return StrictUtf8.GetString(bytes);
+        }
+        catch (DecoderFallbackException)
+        {
+            ThrowInvalidUtf8();
+            return string.Empty;
+        }
     }
 
     [DoesNotReturn]

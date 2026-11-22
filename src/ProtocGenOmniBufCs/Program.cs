@@ -1253,20 +1253,30 @@ public static class Program
         sb.AppendLine($"{indent}public static {msgSym.CSharpFullName} ParseOmniBuf(ReadOnlySpan<byte> data)");
         sb.AppendLine($"{indent}{{");
         sb.AppendLine($"{indent}    var msg = new {msgSym.CSharpFullName}();");
-        sb.AppendLine($"{indent}    msg.UnmarshalOmniBuf(data);");
+        sb.AppendLine($"{indent}    msg.DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());");
         sb.AppendLine($"{indent}    return msg;");
         sb.AppendLine($"{indent}}}");
         sb.AppendLine();
         sb.AppendLine($"{indent}public void UnmarshalOmniBuf(ReadOnlySpan<byte> data)");
         sb.AppendLine($"{indent}{{");
-        sb.AppendLine($"{indent}    DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false);");
+        sb.AppendLine($"{indent}    DecodeOmniBuf(data, 0, OmniBufConstants.MaxNestingDepth, merge: false, OmniBufConstants.GetThreadLocalCharScratch());");
         sb.AppendLine($"{indent}}}");
         sb.AppendLine();
-        sb.AppendLine($"{indent}internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge)");
+        sb.AppendLine($"{indent}internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge) =>");
+        sb.AppendLine($"{indent}    DecodeOmniBuf(data, depth, maxDepth, merge, OmniBufConstants.GetThreadLocalCharScratch());");
+        sb.AppendLine();
+
+        bool emitFastSequential = fields.Count > 0
+            && fields.Count <= 16
+            && realOneofs.Count == 0
+            && !hasHighFields
+            && fields.All(f => !IsMapField(f, symbols, out _, out _) && f.Number <= 1023);
+
+        sb.AppendLine($"{indent}internal void DecodeOmniBuf(ReadOnlySpan<byte> data, int depth, int maxDepth, bool merge, char[] scratch)");
         sb.AppendLine($"{indent}{{");
         sb.AppendLine($"{indent}    if (depth > maxDepth)");
         sb.AppendLine($"{indent}    {{");
-        sb.AppendLine($"{indent}        throw new OmniBufException($\"omnibuf: nesting depth {{depth}} exceeds maximum {{maxDepth}}\");");
+        sb.AppendLine($"{indent}        OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);");
         sb.AppendLine($"{indent}    }}");
 
         if (realOneofs.Count > 0)
@@ -1292,14 +1302,188 @@ public static class Program
         }
 
         sb.AppendLine($"{indent}    int pos = 0;");
+
+        if (emitFastSequential)
+        {
+            ulong fastAllMask = 0;
+            foreach (FieldDescriptorProto f in fields)
+            {
+                fastAllMask |= 1UL << f.Number;
+            }
+
+            sb.AppendLine($"{indent}    if (!merge && pos < data.Length)");
+            sb.AppendLine($"{indent}    {{");
+            foreach (FieldDescriptorProto f in fields)
+            {
+                uint fnum = (uint)f.Number;
+                string prop = GetPropertyName(f, msg.Name);
+                if (f.Label == FieldDescriptorProto.Types.Label.Repeated)
+                {
+                    ulong arrTag = ((ulong)fnum << 4) | 13UL;
+                    string matchExpr = EmitTagMatchExpr("data", "pos", arrTag, out int tagBytes);
+                    string elemWt = WireTypeEnumName(f.Type);
+                    sb.AppendLine($"{indent}        if ({matchExpr})");
+                    sb.AppendLine($"{indent}        {{");
+                    sb.AppendLine($"{indent}            pos += {tagBytes};");
+                    sb.AppendLine($"{indent}            if (depth + 1 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 1, maxDepth);");
+                    sb.AppendLine($"{indent}            seenLow |= (1UL << {(int)fnum});");
+                    sb.AppendLine($"{indent}            ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);");
+                    sb.AppendLine($"{indent}            if (!OmniBufDecoder.TryParseTypedArrayHeader(body, OmniBufWireType.{elemWt}, out int count, out int p)) OmniBufDecoder.ThrowInvalidArrayHeader(\"{msg.Name}.{f.Name}\");");
+                    if (f.Type == FieldDescriptorProto.Types.Type.Message)
+                    {
+                        if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? rWrap))
+                        {
+                            sb.AppendLine($"{indent}            if (this.{prop}.Count > 0) this.{prop}.Clear();");
+                            sb.AppendLine($"{indent}            if (count > 0)");
+                            sb.AppendLine($"{indent}            {{");
+                            sb.AppendLine($"{indent}                int targetCap = count <= 4096 ? count : 4096;");
+                            sb.AppendLine($"{indent}                if (this.{prop}.Capacity < targetCap) this.{prop}.Capacity = targetCap;");
+                            sb.AppendLine($"{indent}                for (int i = 0; i < count; i++)");
+                            sb.AppendLine($"{indent}                {{");
+                            sb.AppendLine($"{indent}                    ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);");
+                            sb.AppendLine($"{indent}                    this.{prop}.Add(OmniBufWrappers.Decode{rWrap.MethodSuffix}(sub, {rWrap.DefaultExpr}, depth + 2, maxDepth));");
+                            sb.AppendLine($"{indent}                }}");
+                            sb.AppendLine($"{indent}            }}");
+                        }
+                        else
+                        {
+                            string elemMsgCs = symbols[f.TypeName].CSharpFullName;
+                            sb.AppendLine($"{indent}            int prevCount = this.{prop}.Count;");
+                            sb.AppendLine($"{indent}            if (prevCount == 0)");
+                            sb.AppendLine($"{indent}            {{");
+                            sb.AppendLine($"{indent}                if (count > 0)");
+                            sb.AppendLine($"{indent}                {{");
+                            sb.AppendLine($"{indent}                    int targetCap = count <= 4096 ? count : 4096;");
+                            sb.AppendLine($"{indent}                    if (this.{prop}.Capacity < targetCap) this.{prop}.Capacity = targetCap;");
+                            sb.AppendLine($"{indent}                    for (int i = 0; i < count; i++)");
+                            sb.AppendLine($"{indent}                    {{");
+                            sb.AppendLine($"{indent}                        ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);");
+                            sb.AppendLine($"{indent}                        var elem = new {elemMsgCs}();");
+                            sb.AppendLine($"{indent}                        elem.DecodeOmniBuf(sub, depth + 2, maxDepth, merge: false, scratch);");
+                            sb.AppendLine($"{indent}                        this.{prop}.Add(elem);");
+                            sb.AppendLine($"{indent}                    }}");
+                            sb.AppendLine($"{indent}                }}");
+                            sb.AppendLine($"{indent}            }}");
+                            sb.AppendLine($"{indent}            else");
+                            sb.AppendLine($"{indent}            {{");
+                            sb.AppendLine($"{indent}                for (int i = 0; i < count; i++)");
+                            sb.AppendLine($"{indent}                {{");
+                            sb.AppendLine($"{indent}                    ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);");
+                            sb.AppendLine($"{indent}                    if (i < prevCount) this.{prop}[i].DecodeOmniBuf(sub, depth + 2, maxDepth, merge: false, scratch);");
+                            sb.AppendLine($"{indent}                    else {{ var elem = new {elemMsgCs}(); elem.DecodeOmniBuf(sub, depth + 2, maxDepth, merge: false, scratch); this.{prop}.Add(elem); }}");
+                            sb.AppendLine($"{indent}                }}");
+                            sb.AppendLine($"{indent}                for (int r = prevCount - 1; r >= count; r--) this.{prop}.RemoveAt(r);");
+                            sb.AppendLine($"{indent}            }}");
+                        }
+                    }
+                    else if (f.Type == FieldDescriptorProto.Types.Type.String)
+                    {
+                        sb.AppendLine($"{indent}            if (this.{prop}.Count > 0) this.{prop}.Clear();");
+                        sb.AppendLine($"{indent}            if (count > 0) OmniBufDecoder.ReadStringArray(body, ref p, count, this.{prop}, scratch);");
+                    }
+                    else if (f.Type == FieldDescriptorProto.Types.Type.Uint32)
+                    {
+                        sb.AppendLine($"{indent}            if (this.{prop}.Count > 0) this.{prop}.Clear();");
+                        sb.AppendLine($"{indent}            if (count > 0) OmniBufDecoder.ReadUint32Array(body, ref p, count, this.{prop});");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"{indent}            if (this.{prop}.Count > 0) this.{prop}.Clear();");
+                        sb.AppendLine($"{indent}            if (count > 0)");
+                        sb.AppendLine($"{indent}            {{");
+                        sb.AppendLine($"{indent}                int targetCap = count <= 4096 ? count : 4096;");
+                        sb.AppendLine($"{indent}                if (this.{prop}.Capacity < targetCap) this.{prop}.Capacity = targetCap;");
+                        sb.AppendLine($"{indent}                for (int i = 0; i < count; i++)");
+                        sb.AppendLine($"{indent}                {{");
+                        sb.AppendLine($"{indent}                    this.{prop}.Add({EmitReadRawValue("body", "p", f, symbols)});");
+                        sb.AppendLine($"{indent}                }}");
+                        sb.AppendLine($"{indent}            }}");
+                    }
+
+                    sb.AppendLine($"{indent}            if (p != body.Length) OmniBufDecoder.ThrowTrailingArrayBytes();");
+                    sb.AppendLine($"{indent}        }}");
+                }
+                else if (f.Type == FieldDescriptorProto.Types.Type.Bool)
+                {
+                    ulong boolTrueTag = ((ulong)fnum << 4) | 3UL;
+                    ulong boolFalseTag = ((ulong)fnum << 4) | 2UL;
+                    string matchTrue = EmitTagMatchExpr("data", "pos", boolTrueTag, out int tagBytes);
+                    string matchFalse = EmitTagMatchExpr("data", "pos", boolFalseTag, out _);
+                    sb.AppendLine($"{indent}        if ({matchTrue})");
+                    sb.AppendLine($"{indent}        {{");
+                    sb.AppendLine($"{indent}            pos += {tagBytes};");
+                    sb.AppendLine($"{indent}            seenLow |= (1UL << {(int)fnum});");
+                    sb.AppendLine($"{indent}            this.{prop} = true;");
+                    sb.AppendLine($"{indent}        }}");
+                    sb.AppendLine($"{indent}        else if ({matchFalse})");
+                    sb.AppendLine($"{indent}        {{");
+                    sb.AppendLine($"{indent}            pos += {tagBytes};");
+                    sb.AppendLine($"{indent}            seenLow |= (1UL << {(int)fnum});");
+                    sb.AppendLine($"{indent}            this.{prop} = false;");
+                    sb.AppendLine($"{indent}        }}");
+                }
+                else if (f.Type == FieldDescriptorProto.Types.Type.Message)
+                {
+                    ulong subMsgTag = ((ulong)fnum << 4) | 12UL;
+                    string matchExpr = EmitTagMatchExpr("data", "pos", subMsgTag, out int tagBytes);
+                    sb.AppendLine($"{indent}        if ({matchExpr})");
+                    sb.AppendLine($"{indent}        {{");
+                    sb.AppendLine($"{indent}            pos += {tagBytes};");
+                    sb.AppendLine($"{indent}            seenLow |= (1UL << {(int)fnum});");
+                    sb.AppendLine($"{indent}            ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);");
+                    if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? sWrap))
+                    {
+                        sb.AppendLine($"{indent}            this.{prop} = OmniBufWrappers.Decode{sWrap.MethodSuffix}(sub, {sWrap.DefaultExpr}, depth + 1, maxDepth);");
+                    }
+                    else
+                    {
+                        string subCs = symbols[f.TypeName].CSharpFullName;
+                        sb.AppendLine($"{indent}            var subMsg = this.{prop};");
+                        sb.AppendLine($"{indent}            if (subMsg is null) {{ subMsg = new {subCs}(); this.{prop} = subMsg; }}");
+                        sb.AppendLine($"{indent}            subMsg.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: false, scratch);");
+                    }
+
+                    sb.AppendLine($"{indent}        }}");
+                }
+                else if (f.Type == FieldDescriptorProto.Types.Type.String)
+                {
+                    ulong strTag = ((ulong)fnum << 4) | 10UL;
+                    string matchExpr = EmitTagMatchExpr("data", "pos", strTag, out int tagBytes);
+                    sb.AppendLine($"{indent}        if ({matchExpr})");
+                    sb.AppendLine($"{indent}        {{");
+                    sb.AppendLine($"{indent}            pos += {tagBytes};");
+                    sb.AppendLine($"{indent}            seenLow |= (1UL << {(int)fnum});");
+                    sb.AppendLine($"{indent}            this.{prop} = OmniBufDecoder.ReadString(data, ref pos, scratch);");
+                    sb.AppendLine($"{indent}        }}");
+                }
+                else
+                {
+                    ulong scalarTag = ((ulong)fnum << 4) | (ulong)WireTypeByte(f.Type);
+                    string matchExpr = EmitTagMatchExpr("data", "pos", scalarTag, out int tagBytes);
+                    sb.AppendLine($"{indent}        if ({matchExpr})");
+                    sb.AppendLine($"{indent}        {{");
+                    sb.AppendLine($"{indent}            pos += {tagBytes};");
+                    sb.AppendLine($"{indent}            seenLow |= (1UL << {(int)fnum});");
+                    sb.AppendLine($"{indent}            this.{prop} = {EmitReadRawValue("data", "pos", f, symbols)};");
+                    sb.AppendLine($"{indent}        }}");
+                }
+            }
+
+            sb.AppendLine($"{indent}        if (pos == data.Length && seenLow == 0x{fastAllMask:X}UL) return;");
+            sb.AppendLine($"{indent}    }}");
+            sb.AppendLine($"{indent}    DecodeOmniBufSlow(data, pos, seenLow, depth, maxDepth, merge);");
+            sb.AppendLine($"{indent}}}");
+            sb.AppendLine();
+            sb.AppendLine($"{indent}[System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]");
+            sb.AppendLine($"{indent}private void DecodeOmniBufSlow(ReadOnlySpan<byte> data, int pos, ulong seenLow, int depth, int maxDepth, bool merge)");
+            sb.AppendLine($"{indent}{{");
+        }
+
         sb.AppendLine($"{indent}    while (pos < data.Length)");
         sb.AppendLine($"{indent}    {{");
-        sb.AppendLine($"{indent}        (uint fnum, OmniBufWireType wt) = OmniBufDecoder.ReadTag(data, ref pos);");
-        sb.AppendLine($"{indent}        switch (fnum)");
+        sb.AppendLine($"{indent}        ulong tag = OmniBufDecoder.ReadVarint(data, ref pos);");
+        sb.AppendLine($"{indent}        switch (tag)");
         sb.AppendLine($"{indent}        {{");
-        sb.AppendLine($"{indent}            case 0:");
-        sb.AppendLine($"{indent}                SchemaMeta.ValidateField0(data, ref pos, wt, depth, maxDepth);");
-        sb.AppendLine($"{indent}                break;");
 
         foreach (FieldDescriptorProto f in fields)
         {
@@ -1312,18 +1496,13 @@ public static class Program
                 ? $"seenLow |= (1UL << {(int)fnum});"
                 : $"(seenHigh ??= new HashSet<uint>()).Add({fnum}u);";
 
-            sb.AppendLine($"{indent}            case {fnum}u:");
-            sb.AppendLine($"{indent}            {{");
-
             if (IsMapField(f, symbols, out FieldDescriptorProto? keyField, out FieldDescriptorProto? valField))
             {
                 string keyWt = WireTypeEnumName(keyField!.Type);
                 string valWt = WireTypeEnumName(valField!.Type);
-                sb.AppendLine($"{indent}                if (wt != OmniBufWireType.Map)");
-                sb.AppendLine($"{indent}                {{");
-                sb.AppendLine($"{indent}                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);");
-                sb.AppendLine($"{indent}                    break;");
-                sb.AppendLine($"{indent}                }}");
+                ulong mapTag = ((ulong)fnum << 4) | 14UL;
+                sb.AppendLine($"{indent}            case {mapTag}UL:");
+                sb.AppendLine($"{indent}            {{");
                 sb.AppendLine($"{indent}                if (depth + 1 > maxDepth)");
                 sb.AppendLine($"{indent}                {{");
                 sb.AppendLine($"{indent}                    throw new OmniBufException($\"omnibuf: WireMap depth {{depth + 1}} exceeds maximum {{maxDepth}}\");");
@@ -1331,7 +1510,7 @@ public static class Program
                 sb.AppendLine($"{indent}                bool alreadySeen = {seenCheckExpr} || merge;");
                 sb.AppendLine($"{indent}                {markSeenStmt}");
                 sb.AppendLine($"{indent}                ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 3);");
-                sb.AppendLine($"{indent}                if (!OmniBufDecoder.TryParseMapHeader(body, out OmniBufWireType kWt, out OmniBufWireType vWt, out int count, out int p) || kWt != OmniBufWireType.{keyWt} || vWt != OmniBufWireType.{valWt})");
+                sb.AppendLine($"{indent}                if (!OmniBufDecoder.TryParseTypedMapHeader(body, OmniBufWireType.{keyWt}, OmniBufWireType.{valWt}, out int count, out int p))");
                 sb.AppendLine($"{indent}                {{");
                 sb.AppendLine($"{indent}                    throw new OmniBufException(\"omnibuf: invalid WireMap header on {msg.Name}.{f.Name}\");");
                 sb.AppendLine($"{indent}                }}");
@@ -1375,11 +1554,9 @@ public static class Program
             if (f.Label == FieldDescriptorProto.Types.Label.Repeated)
             {
                 string elemWt = WireTypeEnumName(f.Type);
-                sb.AppendLine($"{indent}                if (wt != OmniBufWireType.Array)");
-                sb.AppendLine($"{indent}                {{");
-                sb.AppendLine($"{indent}                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);");
-                sb.AppendLine($"{indent}                    break;");
-                sb.AppendLine($"{indent}                }}");
+                ulong arrTag = ((ulong)fnum << 4) | 13UL;
+                sb.AppendLine($"{indent}            case {arrTag}UL:");
+                sb.AppendLine($"{indent}            {{");
                 sb.AppendLine($"{indent}                if (depth + 1 > maxDepth)");
                 sb.AppendLine($"{indent}                {{");
                 sb.AppendLine($"{indent}                    throw new OmniBufException($\"omnibuf: WireArray depth {{depth + 1}} exceeds maximum {{maxDepth}}\");");
@@ -1387,7 +1564,7 @@ public static class Program
                 sb.AppendLine($"{indent}                bool alreadySeen = {seenCheckExpr} || merge;");
                 sb.AppendLine($"{indent}                {markSeenStmt}");
                 sb.AppendLine($"{indent}                ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);");
-                sb.AppendLine($"{indent}                if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out int count, out int p) || elemWt != OmniBufWireType.{elemWt})");
+                sb.AppendLine($"{indent}                if (!OmniBufDecoder.TryParseTypedArrayHeader(body, OmniBufWireType.{elemWt}, out int count, out int p))");
                 sb.AppendLine($"{indent}                {{");
                 sb.AppendLine($"{indent}                    throw new OmniBufException(\"omnibuf: invalid WireArray header on {msg.Name}.{f.Name}\");");
                 sb.AppendLine($"{indent}                }}");
@@ -1395,22 +1572,27 @@ public static class Program
                 {
                     if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? rWrap))
                     {
-                        sb.AppendLine($"{indent}                if (!alreadySeen)");
+                        sb.AppendLine($"{indent}                if (!alreadySeen && this.{prop}.Count > 0)");
                         sb.AppendLine($"{indent}                {{");
                         sb.AppendLine($"{indent}                    this.{prop}.Clear();");
                         sb.AppendLine($"{indent}                }}");
-                        sb.AppendLine($"{indent}                for (int i = 0; i < count; i++)");
+                        sb.AppendLine($"{indent}                if (count > 0)");
                         sb.AppendLine($"{indent}                {{");
-                        sb.AppendLine($"{indent}                    ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);");
-                        sb.AppendLine($"{indent}                    this.{prop}.Add(OmniBufWrappers.Decode{rWrap.MethodSuffix}(sub, {rWrap.DefaultExpr}, depth + 2, maxDepth));");
+                        sb.AppendLine($"{indent}                    int targetCap = this.{prop}.Count + (count <= 4096 ? count : 4096);");
+                        sb.AppendLine($"{indent}                    if (this.{prop}.Capacity < targetCap) this.{prop}.Capacity = targetCap;");
+                        sb.AppendLine($"{indent}                    for (int i = 0; i < count; i++)");
+                        sb.AppendLine($"{indent}                    {{");
+                        sb.AppendLine($"{indent}                        ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);");
+                        sb.AppendLine($"{indent}                        this.{prop}.Add(OmniBufWrappers.Decode{rWrap.MethodSuffix}(sub, {rWrap.DefaultExpr}, depth + 2, maxDepth));");
+                        sb.AppendLine($"{indent}                    }}");
                         sb.AppendLine($"{indent}                }}");
                     }
                     else
                     {
                         string elemMsgCs = symbols[f.TypeName].CSharpFullName;
-                        sb.AppendLine($"{indent}                if (!alreadySeen)");
+                        sb.AppendLine($"{indent}                int prevCount = this.{prop}.Count;");
+                        sb.AppendLine($"{indent}                if (!alreadySeen && prevCount > 0)");
                         sb.AppendLine($"{indent}                {{");
-                        sb.AppendLine($"{indent}                    int prevCount = this.{prop}.Count;");
                         sb.AppendLine($"{indent}                    for (int i = 0; i < count; i++)");
                         sb.AppendLine($"{indent}                    {{");
                         sb.AppendLine($"{indent}                        ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);");
@@ -1430,8 +1612,10 @@ public static class Program
                         sb.AppendLine($"{indent}                        this.{prop}.RemoveAt(r);");
                         sb.AppendLine($"{indent}                    }}");
                         sb.AppendLine($"{indent}                }}");
-                        sb.AppendLine($"{indent}                else");
+                        sb.AppendLine($"{indent}                else if (count > 0)");
                         sb.AppendLine($"{indent}                {{");
+                        sb.AppendLine($"{indent}                    int targetCap = prevCount + (count <= 4096 ? count : 4096);");
+                        sb.AppendLine($"{indent}                    if (this.{prop}.Capacity < targetCap) this.{prop}.Capacity = targetCap;");
                         sb.AppendLine($"{indent}                    for (int i = 0; i < count; i++)");
                         sb.AppendLine($"{indent}                    {{");
                         sb.AppendLine($"{indent}                        ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);");
@@ -1444,13 +1628,18 @@ public static class Program
                 }
                 else
                 {
-                    sb.AppendLine($"{indent}                if (!alreadySeen)");
+                    sb.AppendLine($"{indent}                if (!alreadySeen && this.{prop}.Count > 0)");
                     sb.AppendLine($"{indent}                {{");
                     sb.AppendLine($"{indent}                    this.{prop}.Clear();");
                     sb.AppendLine($"{indent}                }}");
-                    sb.AppendLine($"{indent}                for (int i = 0; i < count; i++)");
+                    sb.AppendLine($"{indent}                if (count > 0)");
                     sb.AppendLine($"{indent}                {{");
-                    sb.AppendLine($"{indent}                    this.{prop}.Add({EmitReadRawValue("body", "p", f, symbols)});");
+                    sb.AppendLine($"{indent}                    int targetCap = this.{prop}.Count + (count <= 4096 ? count : 4096);");
+                    sb.AppendLine($"{indent}                    if (this.{prop}.Capacity < targetCap) this.{prop}.Capacity = targetCap;");
+                    sb.AppendLine($"{indent}                    for (int i = 0; i < count; i++)");
+                    sb.AppendLine($"{indent}                    {{");
+                    sb.AppendLine($"{indent}                        this.{prop}.Add({EmitReadRawValue("body", "p", f, symbols)});");
+                    sb.AppendLine($"{indent}                    }}");
                     sb.AppendLine($"{indent}                }}");
                 }
 
@@ -1465,25 +1654,24 @@ public static class Program
 
             if (f.Type == FieldDescriptorProto.Types.Type.Bool)
             {
-                sb.AppendLine($"{indent}                if (wt != OmniBufWireType.BoolFalse && wt != OmniBufWireType.BoolTrue)");
-                sb.AppendLine($"{indent}                {{");
-                sb.AppendLine($"{indent}                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);");
-                sb.AppendLine($"{indent}                    break;");
-                sb.AppendLine($"{indent}                }}");
+                ulong boolFalseTag = ((ulong)fnum << 4) | 2UL;
+                ulong boolTrueTag = ((ulong)fnum << 4) | 3UL;
+                sb.AppendLine($"{indent}            case {boolFalseTag}UL:");
                 sb.AppendLine($"{indent}                {markSeenStmt}");
-                sb.AppendLine($"{indent}                this.{prop} = wt == OmniBufWireType.BoolTrue;");
+                sb.AppendLine($"{indent}                this.{prop} = false;");
                 sb.AppendLine($"{indent}                break;");
-                sb.AppendLine($"{indent}            }}");
+                sb.AppendLine($"{indent}            case {boolTrueTag}UL:");
+                sb.AppendLine($"{indent}                {markSeenStmt}");
+                sb.AppendLine($"{indent}                this.{prop} = true;");
+                sb.AppendLine($"{indent}                break;");
                 continue;
             }
 
             if (f.Type == FieldDescriptorProto.Types.Type.Message)
             {
-                sb.AppendLine($"{indent}                if (wt != OmniBufWireType.SubMsg)");
-                sb.AppendLine($"{indent}                {{");
-                sb.AppendLine($"{indent}                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);");
-                sb.AppendLine($"{indent}                    break;");
-                sb.AppendLine($"{indent}                }}");
+                ulong subMsgTag = ((ulong)fnum << 4) | 12UL;
+                sb.AppendLine($"{indent}            case {subMsgTag}UL:");
+                sb.AppendLine($"{indent}            {{");
                 sb.AppendLine($"{indent}                bool alreadySeen = {seenCheckExpr} || merge;");
                 sb.AppendLine($"{indent}                {markSeenStmt}");
                 sb.AppendLine($"{indent}                ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);");
@@ -1539,20 +1727,15 @@ public static class Program
                 continue;
             }
 
-            string expWt = WireTypeEnumName(f.Type);
-            sb.AppendLine($"{indent}                if (wt != OmniBufWireType.{expWt})");
-            sb.AppendLine($"{indent}                {{");
-            sb.AppendLine($"{indent}                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);");
-            sb.AppendLine($"{indent}                    break;");
-            sb.AppendLine($"{indent}                }}");
+            ulong scalarTag = ((ulong)fnum << 4) | (ulong)WireTypeByte(f.Type);
+            sb.AppendLine($"{indent}            case {scalarTag}UL:");
             sb.AppendLine($"{indent}                {markSeenStmt}");
             sb.AppendLine($"{indent}                this.{prop} = {EmitReadRawValue("data", "pos", f, symbols)};");
             sb.AppendLine($"{indent}                break;");
-            sb.AppendLine($"{indent}            }}");
         }
 
         sb.AppendLine($"{indent}            default:");
-        sb.AppendLine($"{indent}                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);");
+        sb.AppendLine($"{indent}                OmniBufDecoder.SkipUnknownOrField0Tag(data, ref pos, tag, depth, maxDepth);");
         sb.AppendLine($"{indent}                break;");
         sb.AppendLine($"{indent}        }}");
         sb.AppendLine($"{indent}    }}");
@@ -1560,7 +1743,24 @@ public static class Program
         List<FieldDescriptorProto> nonOneofFields = fields.Where(f => !IsRealOneof(f)).ToList();
         if (nonOneofFields.Count > 0)
         {
-            sb.AppendLine($"{indent}    if (!merge)");
+            ulong expectedLowMask = 0;
+            bool hasNonOneofHigh = false;
+            foreach (FieldDescriptorProto f in nonOneofFields)
+            {
+                if (f.Number < 64)
+                {
+                    expectedLowMask |= 1UL << f.Number;
+                }
+                else
+                {
+                    hasNonOneofHigh = true;
+                }
+            }
+
+            string resetCond = hasNonOneofHigh
+                ? "!merge"
+                : $"!merge && seenLow != 0x{expectedLowMask:X}UL";
+            sb.AppendLine($"{indent}    if ({resetCond})");
             sb.AppendLine($"{indent}    {{");
             foreach (FieldDescriptorProto f in nonOneofFields)
             {
@@ -2924,6 +3124,39 @@ public static class Program
         FieldDescriptorProto.Types.Type.Message => "SubMsg",
         _ => throw new InvalidOperationException($"Unsupported proto type {t}"),
     };
+
+    private static byte WireTypeByte(FieldDescriptorProto.Types.Type t) => t switch
+    {
+        FieldDescriptorProto.Types.Type.Uint32 or FieldDescriptorProto.Types.Type.Uint64 => 0,
+        FieldDescriptorProto.Types.Type.Int32 or FieldDescriptorProto.Types.Type.Sint32
+            or FieldDescriptorProto.Types.Type.Int64 or FieldDescriptorProto.Types.Type.Sint64
+            or FieldDescriptorProto.Types.Type.Enum => 1,
+        FieldDescriptorProto.Types.Type.Bool => 2,
+        FieldDescriptorProto.Types.Type.Fixed32 => 4,
+        FieldDescriptorProto.Types.Type.Fixed64 => 5,
+        FieldDescriptorProto.Types.Type.Sfixed32 => 6,
+        FieldDescriptorProto.Types.Type.Sfixed64 => 7,
+        FieldDescriptorProto.Types.Type.Float => 8,
+        FieldDescriptorProto.Types.Type.Double => 9,
+        FieldDescriptorProto.Types.Type.String => 10,
+        FieldDescriptorProto.Types.Type.Bytes => 11,
+        FieldDescriptorProto.Types.Type.Message => 12,
+        _ => throw new InvalidOperationException($"Unsupported proto type {t}"),
+    };
+
+    private static string EmitTagMatchExpr(string dataVar, string posVar, ulong tag, out int tagBytes)
+    {
+        if (tag <= 127UL)
+        {
+            tagBytes = 1;
+            byte enc1 = (byte)((tag << 1) | 1UL);
+            return $"OmniBufDecoder.MatchTag1({dataVar}, {posVar}, 0x{enc1:X2})";
+        }
+
+        tagBytes = 2;
+        ushort enc2 = (ushort)((tag << 2) | 2UL);
+        return $"OmniBufDecoder.MatchTag2({dataVar}, {posVar}, 0x{enc2:X4})";
+    }
 
     private static string CSharpScalarType(FieldDescriptorProto f, Dictionary<string, TypeSymbol> symbols) => f.Type switch
     {
