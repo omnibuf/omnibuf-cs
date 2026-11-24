@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>OmniBuf.Grpc</RootNamespace>
+    <AssemblyName>OmniBuf.Grpc</AssemblyName>
+    <PackageId>OmniBuf.Grpc</PackageId>
+    <Version>0.1.6</Version>
+    <Authors>OmniBuf Contributors</Authors>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <Description>Detached Grpc.Core.Api marshaller integration for OmniBuf v1 DRAFT-1 binary serialization.</Description>
+    <PackageProjectUrl>https://omnibuf.com/cs</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/omnibuf/omnibuf-cs</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>omnibuf;grpc;serialization;binary;wire-format</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.Core.Api" Version="2.67.0" />
+    <ProjectReference Include="..\OmniBuf\OmniBuf.csproj" />
+  </ItemGroup>
+</Project>

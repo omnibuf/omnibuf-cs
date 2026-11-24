@@ -26,6 +26,24 @@ byte[] wire = OmniBufSerializer.Marshal(sample, new MarshalOptions(SelfDescribin
 SensorSample decoded = OmniBufSerializer.Unmarshal<SensorSample>(wire);
 ```
 
+## gRPC
+
+The detached `OmniBuf.Grpc` package provides `Grpc.Core.Marshaller<T>` factories while keeping core `OmniBuf` free of gRPC dependencies.
+
+```csharp
+using Grpc.Core;
+using OmniBuf.Grpc;
+
+var method = new Method<SensorSample, SensorSample>(
+    MethodType.Unary,
+    serviceName: "telemetry.SensorService",
+    name: "Record",
+    requestMarshaller: OmniBufGrpcMarshaller.Create<SensorSample>(),
+    responseMarshaller: OmniBufGrpcMarshaller.Create<SensorSample>());
+```
+
+Use `OmniBufGrpcMarshaller.CreateSelfDescribing<T>()` to emit `Field #0` metadata under codec name `x-omnibuf`.
+
 ## Details
 
 - Targets .NET 8+. Built on `Span<byte>`, `ReadOnlySpan<byte>`, `BitOperations.TrailingZeroCount`, and `BinaryPrimitives`.

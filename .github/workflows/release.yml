@@ -44,6 +44,7 @@ jobs:
             VERSION_ARG=("-p:Version=${VERSION}")
           fi
           dotnet pack src/OmniBuf/OmniBuf.csproj -c Release -warnaserror -o ./nupkgs "${VERSION_ARG[@]}"
+          dotnet pack src/OmniBuf.Grpc/OmniBuf.Grpc.csproj -c Release -warnaserror -o ./nupkgs "${VERSION_ARG[@]}"
           dotnet pack src/ProtocGenOmniBufCs/ProtocGenOmniBufCs.csproj -c Release -warnaserror -o ./nupkgs "${VERSION_ARG[@]}"
           ls -la ./nupkgs
 

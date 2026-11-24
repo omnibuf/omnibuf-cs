@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\OmniBuf\OmniBuf.csproj" />
     <ProjectReference Include="..\..\src\OmniBuf.Conformance\OmniBuf.Conformance.csproj" />
+    <ProjectReference Include="..\..\src\OmniBuf.Grpc\OmniBuf.Grpc.csproj" />
     <ProjectReference Include="..\..\src\ProtocGenOmniBufCs\ProtocGenOmniBufCs.csproj" />
   </ItemGroup>
 </Project>
