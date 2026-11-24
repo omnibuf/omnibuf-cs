@@ -1,0 +1,19 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+
+[*.{csproj,props,targets,xml}]
+indent_size = 2
+
+[**/Generated/**.cs]
+generated_code = true
+
+[tests/**.cs]
+# xUnit test method names follow Subject_Scenario_Expected convention
+dotnet_diagnostic.CA1707.severity = none
+# Inline constant arrays in test assertions keep expected values readable
+dotnet_diagnostic.CA1861.severity = none

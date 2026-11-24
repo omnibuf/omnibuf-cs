@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Collections;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -3099,14 +3100,14 @@ public static class OmniBufSerializer
         _ => val is null,
     };
 
-    private static byte UnboxByte(object? val) => val is null ? (byte)0 : (val is byte b ? b : Convert.ToByte(val));
-    private static ushort UnboxUInt16(object? val) => val is null ? (ushort)0 : (val is ushort u ? u : Convert.ToUInt16(val));
-    private static uint UnboxUInt32(object? val) => val is null ? 0u : (val is uint u ? u : Convert.ToUInt32(val));
-    private static ulong UnboxUInt64(object? val) => val is null ? 0UL : (val is ulong u ? u : Convert.ToUInt64(val));
-    private static sbyte UnboxSByte(object? val) => val is null ? (sbyte)0 : (val is sbyte s ? s : Convert.ToSByte(val));
-    private static short UnboxInt16(object? val) => val is null ? (short)0 : (val is short s ? s : Convert.ToInt16(val));
-    private static int UnboxInt32(object? val) => val is null ? 0 : (val is int i ? i : Convert.ToInt32(val));
-    private static long UnboxInt64(object? val) => val is null ? 0L : (val is long l ? l : Convert.ToInt64(val));
+    private static byte UnboxByte(object? val) => val is null ? (byte)0 : (val is byte b ? b : Convert.ToByte(val, CultureInfo.InvariantCulture));
+    private static ushort UnboxUInt16(object? val) => val is null ? (ushort)0 : (val is ushort u ? u : Convert.ToUInt16(val, CultureInfo.InvariantCulture));
+    private static uint UnboxUInt32(object? val) => val is null ? 0u : (val is uint u ? u : Convert.ToUInt32(val, CultureInfo.InvariantCulture));
+    private static ulong UnboxUInt64(object? val) => val is null ? 0UL : (val is ulong u ? u : Convert.ToUInt64(val, CultureInfo.InvariantCulture));
+    private static sbyte UnboxSByte(object? val) => val is null ? (sbyte)0 : (val is sbyte s ? s : Convert.ToSByte(val, CultureInfo.InvariantCulture));
+    private static short UnboxInt16(object? val) => val is null ? (short)0 : (val is short s ? s : Convert.ToInt16(val, CultureInfo.InvariantCulture));
+    private static int UnboxInt32(object? val) => val is null ? 0 : (val is int i ? i : Convert.ToInt32(val, CultureInfo.InvariantCulture));
+    private static long UnboxInt64(object? val) => val is null ? 0L : (val is long l ? l : Convert.ToInt64(val, CultureInfo.InvariantCulture));
 
     private static void WriteMapValuePayload(OmniBufEncoder enc, FieldPlan plan, object? val, bool det, int childDepth)
     {

@@ -1005,6 +1005,9 @@ public static class Program
         return p;
     }
 
+    private static readonly string[] SamplePeerTags = ["tier1", "ebgp", "eu-central", "ixp-de-cix"];
+    private static readonly uint[] SamplePeerPrefixes = [167772160, 172032000, 3232235520, 2886729728, 134744072, 134743040];
+
     private static PeerUpdate CreateSampleProtoPeerUpdate()
     {
         var p = new PeerUpdate
@@ -1026,8 +1029,8 @@ public static class Program
             },
             Sequence = 9876543210UL,
         };
-        p.Tags.AddRange(new[] { "tier1", "ebgp", "eu-central", "ixp-de-cix" });
-        p.Prefixes.AddRange(new uint[] { 167772160, 172032000, 3232235520, 2886729728, 134744072, 134743040 });
+        p.Tags.AddRange(SamplePeerTags);
+        p.Prefixes.AddRange(SamplePeerPrefixes);
         p.Neighbors.Add(new Neighbor { PeerAsn = 3356, Router = "ae0.fra1.level3.net", LatencyUs = 850, Established = true });
         p.Neighbors.Add(new Neighbor { PeerAsn = 1299, Router = "ffm-b5-link.telia.net", LatencyUs = 920, Established = true });
         p.Neighbors.Add(new Neighbor { PeerAsn = 174, Router = "be2040.ccr41.fra03.atlas.cogentco.com", LatencyUs = 1120, Established = true });

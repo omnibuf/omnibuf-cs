@@ -12,6 +12,7 @@ namespace OmniBuf;
 /// <summary>
 /// 4-bit self-describing OmniBuf wire types carried in the low nibble of every field tag.
 /// </summary>
+[SuppressMessage("Naming", "CA1720:Identifier contains type name", Justification = "Wire type names match the OmniBuf wire specification.")]
 public enum OmniBufWireType : byte
 {
     Uint = 0,

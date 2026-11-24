@@ -16,6 +16,13 @@ public static class Program
     private const uint TierAnnotatedStruct = 3;
     private const uint TierBlind = 4;
 
+    private static readonly uint[] PeerGrowPrefixes = [100000u, 200000u, 300000u, 400000u, 500000u, 600000u];
+    private static readonly string[] PeerShrinkTags = ["t"];
+    private static readonly uint[] PeerShrinkPrefixes = [1u];
+    private static readonly uint[] AllTypesGrowUint32Arr = [100000u, 200000u, 300000u, 400000u, 500000u];
+    private static readonly string[] AllTypesShrinkStringArr = ["a"];
+    private static readonly uint[] AllTypesShrinkUint32Arr = [7u];
+
     public static int Main()
     {
         using Stream stdin = Console.OpenStandardInput();
@@ -216,7 +223,7 @@ public static class Program
                         op.RssiDbm = -1_000_000;
                         op.CpuLoad = 99.875;
                         op.SetTags(new[] { "tag-grow-a", "tag-grow-b", RepeatString("long-tag-", 20) });
-                        op.SetPrefixes(new uint[] { 100000u, 200000u, 300000u, 400000u, 500000u, 600000u });
+                        op.SetPrefixes(PeerGrowPrefixes);
                         op.SetLocation(new Location
                         {
                             Region = "eu-central-grown",
@@ -240,8 +247,8 @@ public static class Program
                         op.UptimeSec = 5UL;
                         op.RssiDbm = -1;
                         op.CpuLoad = 0.5;
-                        op.SetTags(new[] { "t" });
-                        op.SetPrefixes(new uint[] { 1u });
+                        op.SetTags(PeerShrinkTags);
+                        op.SetPrefixes(PeerShrinkPrefixes);
                         op.SetLocation(new Location
                         {
                             Region = "r",
@@ -365,7 +372,7 @@ public static class Program
                             Score = -999999999L,
                         });
                         op.SetF9StringArr(new[] { "arr-grow-1", "arr-grow-2", RepeatString("arr-grow-3-", 15) });
-                        op.SetF10Uint32Arr(new uint[] { 100000u, 200000u, 300000u, 400000u, 500000u });
+                        op.SetF10Uint32Arr(AllTypesGrowUint32Arr);
                         op.SetF11SubMsgArr(new[]
                         {
                             new AllTypesSubMsg { Id = 100001u, Label = RepeatString("elem0-", 25), Flag = true, Score = -500000L },
@@ -397,8 +404,8 @@ public static class Program
                         op.F6String = "s";
                         op.F7Bytes = new byte[] { 0x01 };
                         op.SetF8SubMsg(new AllTypesSubMsg { Id = 1u, Label = "x", Flag = false, Score = -1L });
-                        op.SetF9StringArr(new[] { "a" });
-                        op.SetF10Uint32Arr(new uint[] { 7u });
+                        op.SetF9StringArr(AllTypesShrinkStringArr);
+                        op.SetF10Uint32Arr(AllTypesShrinkUint32Arr);
                         op.SetF11SubMsgArr(new[]
                         {
                             new AllTypesSubMsg { Id = 1u, Label = "e", Flag = true, Score = 1L },

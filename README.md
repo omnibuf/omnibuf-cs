@@ -1,78 +1,16 @@
-# OmniBuf for C# (.NET 8)
+# omnibuf-cs
 
-[![CI](https://github.com/omnibuf/omnibuf-cs/actions/workflows/ci.yml/badge.svg)](https://github.com/omnibuf/omnibuf-cs/actions/workflows/ci.yml)
-[![Wire Spec: v0.1](https://img.shields.io/badge/spec-v0.1-111111?style=flat&labelColor=111111&color=FF4F18)](https://omnibuf.com/spec)
-[![Website](https://img.shields.io/badge/website-omnibuf.com-111111?style=flat&labelColor=111111&color=D4FF33)](https://omnibuf.com/cs)
+[![OmniBuf Spec: v1 DRAFT-1](https://img.shields.io/badge/OmniBuf%20Spec-v1%20DRAFT--1-FF4F18)](https://omnibuf.com/spec)
 
-Idiomatic .NET 8 implementation of **[OmniBuf Wire Specification v0.1](https://omnibuf.com/spec)**. Built around `ReadOnlySpan<byte>`, `Span<byte>`, `BitOperations.TrailingZeroCount`, and `BinaryPrimitives`.
+.NET 8 implementation of the [OmniBuf v1 DRAFT-1 wire format](https://omnibuf.com/spec). Documentation and benchmarks live at [omnibuf.com/cs](https://omnibuf.com/cs).
 
-OmniBuf pairs self-delimiting 16-type wire headers with branch-light TZCNT Prefix-Varints and single-pass forward container backpatching. Decoders hop across top-level and nested headers in O(1) per skipped field. Selective reads and binary field splices avoid materializing unrelated fields.
-
-## Supported Tiers
-
-`omnibuf-cs` implements all four OmniBuf runtime tiers and passes 758/758 cross-language conformance cases (`0 skipped, 0 failed`):
-
-- **Generated Plugin Codecs**: `protoc-gen-omnibuf-cs` emits direct partial-class `MarshalOmniBuf` / `ParseOmniBuf` methods alongside `Opaque*` lazy views (`OpaquePeerUpdate`, `OpaqueLocation`) with both O(1) `MarshalOmniBuf` splicing and fail-closed `TryMarshal` / `MarshalValidated`.
-- **Standard Protobuf Reflection**: `OmniBufProtobuf.Marshal` and `OmniBufProtobuf.Unmarshal<T>` operate directly on `Google.Protobuf.IMessage` types produced by `protoc_builtin: csharp`.
-- **Attribute-Annotated C# Types**: `[OmniBufMessage]` and `[OmniBufField]` serialize mutable classes, value structs, and immutable C# positional records via compiled expression trees in `OmniBufSerializer`.
-- **Schema-Less Blind Inspection**: `OmniBufBlind.DecodeBlind` and `OmniBufBlind.DecodeBlindJson` inspect arbitrary packets using wire tags and optional embedded `Field #0` (`SchemaMeta`) metadata.
-
-## Code Generation with Buf
-
-`omnibuf-cs` uses [Buf](https://buf.build/) v2 (`buf.yaml` and `buf.gen.yaml`) for schema linting, formatting, and code generation.
-
-```yaml
-# buf.gen.yaml
-version: v2
-clean: true
-plugins:
-  - protoc_builtin: csharp
-    out: src/OmniBuf.Conformance/Generated
-  - local: ./src/ProtocGenOmniBufCs/bin/Release/net8.0/protoc-gen-omnibuf-cs
-    out: src/OmniBuf.Conformance/Generated
-```
-
-Build the plugin and regenerate C# bindings in one step:
+## Install
 
 ```bash
-just proto
+dotnet add package OmniBuf
 ```
 
-Under the hood, `just proto` compiles `ProtocGenOmniBufCs` in Release mode and runs `buf generate`.
-
-## Quick Start
-
-### Generated Codec and Opaque Views
-
-```csharp
-using Omnibuf.Bench;
-using OmniBuf;
-
-var peer = new PeerUpdate
-{
-    Asn = 64512,
-    RouterId = "edge-rtr-fra01.core.backbone.net",
-    Active = true,
-    Sequence = 9876543210UL,
-    Location = new Location { City = "Frankfurt", Rack = 42 },
-};
-
-// Single-pass forward encode
-byte[] packet = peer.MarshalOmniBuf();
-
-// Direct nested header-hop read
-var view = new OpaquePeerUpdate(packet);
-string city = view.GetLocationCity(); // "Frankfurt"
-
-// Selective field splice
-view.Sequence = view.Sequence + 1UL;
-byte[] updated = view.MarshalOmniBuf();
-
-// Full materialize
-PeerUpdate decoded = PeerUpdate.ParseOmniBuf(updated);
-```
-
-### Attribute-Annotated C# Classes and Records
+## Quick usage
 
 ```csharp
 using OmniBuf;
@@ -84,49 +22,19 @@ public sealed record SensorSample(
     [property: OmniBufField(3, Name = "seq")] ulong Seq);
 
 var sample = new SensorSample("rack-42-inlet", 21.75, 1042UL);
-byte[] bytes = OmniBufSerializer.Marshal(sample, new MarshalOptions(SelfDescribing: true));
-
-SensorSample restored = OmniBufSerializer.Unmarshal<SensorSample>(bytes);
-string blindJson = OmniBufBlind.DecodeBlindJson(bytes);
+byte[] wire = OmniBufSerializer.Marshal(sample, new MarshalOptions(SelfDescribing: true));
+SensorSample decoded = OmniBufSerializer.Unmarshal<SensorSample>(wire);
 ```
 
-### Standard `Google.Protobuf.IMessage` Reflection
+## Details
 
-```csharp
-using Omnibuf.Bench;
-using OmniBuf;
-
-byte[] wire = OmniBufProtobuf.Marshal(peer, new MarshalOptions(Deterministic: true));
-PeerUpdate copy = OmniBufProtobuf.Unmarshal<PeerUpdate>(wire);
-```
-
-## Benchmarks
-
-C# (.NET 8) benchmark results, methodology, and cross-language comparisons live at [omnibuf.com/benchmarks?lang=cs](https://omnibuf.com/benchmarks?lang=cs) (all languages at [omnibuf.com/benchmarks](https://omnibuf.com/benchmarks)). Run `just bench` to execute `src/OmniBuf.Benchmarks` locally and update [`testdata/benchmarks.json`](testdata/benchmarks.json).
-
-## Development Commands
-
-`mise.toml` pins `dotnet`, `buf`, `just`, and `protobuf`. Run `mise trust` once in the repository root.
-
-```bash
-just proto        # Build protoc-gen-omnibuf-cs and run buf generate
-just build        # Build OmniBuf.sln in Release mode
-just test         # Run xUnit tests
-just conformance  # Run all 758 cross-language conformance cases
-just bench        # Run PeerUpdate benchmarks and update testdata/benchmarks.json
-just fmt          # Format .proto files (buf format) and C# sources (dotnet format)
-just ci           # Full CI gate: fmt-check, buf lint, -warnaserror build, tests, conformance
-```
+- Targets .NET 8+. Built on `Span<byte>`, `ReadOnlySpan<byte>`, `BitOperations.TrailingZeroCount`, and `BinaryPrimitives`.
+- `OmniBufSerializer` serializes `[OmniBufMessage]` and `[OmniBufField]` classes, structs, and records via compiled expression trees, with `MarshalOptions` and `UnmarshalOptions` for deterministic encoding, self-describing headers, and decode limits.
+- `OmniBufProtobuf` encodes and decodes `Google.Protobuf.IMessage` types directly.
+- `protoc-gen-omnibuf-cs` emits partial-class `MarshalOmniBuf` / `ParseOmniBuf` methods and lazy `Opaque*` views with in-place field splicing.
+- `OmniBufBlind.DecodeBlind` and `OmniBufBlind.DecodeBlindJson` inspect packets from wire tags and optional `Field #0` schema metadata.
+- `OmniBufSerializer` relies on reflection and runtime expression compilation. Trimming and NativeAOT deployments must preserve metadata for annotated message types, whereas generated codecs use direct field access.
 
 ## License
 
-Released under the [Apache 2.0 License](./LICENSE).
-
-## Reflection and deployment
-
-The attribute serializer discovers properties and constructors through reflection
-and compiles expression delegates at runtime. Trimming and NativeAOT deployments
-must preserve the required metadata and validate their published application.
-Generated codecs provide explicit field access and avoid the attribute
-serializer's reflection requirements. Property accessors and constructors are
-trusted application code and can execute during serialization.
+Apache-2.0. See [LICENSE](./LICENSE).

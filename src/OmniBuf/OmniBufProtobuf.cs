@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Collections;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 using Google.Protobuf;
 using Google.Protobuf.Reflection;
@@ -971,46 +972,46 @@ public static class OmniBufProtobuf
                 break;
 
             case FieldType.UInt32:
-                encoder.WriteUintValue(val is uint u32 ? u32 : Convert.ToUInt32(val));
+                encoder.WriteUintValue(val is uint u32 ? u32 : Convert.ToUInt32(val, CultureInfo.InvariantCulture));
                 break;
 
             case FieldType.UInt64:
-                encoder.WriteUintValue(val is ulong u64 ? u64 : Convert.ToUInt64(val));
+                encoder.WriteUintValue(val is ulong u64 ? u64 : Convert.ToUInt64(val, CultureInfo.InvariantCulture));
                 break;
 
             case FieldType.Int32:
             case FieldType.SInt32:
             case FieldType.Enum:
-                encoder.WriteSintValue(val is int i32 ? i32 : Convert.ToInt32(val));
+                encoder.WriteSintValue(val is int i32 ? i32 : Convert.ToInt32(val, CultureInfo.InvariantCulture));
                 break;
 
             case FieldType.Int64:
             case FieldType.SInt64:
-                encoder.WriteSintValue(val is long i64 ? i64 : Convert.ToInt64(val));
+                encoder.WriteSintValue(val is long i64 ? i64 : Convert.ToInt64(val, CultureInfo.InvariantCulture));
                 break;
 
             case FieldType.Fixed32:
-                encoder.WriteFixed32Value(val is uint f32 ? f32 : Convert.ToUInt32(val));
+                encoder.WriteFixed32Value(val is uint f32 ? f32 : Convert.ToUInt32(val, CultureInfo.InvariantCulture));
                 break;
 
             case FieldType.Fixed64:
-                encoder.WriteFixed64Value(val is ulong f64 ? f64 : Convert.ToUInt64(val));
+                encoder.WriteFixed64Value(val is ulong f64 ? f64 : Convert.ToUInt64(val, CultureInfo.InvariantCulture));
                 break;
 
             case FieldType.SFixed32:
-                encoder.WriteSfixed32Value(val is int sf32 ? sf32 : Convert.ToInt32(val));
+                encoder.WriteSfixed32Value(val is int sf32 ? sf32 : Convert.ToInt32(val, CultureInfo.InvariantCulture));
                 break;
 
             case FieldType.SFixed64:
-                encoder.WriteSfixed64Value(val is long sf64 ? sf64 : Convert.ToInt64(val));
+                encoder.WriteSfixed64Value(val is long sf64 ? sf64 : Convert.ToInt64(val, CultureInfo.InvariantCulture));
                 break;
 
             case FieldType.Float:
-                encoder.WriteFloat32Value(val is float flt ? flt : Convert.ToSingle(val));
+                encoder.WriteFloat32Value(val is float flt ? flt : Convert.ToSingle(val, CultureInfo.InvariantCulture));
                 break;
 
             case FieldType.Double:
-                encoder.WriteFloat64Value(val is double dbl ? dbl : Convert.ToDouble(val));
+                encoder.WriteFloat64Value(val is double dbl ? dbl : Convert.ToDouble(val, CultureInfo.InvariantCulture));
                 break;
 
             case FieldType.String:
