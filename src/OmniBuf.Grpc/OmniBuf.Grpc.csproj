@@ -22,7 +22,7 @@
 
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
-    <PackageReference Include="Grpc.Core.Api" Version="2.67.0" />
+    <PackageReference Include="Grpc.Core.Api" Version="2.85.0" />
     <ProjectReference Include="..\OmniBuf\OmniBuf.csproj" />
   </ItemGroup>
 </Project>
