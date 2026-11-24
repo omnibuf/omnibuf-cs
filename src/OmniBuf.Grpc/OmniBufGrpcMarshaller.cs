@@ -6,7 +6,6 @@ namespace OmniBuf.Grpc;
 
 /// <summary>
 /// Factory for <see cref="Marshaller{T}"/> instances backed by <see cref="OmniBufSerializer"/>.
-/// Lives in the detached <c>OmniBuf.Grpc</c> assembly so core <c>OmniBuf</c> has zero gRPC dependencies.
 /// </summary>
 public static class OmniBufGrpcMarshaller
 {

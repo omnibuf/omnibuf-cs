@@ -6,7 +6,8 @@
     <Version>0.1.6</Version>
     <Authors>OmniBuf Contributors</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
-    <Description>Detached Grpc.Core.Api marshaller integration for OmniBuf v1 DRAFT-1 binary serialization.</Description>
+    <Description>OmniBuf gRPC marshaller for Grpc.Core.Api and Grpc.Net.Client.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://omnibuf.com/cs</PackageProjectUrl>
     <RepositoryUrl>https://github.com/omnibuf/omnibuf-cs</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -20,6 +21,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
     <PackageReference Include="Grpc.Core.Api" Version="2.67.0" />
     <ProjectReference Include="..\OmniBuf\OmniBuf.csproj" />
   </ItemGroup>
