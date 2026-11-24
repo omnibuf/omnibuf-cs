@@ -1982,12 +1982,12 @@ public static class Program
             sb.AppendLine();
             sb.AppendLine($"{indent}    private long[]? GetOrBuildIndex()");
             sb.AppendLine($"{indent}    {{");
-            sb.AppendLine($"{indent}        long[]? idx = _fieldIndex;");
+            sb.AppendLine($"{indent}        long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);");
             sb.AppendLine($"{indent}        if (idx is not null) return idx;");
-            sb.AppendLine($"{indent}        if (_readCount == 0) {{ _readCount = 1; return null; }}");
-            sb.AppendLine($"{indent}        idx = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);");
-            sb.AppendLine($"{indent}        _fieldIndex = idx;");
-            sb.AppendLine($"{indent}        return idx;");
+            sb.AppendLine($"{indent}        if (System.Threading.Volatile.Read(ref _readCount) == 0) {{ System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }}");
+            sb.AppendLine($"{indent}        long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);");
+            sb.AppendLine($"{indent}        System.Threading.Volatile.Write(ref _fieldIndex, built);");
+            sb.AppendLine($"{indent}        return built;");
             sb.AppendLine($"{indent}    }}");
             sb.AppendLine();
             sb.AppendLine($"{indent}    private bool IsDirty(uint fieldNum) => fieldNum < 64");

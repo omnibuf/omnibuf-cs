@@ -140,7 +140,7 @@ public sealed class WirePrimitivesTests
     public void Encoder_DynamicallyGrowsContainerStackBeyond64Levels()
     {
         const int depth = 80;
-        var enc = new OmniBufEncoder(128);
+        var enc = new OmniBufEncoder(128, maxDepth: 90);
         for (int i = 0; i < depth; i++)
         {
             enc.BeginSubMsgField(1);

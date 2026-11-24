@@ -689,5 +689,167 @@ public sealed class ReviewRegressionTests
         Assert.Null(okErr);
         Assert.Single(files);
         Assert.Contains("this.HasCount", files[0].Content, StringComparison.Ordinal);
+        Assert.Contains("System.Threading.Volatile.Read(ref _fieldIndex)", files[0].Content, StringComparison.Ordinal);
+        Assert.Contains("System.Threading.Volatile.Write(ref _fieldIndex, built)", files[0].Content, StringComparison.Ordinal);
+    }
+
+    [OmniBufMessage(TypeName = "LimitTestPoco")]
+    private sealed class LimitTestPoco
+    {
+        [OmniBufField(1, Name = "items")]
+        public List<uint> Items { get; set; } = new();
+
+        [OmniBufField(2, Name = "child")]
+        public LimitTestPoco? Child { get; set; }
+
+        [OmniBufField(3, Name = "labels")]
+        public Dictionary<string, string> Labels { get; set; } = new(StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void UnmarshalOptions_DefaultsAndExplicitZero()
+    {
+        UnmarshalOptions def = default;
+        Assert.Equal(UnmarshalOptions.DefaultMaxMessageBytes, def.MaxMessageBytes);
+        Assert.Equal(UnmarshalOptions.DefaultMaxCollectionElements, def.MaxCollectionElements);
+        Assert.Equal(UnmarshalOptions.DefaultMaxNestingDepth, def.MaxNestingDepth);
+        Assert.Equal(def, new UnmarshalOptions());
+
+        var zeroDepth = new UnmarshalOptions { MaxNestingDepth = 0 };
+        Assert.Equal(0, zeroDepth.MaxNestingDepth);
+        Assert.Equal(UnmarshalOptions.DefaultMaxMessageBytes, zeroDepth.MaxMessageBytes);
+        Assert.Equal(UnmarshalOptions.DefaultMaxCollectionElements, zeroDepth.MaxCollectionElements);
+
+        var custom = new UnmarshalOptions(MaxMessageBytes: 128, MaxCollectionElements: 5, MaxNestingDepth: 2);
+        Assert.Equal(128, custom.MaxMessageBytes);
+        Assert.Equal(5, custom.MaxCollectionElements);
+        Assert.Equal(2, custom.MaxNestingDepth);
+    }
+
+    [Fact]
+    public void UnmarshalOptions_EnforcesMessageBytesCollectionElementsAndDepthAcrossDecoders()
+    {
+        var poco = new LimitTestPoco
+        {
+            Items = new List<uint> { 1, 2, 3, 4 },
+            Child = new LimitTestPoco
+            {
+                Child = new LimitTestPoco { Items = new List<uint> { 9 } },
+            },
+            Labels = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["a"] = "1",
+                ["b"] = "2",
+                ["c"] = "3",
+            },
+        };
+        byte[] packet = OmniBufSerializer.Marshal(poco, new MarshalOptions(SelfDescribing: true));
+
+        // 1. MaxMessageBytes
+        var tinyBytes = new UnmarshalOptions { MaxMessageBytes = packet.Length - 1 };
+        Assert.Throws<OmniBufException>(() => OmniBufSerializer.Unmarshal<LimitTestPoco>(packet, tinyBytes));
+        Assert.Throws<OmniBufException>(() => OmniBufSerializer.Unmarshal(packet, new LimitTestPoco(), tinyBytes));
+        Assert.Throws<OmniBufException>(() => OmniBufDecoder.ValidateMessage(packet, tinyBytes));
+        Assert.Throws<OmniBufException>(() => OmniBufBlind.DecodeBlind(packet, tinyBytes));
+        Assert.Throws<OmniBufException>(() => OmniBufBlind.DecodeBlindJson(packet, tinyBytes));
+        Assert.Throws<OmniBufException>(() => SchemaMeta.ReadField0(packet, tinyBytes));
+        Assert.Throws<OmniBufException>(() => _ = new OmniBufDecoder(packet, tinyBytes));
+
+        // 2. MaxCollectionElements
+        var tinyCol = new UnmarshalOptions { MaxCollectionElements = 2 };
+        Assert.Throws<OmniBufException>(() => OmniBufSerializer.Unmarshal<LimitTestPoco>(packet, tinyCol));
+        Assert.Throws<OmniBufException>(() => OmniBufDecoder.ValidateMessage(packet, tinyCol));
+        Assert.Throws<OmniBufException>(() => OmniBufBlind.DecodeBlind(packet, tinyCol));
+        Assert.Throws<OmniBufException>(() => SchemaMeta.ReadField0(packet, tinyCol));
+
+        // 3. MaxNestingDepth
+        var tinyDepth = new UnmarshalOptions { MaxNestingDepth = 1 };
+        Assert.Throws<OmniBufException>(() => OmniBufSerializer.Unmarshal<LimitTestPoco>(packet, tinyDepth));
+        Assert.Throws<OmniBufException>(() => OmniBufDecoder.ValidateMessage(packet, tinyDepth));
+        Assert.Throws<OmniBufException>(() => OmniBufBlind.DecodeBlind(packet, tinyDepth));
+
+        // 4. OmniBufProtobuf limits
+        var peer = new PeerUpdate();
+        peer.Tags.Add("a");
+        peer.Tags.Add("b");
+        peer.Tags.Add("c");
+        byte[] peerBytes = OmniBufProtobuf.Marshal(peer);
+        Assert.Throws<OmniBufException>(() => OmniBufProtobuf.Unmarshal<PeerUpdate>(peerBytes, new UnmarshalOptions { MaxMessageBytes = 1 }));
+        Assert.Throws<OmniBufException>(() => OmniBufProtobuf.Unmarshal<PeerUpdate>(peerBytes, new UnmarshalOptions { MaxCollectionElements = 2 }));
+        Assert.Throws<OmniBufException>(() => OmniBufProtobuf.Unmarshal<PeerUpdate>(peerBytes, new UnmarshalOptions { MaxNestingDepth = 0 }));
+
+        // Sufficient limits succeed
+        var generous = new UnmarshalOptions(MaxMessageBytes: 4096, MaxCollectionElements: 10, MaxNestingDepth: 16);
+        LimitTestPoco roundTripped = OmniBufSerializer.Unmarshal<LimitTestPoco>(packet, generous);
+        Assert.Equal(4, roundTripped.Items.Count);
+        PeerUpdate peerOut = OmniBufProtobuf.Unmarshal<PeerUpdate>(peerBytes, generous);
+        Assert.Equal(3, peerOut.Tags.Count);
+    }
+
+    [Fact]
+    public void Encoder_BeginContainer_EnforcesMaxNestingDepth()
+    {
+        var enc = new OmniBufEncoder();
+        for (int i = 0; i < OmniBufConstants.MaxNestingDepth; i++)
+        {
+            enc.BeginContainer();
+        }
+
+        Assert.Throws<OmniBufException>(() => enc.BeginContainer());
+        Assert.Throws<OmniBufException>(() => enc.BeginContainer(sizeHint: 32_768));
+
+        for (int i = 0; i < OmniBufConstants.MaxNestingDepth; i++)
+        {
+            enc.EndContainer();
+        }
+
+        Assert.Equal(0, enc.ContainerDepth);
+    }
+
+    [Fact]
+    public void Opaque_TryReadStringSpan_ValidatesUtf8ZeroCopyAndMergesSubMsgs()
+    {
+        var enc = new OmniBufEncoder();
+        enc.WriteStringField(1u, "hello-utf8-\u00E9");
+        enc.BeginSubMsgField(2u);
+        enc.WriteUintField(1u, 10UL);
+        enc.EndSubMsg();
+        enc.BeginSubMsgField(2u);
+        enc.WriteUintField(2u, 20UL);
+        enc.EndSubMsg();
+        byte[] validPacket = enc.ToArray();
+
+        Assert.True(OmniBufOpaque.TryReadStringSpan(validPacket, 1u, out ReadOnlySpan<byte> utf8Span));
+        Assert.Equal("hello-utf8-\u00E9", System.Text.Encoding.UTF8.GetString(utf8Span));
+
+        Assert.True(OmniBufOpaque.TryReadSubMsgSpan(validPacket, 2u, out ReadOnlySpan<byte> mergedSub));
+        Assert.True(OmniBufOpaque.TryReadUint(mergedSub, 1u, out ulong v1));
+        Assert.True(OmniBufOpaque.TryReadUint(mergedSub, 2u, out ulong v2));
+        Assert.Equal(10UL, v1);
+        Assert.Equal(20UL, v2);
+
+        // Craft invalid UTF-8 in a WireString field
+        var badEnc = new OmniBufEncoder();
+        badEnc.WriteTag(1u, OmniBufWireType.String);
+        badEnc.WriteBytesValue(new byte[] { 0xFF, 0xFE });
+        byte[] badPacket = badEnc.ToArray();
+
+        Assert.Throws<OmniBufException>(() => OmniBufOpaque.TryReadStringSpan(badPacket, 1u, out _));
+    }
+
+    [Fact]
+    public void Wrappers_ReadElem_EnforcesThreadedDepth()
+    {
+        var enc = new OmniBufEncoder();
+        enc.BeginContainer();
+        OmniBufWrappers.WriteInt32Body(enc, 42);
+        enc.EndContainer();
+        byte[] elemBytes = enc.ToArray();
+
+        int pos = 0;
+        Assert.Equal(42, OmniBufWrappers.ReadElemInt32(elemBytes, ref pos, depth: 5, maxDepth: 10));
+
+        int pos2 = 0;
+        Assert.Throws<OmniBufException>(() => OmniBufWrappers.ReadElemInt32(elemBytes, ref pos2, depth: 11, maxDepth: 10));
     }
 }

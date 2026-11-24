@@ -14,13 +14,19 @@ public ref struct OmniBufDecoder
 {
     private readonly ReadOnlySpan<byte> _data;
     private int _pos;
-    private readonly int _maxDepth;
+    private readonly UnmarshalOptions _options;
 
     public OmniBufDecoder(ReadOnlySpan<byte> data, int maxDepth = OmniBufConstants.MaxNestingDepth)
+        : this(data, new UnmarshalOptions(MaxNestingDepth: maxDepth))
     {
+    }
+
+    public OmniBufDecoder(ReadOnlySpan<byte> data, UnmarshalOptions options)
+    {
+        options.ValidateMessageLength(data.Length);
         _data = data;
         _pos = 0;
-        _maxDepth = maxDepth;
+        _options = options;
     }
 
     public ReadOnlySpan<byte> Data => _data;
@@ -43,7 +49,9 @@ public ref struct OmniBufDecoder
 
     public readonly bool IsAtEnd => _pos >= _data.Length;
 
-    public readonly int MaxDepth => _maxDepth;
+    public readonly int MaxDepth => _options.MaxNestingDepth;
+
+    public readonly UnmarshalOptions Options => _options;
 
     public ulong ReadVarint() => ReadVarint(_data, ref _pos);
 
@@ -108,7 +116,7 @@ public ref struct OmniBufDecoder
     public byte[] ReadBytes() => ReadLenSlice(_data, ref _pos, 0).ToArray();
 
     public void SkipValue(OmniBufWireType wt, int depth = 0) =>
-        ValidateValue(_data, ref _pos, wt, depth, _maxDepth);
+        ValidateValue(_data, ref _pos, wt, depth, _options);
 
     /// <summary>
     /// Decodes a TZCNT Prefix-Varint without throwing. Returns false on truncation or reserved markers.
@@ -384,7 +392,16 @@ public ref struct OmniBufDecoder
         ref int pos,
         ulong tag,
         int depth,
-        int maxDepth)
+        int maxDepth) =>
+        SkipUnknownOrField0Tag(data, ref pos, tag, depth, new UnmarshalOptions(MaxNestingDepth: maxDepth));
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static void SkipUnknownOrField0Tag(
+        ReadOnlySpan<byte> data,
+        ref int pos,
+        ulong tag,
+        int depth,
+        UnmarshalOptions options)
     {
         ulong fieldNum64 = tag >> 4;
         if (fieldNum64 > OmniBufConstants.MaxFieldNumber)
@@ -400,11 +417,11 @@ public ref struct OmniBufDecoder
                 ThrowInvalidField0WireType(wt);
             }
 
-            SchemaMeta.ValidateField0(data, ref pos, wt, depth, maxDepth);
+            SchemaMeta.ValidateField0(data, ref pos, wt, depth, options);
             return;
         }
 
-        ValidateValue(data, ref pos, wt, depth, maxDepth);
+        ValidateValue(data, ref pos, wt, depth, options);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1125,8 +1142,17 @@ public ref struct OmniBufDecoder
         ref int pos,
         OmniBufWireType wt,
         int depth = 0,
-        int maxDepth = OmniBufConstants.MaxNestingDepth)
+        int maxDepth = OmniBufConstants.MaxNestingDepth) =>
+        ValidateValue(data, ref pos, wt, depth, new UnmarshalOptions(MaxNestingDepth: maxDepth));
+
+    public static void ValidateValue(
+        ReadOnlySpan<byte> data,
+        ref int pos,
+        OmniBufWireType wt,
+        int depth,
+        UnmarshalOptions options)
     {
+        int maxDepth = options.MaxNestingDepth;
         if (depth > maxDepth)
         {
             throw new OmniBufException($"omnibuf: nesting depth {depth} exceeds maximum {maxDepth}");
@@ -1178,7 +1204,7 @@ public ref struct OmniBufDecoder
             case OmniBufWireType.SubMsg:
                 {
                     ReadOnlySpan<byte> sub = ReadLenSlice(data, ref pos, 0);
-                    ValidateMessage(sub, depth + 1, maxDepth);
+                    ValidateMessage(sub, options, depth + 1);
                     return;
                 }
 
@@ -1195,7 +1221,8 @@ public ref struct OmniBufDecoder
                         throw new OmniBufException("omnibuf: invalid WireArray header");
                     }
 
-                    ValidateArrayBody(body, p, elemType, count, depth + 1, maxDepth);
+                    options.ValidateCollectionCount(count);
+                    ValidateArrayBody(body, p, elemType, count, depth + 1, options);
                     return;
                 }
 
@@ -1212,10 +1239,11 @@ public ref struct OmniBufDecoder
                         throw new OmniBufException("omnibuf: invalid WireMap header");
                     }
 
+                    options.ValidateCollectionCount(count);
                     for (int i = 0; i < count; i++)
                     {
-                        ValidateContainerEntry(body, ref p, keyType, depth + 1, maxDepth);
-                        ValidateContainerEntry(body, ref p, valType, depth + 1, maxDepth);
+                        ValidateContainerEntry(body, ref p, keyType, depth + 1, options);
+                        ValidateContainerEntry(body, ref p, valType, depth + 1, options);
                     }
 
                     if (p != body.Length)
@@ -1244,7 +1272,7 @@ public ref struct OmniBufDecoder
         OmniBufWireType elemType,
         int count,
         int depth,
-        int maxDepth)
+        UnmarshalOptions options)
     {
         switch (elemType)
         {
@@ -1287,7 +1315,7 @@ public ref struct OmniBufDecoder
 
         for (int i = 0; i < count; i++)
         {
-            ValidateContainerEntry(body, ref p, elemType, depth, maxDepth);
+            ValidateContainerEntry(body, ref p, elemType, depth, options);
         }
 
         if (p != body.Length)
@@ -1301,7 +1329,7 @@ public ref struct OmniBufDecoder
         ref int p,
         OmniBufWireType wt,
         int depth,
-        int maxDepth)
+        UnmarshalOptions options)
     {
         if (wt == OmniBufWireType.BoolFalse)
         {
@@ -1309,14 +1337,26 @@ public ref struct OmniBufDecoder
             return;
         }
 
-        ValidateValue(body, ref p, wt, depth, maxDepth);
+        ValidateValue(body, ref p, wt, depth, options);
     }
 
     public static void ValidateMessage(
         ReadOnlySpan<byte> data,
         int depth = 0,
-        int maxDepth = OmniBufConstants.MaxNestingDepth)
+        int maxDepth = OmniBufConstants.MaxNestingDepth) =>
+        ValidateMessage(data, new UnmarshalOptions(MaxNestingDepth: maxDepth), depth);
+
+    public static void ValidateMessage(
+        ReadOnlySpan<byte> data,
+        UnmarshalOptions options,
+        int depth = 0)
     {
+        if (depth == 0)
+        {
+            options.ValidateMessageLength(data.Length);
+        }
+
+        int maxDepth = options.MaxNestingDepth;
         if (depth > maxDepth)
         {
             throw new OmniBufException($"omnibuf: nesting depth {depth} exceeds maximum {maxDepth}");
@@ -1328,11 +1368,11 @@ public ref struct OmniBufDecoder
             (uint fieldNum, OmniBufWireType wt) = ReadTag(data, ref pos);
             if (fieldNum == 0)
             {
-                SchemaMeta.ValidateField0(data, ref pos, wt, depth, maxDepth);
+                SchemaMeta.ValidateField0(data, ref pos, wt, depth, options);
             }
             else
             {
-                ValidateValue(data, ref pos, wt, depth, maxDepth);
+                ValidateValue(data, ref pos, wt, depth, options);
             }
         }
     }

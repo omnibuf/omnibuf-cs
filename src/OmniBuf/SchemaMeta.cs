@@ -123,7 +123,15 @@ public sealed class SchemaMeta
         ref int pos,
         OmniBufWireType wt,
         int depth = 0,
-        int maxDepth = OmniBufConstants.MaxNestingDepth)
+        int maxDepth = OmniBufConstants.MaxNestingDepth) =>
+        ValidateField0(data, ref pos, wt, depth, new UnmarshalOptions(MaxNestingDepth: maxDepth));
+
+    public static void ValidateField0(
+        ReadOnlySpan<byte> data,
+        ref int pos,
+        OmniBufWireType wt,
+        int depth,
+        UnmarshalOptions options)
     {
         if (wt != OmniBufWireType.SubMsg)
         {
@@ -131,11 +139,15 @@ public sealed class SchemaMeta
         }
 
         ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-        _ = Decode(body, depth + 1, maxDepth);
+        _ = Decode(body, options, depth + 1);
     }
 
-    public static SchemaMeta? ReadField0(ReadOnlySpan<byte> packet)
+    public static SchemaMeta? ReadField0(ReadOnlySpan<byte> packet) =>
+        ReadField0(packet, UnmarshalOptions.Default);
+
+    public static SchemaMeta? ReadField0(ReadOnlySpan<byte> packet, UnmarshalOptions options)
     {
+        options.ValidateMessageLength(packet.Length);
         SchemaMeta? merged = null;
         int pos = 0;
         while (pos < packet.Length)
@@ -144,7 +156,7 @@ public sealed class SchemaMeta
             if (fieldNum == 0)
             {
                 ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(packet, ref pos, 0);
-                SchemaMeta current = Decode(body, 1, OmniBufConstants.MaxNestingDepth);
+                SchemaMeta current = Decode(body, options, depth: 1);
                 merged = Merge(merged, current);
             }
             else if (!OmniBufDecoder.TryFastSkipValue(packet, ref pos, wt))
@@ -159,8 +171,20 @@ public sealed class SchemaMeta
     public static SchemaMeta Decode(
         ReadOnlySpan<byte> data,
         int depth = 0,
-        int maxDepth = OmniBufConstants.MaxNestingDepth)
+        int maxDepth = OmniBufConstants.MaxNestingDepth) =>
+        Decode(data, new UnmarshalOptions(MaxNestingDepth: maxDepth), depth);
+
+    public static SchemaMeta Decode(
+        ReadOnlySpan<byte> data,
+        UnmarshalOptions options,
+        int depth = 0)
     {
+        if (depth == 0)
+        {
+            options.ValidateMessageLength(data.Length);
+        }
+
+        int maxDepth = options.MaxNestingDepth;
         if (depth > maxDepth)
         {
             throw new OmniBufException($"omnibuf: SchemaMeta nesting depth {depth} exceeds maximum {maxDepth}");
@@ -217,6 +241,7 @@ public sealed class SchemaMeta
                             throw new OmniBufException("omnibuf: invalid SchemaMeta fields map header");
                         }
 
+                        options.ValidateCollectionCount(count);
                         for (int i = 0; i < count; i++)
                         {
                             ulong k = OmniBufDecoder.ReadVarint(body, ref p);
@@ -257,6 +282,7 @@ public sealed class SchemaMeta
                             throw new OmniBufException("omnibuf: invalid SchemaMeta children map header");
                         }
 
+                        options.ValidateCollectionCount(count);
                         var mapChildren = new Dictionary<uint, SchemaMeta>(Math.Min(count, 256));
                         for (int i = 0; i < count; i++)
                         {
@@ -267,7 +293,7 @@ public sealed class SchemaMeta
                             }
 
                             ReadOnlySpan<byte> childBytes = OmniBufDecoder.ReadLenSlice(body, ref p, 0);
-                            SchemaMeta childMeta = Decode(childBytes, depth + 2, maxDepth);
+                            SchemaMeta childMeta = Decode(childBytes, options, depth + 2);
                             mapChildren[(uint)k] = childMeta;
                         }
 
@@ -286,7 +312,7 @@ public sealed class SchemaMeta
                     }
 
                 default:
-                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                     break;
             }
         }

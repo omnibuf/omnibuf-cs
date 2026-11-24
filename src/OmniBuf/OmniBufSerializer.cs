@@ -1,8 +1,9 @@
 using System.Buffers;
 using System.Collections;
-using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace OmniBuf;
 
@@ -12,9 +13,17 @@ namespace OmniBuf;
 /// </summary>
 public static class OmniBufSerializer
 {
-    private static readonly ConcurrentDictionary<Type, MessageCodec> Codecs = new();
+    private const string TrimWarningMessage =
+        "OmniBufSerializer uses reflection to inspect [OmniBufField] properties and constructors. Use protoc-gen-omnibuf-cs generated codecs for trimming/AOT compatibility.";
+
+    private const string AotWarningMessage =
+        "OmniBufSerializer compiles expression trees and dynamic generic methods at runtime. Use protoc-gen-omnibuf-cs generated codecs for NativeAOT compatibility.";
+
+    private static readonly ConditionalWeakTable<Type, MessageCodec> Codecs = new();
     private static readonly object InitLock = new();
 
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
     public static byte[] Marshal<T>(T value, MarshalOptions options = default)
         where T : notnull
     {
@@ -31,6 +40,8 @@ public static class OmniBufSerializer
         }
     }
 
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
     public static void Marshal<T>(IBufferWriter<byte> writer, T value, MarshalOptions options = default)
         where T : notnull
     {
@@ -53,11 +64,11 @@ public static class OmniBufSerializer
         public static MessageCodec? Codec;
     }
 
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static MessageCodec GetCodec<T>() =>
         CodecCache<T>.Codec ?? GetCodecSlow<T>();
 
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static MessageCodec GetCodecSlow<T>()
     {
         MessageCodec codec = GetOrCreateCodec(typeof(T));
@@ -65,6 +76,8 @@ public static class OmniBufSerializer
         return codec;
     }
 
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
     public static void Marshal<T>(OmniBufEncoder encoder, T value, MarshalOptions options = default)
         where T : notnull
     {
@@ -88,19 +101,36 @@ public static class OmniBufSerializer
         codec.EncodeObject(encoder, value, options.Deterministic, depth: 0);
     }
 
-    public static T Unmarshal<T>(ReadOnlySpan<byte> data)
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
+    public static T Unmarshal<T>(ReadOnlySpan<byte> data) =>
+        Unmarshal<T>(data, UnmarshalOptions.Default);
+
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
+    public static T Unmarshal<T>(ReadOnlySpan<byte> data, UnmarshalOptions options)
     {
+        options.ValidateMessageLength(data.Length);
         MessageCodec codec = GetCodec<T>();
-        object instance = codec.DecodeNew(data, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth);
+        object instance = codec.DecodeNew(data, depth: 0, options: options);
         return (T)instance;
     }
 
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
     public static void Unmarshal<T>(ReadOnlySpan<byte> data, T target)
+        where T : class =>
+        Unmarshal(data, target, UnmarshalOptions.Default);
+
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
+    public static void Unmarshal<T>(ReadOnlySpan<byte> data, T target, UnmarshalOptions options)
         where T : class
     {
         ArgumentNullException.ThrowIfNull(target);
+        options.ValidateMessageLength(data.Length);
         MessageCodec codec = GetCodec<T>();
-        codec.DecodeInto(data, target, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth, merge: false);
+        codec.DecodeInto(data, target, depth: 0, options: options, merge: false);
     }
 
     private static MessageCodec GetOrCreateCodec(Type type)
@@ -120,7 +150,7 @@ public static class OmniBufSerializer
             if (existing is null)
             {
                 existing = new MessageCodec(type);
-                Codecs[type] = existing;
+                Codecs.AddOrUpdate(type, existing);
             }
 
             try
@@ -130,7 +160,7 @@ public static class OmniBufSerializer
             }
             catch
             {
-                Codecs.TryRemove(type, out _);
+                Codecs.Remove(type);
                 throw;
             }
         }
@@ -141,7 +171,7 @@ public static class OmniBufSerializer
         if (!Codecs.TryGetValue(type, out MessageCodec? stub))
         {
             stub = new MessageCodec(type);
-            Codecs[type] = stub;
+            Codecs.AddOrUpdate(type, stub);
         }
 
         if (!stub.IsInitialized && !stub.IsInitializing)
@@ -152,7 +182,7 @@ public static class OmniBufSerializer
             }
             catch
             {
-                Codecs.TryRemove(type, out _);
+                Codecs.Remove(type);
                 throw;
             }
         }
@@ -265,7 +295,7 @@ public static class OmniBufSerializer
         object target,
         bool alreadySeen,
         int depth,
-        int maxDepth,
+        UnmarshalOptions options,
         ref bool markedSeen);
 
     private sealed class FieldPlan
@@ -906,45 +936,46 @@ public static class OmniBufSerializer
             }
         }
 
-        public object DecodeNew(ReadOnlySpan<byte> data, int depth, int maxDepth)
+        public object DecodeNew(ReadOnlySpan<byte> data, int depth, UnmarshalOptions options)
         {
             if (CanDecodeInPlace)
             {
                 object instance = _defaultCtor!();
-                DecodeInto(data, instance, depth, maxDepth, merge: false);
+                DecodeInto(data, instance, depth, options, merge: false);
                 return instance;
             }
 
             if (_defaultCtor is not null)
             {
                 object instance = _defaultCtor();
-                DecodeIntoCore(data, instance, depth, maxDepth, merge: false);
+                DecodeIntoCore(data, instance, depth, options, merge: false);
                 return instance;
             }
 
-            return DecodeViaValues(data, existing: null, depth, maxDepth);
+            return DecodeViaValues(data, existing: null, depth, options);
         }
 
-        public object DecodeMerge(ReadOnlySpan<byte> data, object existing, int depth, int maxDepth)
+        public object DecodeMerge(ReadOnlySpan<byte> data, object existing, int depth, UnmarshalOptions options)
         {
             if (CanDecodeInPlace)
             {
-                DecodeInto(data, existing, depth, maxDepth, merge: true);
+                DecodeInto(data, existing, depth, options, merge: true);
                 return existing;
             }
 
             if (_defaultCtor is not null && _type.IsValueType)
             {
                 object copy = existing;
-                DecodeIntoCore(data, copy, depth, maxDepth, merge: true);
+                DecodeIntoCore(data, copy, depth, options, merge: true);
                 return copy;
             }
 
-            return DecodeViaValues(data, existing, depth, maxDepth);
+            return DecodeViaValues(data, existing, depth, options);
         }
 
-        private object DecodeViaValues(ReadOnlySpan<byte> data, object? existing, int depth, int maxDepth)
+        private object DecodeViaValues(ReadOnlySpan<byte> data, object? existing, int depth, UnmarshalOptions options)
         {
+            int maxDepth = options.MaxNestingDepth;
             if (depth > maxDepth)
             {
                 throw new OmniBufException($"omnibuf: nesting depth {depth} exceeds maximum {maxDepth}");
@@ -964,19 +995,19 @@ public static class OmniBufSerializer
                 (uint fnum, OmniBufWireType wt) = OmniBufDecoder.ReadTag(data, ref pos);
                 if (fnum == 0)
                 {
-                    SchemaMeta.ValidateField0(data, ref pos, wt, depth, maxDepth);
+                    SchemaMeta.ValidateField0(data, ref pos, wt, depth, options);
                     continue;
                 }
 
                 FieldPlan? plan = LookupField(fnum);
                 if (plan is null)
                 {
-                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                     continue;
                 }
 
                 bool alreadySeen = seen[plan.Ordinal] || merge;
-                values[plan.Ordinal] = DecodeFieldValue(data, ref pos, wt, plan, values[plan.Ordinal], alreadySeen, depth, maxDepth, ref seen[plan.Ordinal]);
+                values[plan.Ordinal] = DecodeFieldValue(data, ref pos, wt, plan, values[plan.Ordinal], alreadySeen, depth, options, ref seen[plan.Ordinal]);
             }
 
             var ctorArgs = new object?[_ctorParamFieldOrdinals!.Length];
@@ -999,18 +1030,19 @@ public static class OmniBufSerializer
             return instance;
         }
 
-        public void DecodeInto(ReadOnlySpan<byte> data, object target, int depth, int maxDepth, bool merge)
+        public void DecodeInto(ReadOnlySpan<byte> data, object target, int depth, UnmarshalOptions options, bool merge)
         {
             if (!CanDecodeInPlace)
             {
                 throw new OmniBufException($"omnibuf: type {_type.Name} does not support in-place unmarshaling");
             }
 
-            DecodeIntoCore(data, target, depth, maxDepth, merge);
+            DecodeIntoCore(data, target, depth, options, merge);
         }
 
-        private void DecodeIntoCore(ReadOnlySpan<byte> data, object target, int depth, int maxDepth, bool merge)
+        private void DecodeIntoCore(ReadOnlySpan<byte> data, object target, int depth, UnmarshalOptions options, bool merge)
         {
+            int maxDepth = options.MaxNestingDepth;
             if (depth > maxDepth)
             {
                 throw new OmniBufException($"omnibuf: nesting depth {depth} exceeds maximum {maxDepth}");
@@ -1026,14 +1058,14 @@ public static class OmniBufSerializer
                     (uint fnum, OmniBufWireType wt) = OmniBufDecoder.ReadTag(data, ref pos);
                     if (fnum == 0)
                     {
-                        SchemaMeta.ValidateField0(data, ref pos, wt, depth, maxDepth);
+                        SchemaMeta.ValidateField0(data, ref pos, wt, depth, options);
                         continue;
                     }
 
                     FieldPlan? plan = LookupField(fnum);
                     if (plan is null)
                     {
-                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                         continue;
                     }
 
@@ -1042,12 +1074,12 @@ public static class OmniBufSerializer
                     bool marked = (seenLow & bit) != 0;
                     if (plan.FastDecoder is not null)
                     {
-                        plan.FastDecoder(data, ref pos, wt, target, alreadySeen, depth, maxDepth, ref marked);
+                        plan.FastDecoder(data, ref pos, wt, target, alreadySeen, depth, options, ref marked);
                     }
                     else
                     {
                         object? currentVal = plan.Getter(target);
-                        object? nextVal = DecodeFieldValue(data, ref pos, wt, plan, currentVal, alreadySeen, depth, maxDepth, ref marked);
+                        object? nextVal = DecodeFieldValue(data, ref pos, wt, plan, currentVal, alreadySeen, depth, options, ref marked);
                         plan.Setter!(target, nextVal);
                     }
 
@@ -1086,20 +1118,20 @@ public static class OmniBufSerializer
                 (uint fnum, OmniBufWireType wt) = OmniBufDecoder.ReadTag(data, ref p2);
                 if (fnum == 0)
                 {
-                    SchemaMeta.ValidateField0(data, ref p2, wt, depth, maxDepth);
+                    SchemaMeta.ValidateField0(data, ref p2, wt, depth, options);
                     continue;
                 }
 
                 FieldPlan? plan = LookupField(fnum);
                 if (plan is null)
                 {
-                    OmniBufDecoder.ValidateValue(data, ref p2, wt, depth, maxDepth);
+                    OmniBufDecoder.ValidateValue(data, ref p2, wt, depth, options);
                     continue;
                 }
 
                 bool alreadySeen = seen[plan.Ordinal] || merge;
                 object? currentVal = plan.Getter(target);
-                object? nextVal = DecodeFieldValue(data, ref p2, wt, plan, currentVal, alreadySeen, depth, maxDepth, ref seen[plan.Ordinal]);
+                object? nextVal = DecodeFieldValue(data, ref p2, wt, plan, currentVal, alreadySeen, depth, options, ref seen[plan.Ordinal]);
                 plan.Setter!(target, nextVal);
             }
 
@@ -2329,8 +2361,9 @@ public static class OmniBufSerializer
         }
     }
 
-    private static object DecodeValueNode(ReadOnlySpan<byte> data, ref int pos, ValueNode node, int depth, int maxDepth)
+    private static object DecodeValueNode(ReadOnlySpan<byte> data, ref int pos, ValueNode node, int depth, UnmarshalOptions options)
     {
+        int maxDepth = options.MaxNestingDepth;
         if (depth > maxDepth)
         {
             throw new OmniBufException($"omnibuf: container decode depth {depth} exceeds maximum {maxDepth}");
@@ -2344,7 +2377,7 @@ public static class OmniBufSerializer
             case ValueNodeKind.SubMsg:
                 {
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    return node.SubCodec!.DecodeNew(sub, depth, maxDepth);
+                    return node.SubCodec!.DecodeNew(sub, depth, options);
                 }
 
             case ValueNodeKind.List:
@@ -2357,11 +2390,12 @@ public static class OmniBufSerializer
                         throw new OmniBufException("omnibuf: invalid nested WireArray header");
                     }
 
+                    options.ValidateCollectionCount(count);
                     IList list = node.ListFactory!();
                     int nextDepth = elemNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
                     for (int i = 0; i < count; i++)
                     {
-                        list.Add(DecodeValueNode(body, ref p, elemNode, nextDepth, maxDepth));
+                        list.Add(DecodeValueNode(body, ref p, elemNode, nextDepth, options));
                     }
 
                     if (p != body.Length)
@@ -2382,13 +2416,14 @@ public static class OmniBufSerializer
                         throw new OmniBufException("omnibuf: invalid nested WireArray header");
                     }
 
+                    options.ValidateCollectionCount(count);
                     int nextDepth = elemNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
                     if (count > 4096 && OmniBufConstants.FixedElementWidth(elemWt) == 0)
                     {
                         IList staged = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elemNode.ClrType), 4096)!;
                         for (int i = 0; i < count; i++)
                         {
-                            staged.Add(DecodeValueNode(body, ref p, elemNode, nextDepth, maxDepth));
+                            staged.Add(DecodeValueNode(body, ref p, elemNode, nextDepth, options));
                         }
 
                         if (p != body.Length)
@@ -2404,7 +2439,7 @@ public static class OmniBufSerializer
                     Array arr = Array.CreateInstance(elemNode.ClrType, count);
                     for (int i = 0; i < count; i++)
                     {
-                        arr.SetValue(DecodeValueNode(body, ref p, elemNode, nextDepth, maxDepth), i);
+                        arr.SetValue(DecodeValueNode(body, ref p, elemNode, nextDepth, options), i);
                     }
 
                     if (p != body.Length)
@@ -2426,12 +2461,13 @@ public static class OmniBufSerializer
                         throw new OmniBufException("omnibuf: invalid nested WireMap header");
                     }
 
+                    options.ValidateCollectionCount(count);
                     IDictionary map = node.MapFactory!();
                     int nextDepth = valNode.Kind is ValueNodeKind.Scalar ? depth : depth + 1;
                     for (int i = 0; i < count; i++)
                     {
                         object k = ReadScalarPayload(body, ref p, node.MapKeyScalar, node.MapKeyWireType, node.MapKeyEnumType);
-                        object v = DecodeValueNode(body, ref p, valNode, nextDepth, maxDepth);
+                        object v = DecodeValueNode(body, ref p, valNode, nextDepth, options);
                         map[k] = v;
                     }
 
@@ -3280,9 +3316,10 @@ public static class OmniBufSerializer
         object? existing,
         bool alreadySeen,
         int depth,
-        int maxDepth,
+        UnmarshalOptions options,
         ref bool markedSeen)
     {
+        int maxDepth = options.MaxNestingDepth;
         switch (plan.Category)
         {
             case FieldCategory.Scalar:
@@ -3292,7 +3329,7 @@ public static class OmniBufSerializer
                     {
                         if (wt != OmniBufWireType.BoolFalse && wt != OmniBufWireType.BoolTrue)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return existing;
                         }
 
@@ -3303,7 +3340,7 @@ public static class OmniBufSerializer
 
                     if (wt != plan.WireType)
                     {
-                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                         return existing;
                     }
 
@@ -3315,7 +3352,7 @@ public static class OmniBufSerializer
                 {
                     if (wt != OmniBufWireType.SubMsg)
                     {
-                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                         return existing;
                     }
 
@@ -3323,10 +3360,10 @@ public static class OmniBufSerializer
                     markedSeen = true;
                     if (alreadySeen && existing is not null && plan.SubCodec is not null)
                     {
-                        return plan.SubCodec.DecodeMerge(sub, existing, depth + 1, maxDepth);
+                        return plan.SubCodec.DecodeMerge(sub, existing, depth + 1, options);
                     }
 
-                    return plan.SubCodec!.DecodeNew(sub, depth + 1, maxDepth);
+                    return plan.SubCodec!.DecodeNew(sub, depth + 1, options);
                 }
 
             case FieldCategory.List:
@@ -3334,7 +3371,7 @@ public static class OmniBufSerializer
                 {
                     if (wt != OmniBufWireType.Array)
                     {
-                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                         return existing;
                     }
 
@@ -3374,7 +3411,8 @@ public static class OmniBufSerializer
                             }
                         }
 
-                        AppendArrayElementsToList(body, ref p, count, plan, list, depth, maxDepth);
+                        options.ValidateCollectionCount((long)list.Count + count);
+                        AppendArrayElementsToList(body, ref p, count, plan, list, depth, options);
                         if (p != body.Length)
                         {
                             throw new OmniBufException("omnibuf: trailing bytes in WireArray");
@@ -3386,6 +3424,7 @@ public static class OmniBufSerializer
                     {
                         Array? prevArr = alreadySeen ? existing as Array : null;
                         int prevLen = prevArr?.Length ?? 0;
+                        options.ValidateCollectionCount((long)prevLen + count);
                         if ((long)prevLen + count > Array.MaxLength)
                         {
                             throw new OmniBufException("omnibuf: concatenated array exceeds maximum length");
@@ -3402,7 +3441,7 @@ public static class OmniBufSerializer
                                 }
                             }
 
-                            AppendArrayElementsToList(body, ref p, count, plan, staged, depth, maxDepth);
+                            AppendArrayElementsToList(body, ref p, count, plan, staged, depth, options);
                             if (p != body.Length)
                             {
                                 throw new OmniBufException("omnibuf: trailing bytes in WireArray");
@@ -3422,7 +3461,7 @@ public static class OmniBufSerializer
                         for (int i = 0; i < count; i++)
                         {
                             object elem = plan.ElemWireType == OmniBufWireType.SubMsg
-                                ? plan.SubCodec!.DecodeNew(OmniBufDecoder.ReadLenSlice(body, ref p, 0), depth + 2, maxDepth)
+                                ? plan.SubCodec!.DecodeNew(OmniBufDecoder.ReadLenSlice(body, ref p, 0), depth + 2, options)
                                 : ReadScalarPayload(body, ref p, plan.ElemScalar, plan.ElemWireType, plan.ElemEnumType);
                             nextArr.SetValue(elem, prevLen + i);
                         }
@@ -3440,7 +3479,7 @@ public static class OmniBufSerializer
                 {
                     if (wt != OmniBufWireType.Map)
                     {
-                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                         return existing;
                     }
 
@@ -3457,6 +3496,7 @@ public static class OmniBufSerializer
                         throw new OmniBufException($"omnibuf: invalid WireMap header on field #{plan.FieldNum}");
                     }
 
+                    options.ValidateCollectionCount(count);
                     markedSeen = true;
                     IDictionary map;
                     if (existing is IDictionary existingMap && !existingMap.IsReadOnly && !existingMap.IsFixedSize)
@@ -3480,10 +3520,12 @@ public static class OmniBufSerializer
                     {
                         object key = ReadScalarPayload(body, ref p, plan.MapKeyScalar, plan.MapKeyWireType, plan.MapKeyEnumType);
                         object val = plan.MapValWireType == OmniBufWireType.SubMsg
-                            ? plan.SubCodec!.DecodeNew(OmniBufDecoder.ReadLenSlice(body, ref p, 0), depth + 2, maxDepth)
+                            ? plan.SubCodec!.DecodeNew(OmniBufDecoder.ReadLenSlice(body, ref p, 0), depth + 2, options)
                             : ReadScalarPayload(body, ref p, plan.MapValScalar, plan.MapValWireType, plan.MapValEnumType);
                         map[key] = val;
                     }
+
+                    options.ValidateCollectionCount(map.Count);
 
                     if (p != body.Length)
                     {
@@ -3497,12 +3539,12 @@ public static class OmniBufSerializer
                 {
                     if (wt != plan.WireType)
                     {
-                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                        OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                         return existing;
                     }
 
                     markedSeen = true;
-                    object decoded = DecodeValueNode(data, ref pos, plan.ContainerNode!, depth + 1, maxDepth);
+                    object decoded = DecodeValueNode(data, ref pos, plan.ContainerNode!, depth + 1, options);
                     if (!alreadySeen || existing is null)
                     {
                         return decoded;
@@ -3512,6 +3554,7 @@ public static class OmniBufSerializer
                     {
                         if (existing is IList prevList && !prevList.IsReadOnly && !prevList.IsFixedSize)
                         {
+                            options.ValidateCollectionCount((long)prevList.Count + nextList.Count);
                             foreach (object? item in nextList)
                             {
                                 prevList.Add(item);
@@ -3528,6 +3571,7 @@ public static class OmniBufSerializer
                                 mergedList.Add(item);
                             }
 
+                            options.ValidateCollectionCount((long)mergedList.Count + nextList.Count);
                             foreach (object? item in nextList)
                             {
                                 mergedList.Add(item);
@@ -3539,6 +3583,7 @@ public static class OmniBufSerializer
 
                     if (plan.ContainerNode.Kind == ValueNodeKind.Array && existing is Array prevArr && decoded is Array nextArr)
                     {
+                        options.ValidateCollectionCount((long)prevArr.Length + nextArr.Length);
                         if ((long)prevArr.Length + nextArr.Length > Array.MaxLength)
                         {
                             throw new OmniBufException("omnibuf: concatenated array exceeds maximum length");
@@ -3559,6 +3604,7 @@ public static class OmniBufSerializer
                                 prevMap[kv.Key] = kv.Value;
                             }
 
+                            options.ValidateCollectionCount(prevMap.Count);
                             return prevMap;
                         }
 
@@ -3575,6 +3621,7 @@ public static class OmniBufSerializer
                                 mergedMap[kv.Key] = kv.Value;
                             }
 
+                            options.ValidateCollectionCount(mergedMap.Count);
                             return mergedMap;
                         }
                     }
@@ -3594,14 +3641,14 @@ public static class OmniBufSerializer
         FieldPlan plan,
         IList list,
         int depth,
-        int maxDepth)
+        UnmarshalOptions options)
     {
         if (plan.ElemWireType == OmniBufWireType.SubMsg)
         {
             for (int i = 0; i < count; i++)
             {
                 ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);
-                list.Add(plan.SubCodec!.DecodeNew(sub, depth + 2, maxDepth));
+                list.Add(plan.SubCodec!.DecodeNew(sub, depth + 2, options));
             }
 
             return;
@@ -4001,11 +4048,11 @@ public static class OmniBufSerializer
                     Func<object, object?> get = plan.Getter;
                     Action<object, object?> set = plan.Setter;
                     MessageCodec subCodec = plan.SubCodec;
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.SubMsg)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4020,13 +4067,13 @@ public static class OmniBufSerializer
                                 set(target, cur);
                             }
 
-                            subCodec.DecodeInto(sub, cur, depth + 1, maxDepth, merge: alreadySeen);
+                            subCodec.DecodeInto(sub, cur, depth + 1, options, merge: alreadySeen);
                             return;
                         }
 
                         object next = (alreadySeen && cur is not null)
-                            ? subCodec.DecodeMerge(sub, cur, depth + 1, maxDepth)
-                            : subCodec.DecodeNew(sub, depth + 1, maxDepth);
+                            ? subCodec.DecodeMerge(sub, cur, depth + 1, options)
+                            : subCodec.DecodeNew(sub, depth + 1, options);
                         set(target, next);
                     };
                 }
@@ -4047,11 +4094,11 @@ public static class OmniBufSerializer
             case ScalarKind.Bool:
                 {
                     Action<object, bool> set = CompileScalarFromSetter<bool>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.BoolFalse && wt != OmniBufWireType.BoolTrue)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4063,11 +4110,11 @@ public static class OmniBufSerializer
             case ScalarKind.Byte:
                 {
                     Action<object, byte> set = CompileScalarFromSetter<byte>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != expectedWt)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4080,11 +4127,11 @@ public static class OmniBufSerializer
             case ScalarKind.UInt16:
                 {
                     Action<object, ushort> set = CompileScalarFromSetter<ushort>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != expectedWt)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4099,11 +4146,11 @@ public static class OmniBufSerializer
                     Action<object, uint> set = CompileScalarFromSetter<uint>(plan.Property);
                     if (expectedWt is OmniBufWireType.Fixed32 or OmniBufWireType.Sfixed32)
                     {
-                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                         {
                             if (wt != expectedWt)
                             {
-                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                                 return;
                             }
 
@@ -4114,11 +4161,11 @@ public static class OmniBufSerializer
 
                     if (expectedWt == OmniBufWireType.Sint)
                     {
-                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                         {
                             if (wt != OmniBufWireType.Sint)
                             {
-                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                                 return;
                             }
 
@@ -4127,11 +4174,11 @@ public static class OmniBufSerializer
                         };
                     }
 
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.Uint)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4145,11 +4192,11 @@ public static class OmniBufSerializer
                     Action<object, ulong> set = CompileScalarFromSetter<ulong>(plan.Property);
                     if (expectedWt is OmniBufWireType.Fixed64 or OmniBufWireType.Sfixed64)
                     {
-                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                         {
                             if (wt != expectedWt)
                             {
-                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                                 return;
                             }
 
@@ -4160,11 +4207,11 @@ public static class OmniBufSerializer
 
                     if (expectedWt == OmniBufWireType.Sint)
                     {
-                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                         {
                             if (wt != OmniBufWireType.Sint)
                             {
-                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                                 return;
                             }
 
@@ -4173,11 +4220,11 @@ public static class OmniBufSerializer
                         };
                     }
 
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.Uint)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4189,11 +4236,11 @@ public static class OmniBufSerializer
             case ScalarKind.SByte:
                 {
                     Action<object, sbyte> set = CompileScalarFromSetter<sbyte>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != expectedWt)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4206,11 +4253,11 @@ public static class OmniBufSerializer
             case ScalarKind.Int16:
                 {
                     Action<object, short> set = CompileScalarFromSetter<short>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != expectedWt)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4225,11 +4272,11 @@ public static class OmniBufSerializer
                     Action<object, int> set = CompileScalarFromSetter<int>(plan.Property);
                     if (expectedWt is OmniBufWireType.Sfixed32 or OmniBufWireType.Fixed32)
                     {
-                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                         {
                             if (wt != expectedWt)
                             {
-                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                                 return;
                             }
 
@@ -4240,11 +4287,11 @@ public static class OmniBufSerializer
 
                     if (expectedWt == OmniBufWireType.Uint)
                     {
-                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                         {
                             if (wt != OmniBufWireType.Uint)
                             {
-                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                                 return;
                             }
 
@@ -4253,11 +4300,11 @@ public static class OmniBufSerializer
                         };
                     }
 
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.Sint)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4271,11 +4318,11 @@ public static class OmniBufSerializer
                     Action<object, long> set = CompileScalarFromSetter<long>(plan.Property);
                     if (expectedWt is OmniBufWireType.Sfixed64 or OmniBufWireType.Fixed64)
                     {
-                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                         {
                             if (wt != expectedWt)
                             {
-                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                                 return;
                             }
 
@@ -4286,11 +4333,11 @@ public static class OmniBufSerializer
 
                     if (expectedWt == OmniBufWireType.Uint)
                     {
-                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                         {
                             if (wt != OmniBufWireType.Uint)
                             {
-                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                                 return;
                             }
 
@@ -4299,11 +4346,11 @@ public static class OmniBufSerializer
                         };
                     }
 
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.Sint)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4315,11 +4362,11 @@ public static class OmniBufSerializer
             case ScalarKind.Float32:
                 {
                     Action<object, float> set = CompileTypedSetter<float>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.Float32)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4331,11 +4378,11 @@ public static class OmniBufSerializer
             case ScalarKind.Float64:
                 {
                     Action<object, double> set = CompileTypedSetter<double>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.Float64)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4347,11 +4394,11 @@ public static class OmniBufSerializer
             case ScalarKind.String:
                 {
                     Action<object, string?> set = CompileTypedSetter<string?>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.String)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4363,11 +4410,11 @@ public static class OmniBufSerializer
             case ScalarKind.Bytes:
                 {
                     Action<object, byte[]?> set = CompileTypedSetter<byte[]?>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool _, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.Bytes)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
@@ -4398,14 +4445,15 @@ public static class OmniBufSerializer
                 {
                     Func<object, List<string>?> get = CompileTypedGetter<List<string>?>(plan.Property);
                     Action<object, List<string>?> set = CompileTypedSetter<List<string>?>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.Array)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
+                        int maxDepth = options.MaxNestingDepth;
                         if (depth + 1 > maxDepth)
                         {
                             throw new OmniBufException($"omnibuf: WireArray depth {depth + 1} exceeds maximum {maxDepth}");
@@ -4421,12 +4469,18 @@ public static class OmniBufSerializer
                         List<string>? list = get(target);
                         if (list is null)
                         {
+                            options.ValidateCollectionCount(count);
                             list = new List<string>(Math.Min(count, 4096));
                             set(target, list);
                         }
                         else if (!alreadySeen)
                         {
+                            options.ValidateCollectionCount(count);
                             list.Clear();
+                        }
+                        else
+                        {
+                            options.ValidateCollectionCount((long)list.Count + count);
                         }
 
                         if ((long)list.Count + count > Array.MaxLength)
@@ -4451,14 +4505,15 @@ public static class OmniBufSerializer
                 {
                     Func<object, List<uint>?> get = CompileTypedGetter<List<uint>?>(plan.Property);
                     Action<object, List<uint>?> set = CompileTypedSetter<List<uint>?>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.Array)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
+                        int maxDepth = options.MaxNestingDepth;
                         if (depth + 1 > maxDepth)
                         {
                             throw new OmniBufException($"omnibuf: WireArray depth {depth + 1} exceeds maximum {maxDepth}");
@@ -4474,12 +4529,18 @@ public static class OmniBufSerializer
                         List<uint>? list = get(target);
                         if (list is null)
                         {
+                            options.ValidateCollectionCount(count);
                             list = new List<uint>(Math.Min(count, 4096));
                             set(target, list);
                         }
                         else if (!alreadySeen)
                         {
+                            options.ValidateCollectionCount(count);
                             list.Clear();
+                        }
+                        else
+                        {
+                            options.ValidateCollectionCount((long)list.Count + count);
                         }
 
                         if ((long)list.Count + count > Array.MaxLength)
@@ -4504,14 +4565,15 @@ public static class OmniBufSerializer
                 {
                     Func<object, List<int>?> get = CompileTypedGetter<List<int>?>(plan.Property);
                     Action<object, List<int>?> set = CompileTypedSetter<List<int>?>(plan.Property);
-                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, int maxDepth, ref bool markedSeen) =>
+                    return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, UnmarshalOptions options, ref bool markedSeen) =>
                     {
                         if (wt != OmniBufWireType.Array)
                         {
-                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                            OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                             return;
                         }
 
+                        int maxDepth = options.MaxNestingDepth;
                         if (depth + 1 > maxDepth)
                         {
                             throw new OmniBufException($"omnibuf: WireArray depth {depth + 1} exceeds maximum {maxDepth}");
@@ -4528,12 +4590,18 @@ public static class OmniBufSerializer
                         List<int>? list = get(target);
                         if (list is null)
                         {
+                            options.ValidateCollectionCount(count);
                             list = new List<int>(Math.Min(count, 4096));
                             set(target, list);
                         }
                         else if (!alreadySeen)
                         {
+                            options.ValidateCollectionCount(count);
                             list.Clear();
+                        }
+                        else
+                        {
+                            options.ValidateCollectionCount((long)list.Count + count);
                         }
 
                         if ((long)list.Count + count > Array.MaxLength)
@@ -4567,14 +4635,15 @@ public static class OmniBufSerializer
         Func<object, List<TElem>?> get = CompileTypedGetter<List<TElem>?>(plan.Property);
         Action<object, List<TElem>?> set = CompileTypedSetter<List<TElem>?>(plan.Property);
 
-        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, int maxDepth, ref bool markedSeen) =>
+        return (ReadOnlySpan<byte> data, ref int pos, OmniBufWireType wt, object target, bool alreadySeen, int depth, UnmarshalOptions options, ref bool markedSeen) =>
         {
             if (wt != OmniBufWireType.Array)
             {
-                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                 return;
             }
 
+            int maxDepth = options.MaxNestingDepth;
             if (depth + 1 > maxDepth)
             {
                 throw new OmniBufException($"omnibuf: WireArray depth {depth + 1} exceeds maximum {maxDepth}");
@@ -4590,8 +4659,17 @@ public static class OmniBufSerializer
             List<TElem>? list = get(target);
             if (list is null)
             {
+                options.ValidateCollectionCount(count);
                 list = new List<TElem>(Math.Min(count, 4096));
                 set(target, list);
+            }
+            else if (alreadySeen)
+            {
+                options.ValidateCollectionCount((long)list.Count + count);
+            }
+            else
+            {
+                options.ValidateCollectionCount(count);
             }
 
             if (alreadySeen && (long)list.Count + count > Array.MaxLength)
@@ -4616,18 +4694,18 @@ public static class OmniBufSerializer
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);
                     if (i < list.Count && list[i] is { } existingElem)
                     {
-                        subCodec.DecodeInto(sub, existingElem, depth + 2, maxDepth, merge: false);
+                        subCodec.DecodeInto(sub, existingElem, depth + 2, options, merge: false);
                     }
                     else if (i < list.Count)
                     {
                         var blank = (TElem)subCodec.CreateBlank();
-                        subCodec.DecodeInto(sub, blank, depth + 2, maxDepth, merge: false);
+                        subCodec.DecodeInto(sub, blank, depth + 2, options, merge: false);
                         list[i] = blank;
                     }
                     else
                     {
                         var blank = (TElem)subCodec.CreateBlank();
-                        subCodec.DecodeInto(sub, blank, depth + 2, maxDepth, merge: false);
+                        subCodec.DecodeInto(sub, blank, depth + 2, options, merge: false);
                         list.Add(blank);
                     }
                 }
@@ -4642,7 +4720,7 @@ public static class OmniBufSerializer
                 for (int i = 0; i < count; i++)
                 {
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);
-                    list.Add((TElem)subCodec.DecodeNew(sub, depth + 2, maxDepth));
+                    list.Add((TElem)subCodec.DecodeNew(sub, depth + 2, options));
                 }
             }
 

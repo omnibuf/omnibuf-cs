@@ -66,9 +66,15 @@ public static class OmniBufBlind
     /// </summary>
     public static Dictionary<string, object?> DecodeBlind(
         ReadOnlySpan<byte> packet,
-        int maxDepth = OmniBufConstants.MaxNestingDepth)
+        int maxDepth = OmniBufConstants.MaxNestingDepth) =>
+        DecodeBlind(packet, new UnmarshalOptions(MaxNestingDepth: maxDepth));
+
+    public static Dictionary<string, object?> DecodeBlind(
+        ReadOnlySpan<byte> packet,
+        UnmarshalOptions options)
     {
-        return DecodeMessage(packet, schema: null, depth: 0, maxDepth: maxDepth);
+        options.ValidateMessageLength(packet.Length);
+        return DecodeMessage(packet, schema: null, depth: 0, options: options);
     }
 
     /// <summary>
@@ -80,9 +86,15 @@ public static class OmniBufBlind
     public static string DecodeBlindJson(
         ReadOnlySpan<byte> packet,
         bool fallbackOnNonFinite = false,
-        int maxDepth = OmniBufConstants.MaxNestingDepth)
+        int maxDepth = OmniBufConstants.MaxNestingDepth) =>
+        DecodeBlindJson(packet, new UnmarshalOptions(MaxNestingDepth: maxDepth), fallbackOnNonFinite);
+
+    public static string DecodeBlindJson(
+        ReadOnlySpan<byte> packet,
+        UnmarshalOptions options,
+        bool fallbackOnNonFinite = false)
     {
-        Dictionary<string, object?> decoded = DecodeBlind(packet, maxDepth);
+        Dictionary<string, object?> decoded = DecodeBlind(packet, options);
         if (ContainsNonFiniteFloat(decoded))
         {
             if (fallbackOnNonFinite)
@@ -110,8 +122,9 @@ public static class OmniBufBlind
         ReadOnlySpan<byte> data,
         BlindSchema? schema,
         int depth,
-        int maxDepth)
+        UnmarshalOptions options)
     {
+        int maxDepth = options.MaxNestingDepth;
         if (depth > maxDepth)
         {
             throw new OmniBufException($"omnibuf: blind decode depth {depth} exceeds maximum {maxDepth}");
@@ -126,7 +139,7 @@ public static class OmniBufBlind
             if (fnum == 0)
             {
                 ReadOnlySpan<byte> metaBody = OmniBufDecoder.ReadLenSlice(data, ref scanPos, 0);
-                SchemaMeta decodedMeta = SchemaMeta.Decode(metaBody, depth + 1, maxDepth);
+                SchemaMeta decodedMeta = SchemaMeta.Decode(metaBody, options, depth + 1);
                 localMeta = SchemaMeta.Merge(localMeta, decodedMeta);
             }
             else if (!OmniBufDecoder.TryFastSkipValue(data, ref scanPos, wt))
@@ -165,7 +178,7 @@ public static class OmniBufBlind
 
             nameOwner[key] = fnum;
 
-            uint shape = ReadFieldShape(data, pos, wt, depth, maxDepth, out ContainerShape? nestedShape);
+            uint shape = ReadFieldShape(data, pos, wt, depth, options, out ContainerShape? nestedShape);
             if (fieldShapes.TryGetValue(fnum, out uint prevShape) && prevShape != shape)
             {
                 throw new OmniBufException($"omnibuf: field #{fnum} changed wire shape across concatenated occurrences");
@@ -221,14 +234,14 @@ public static class OmniBufBlind
                     if (acc.Merged is null)
                     {
                         ReadOnlySpan<byte> firstSeg = data.Slice(acc.FirstOffset, acc.FirstLength);
-                        OmniBufDecoder.ValidateMessage(firstSeg, depth + 1, maxDepth);
-                        OmniBufDecoder.ValidateMessage(nextSeg, depth + 1, maxDepth);
+                        OmniBufDecoder.ValidateMessage(firstSeg, options, depth + 1);
+                        OmniBufDecoder.ValidateMessage(nextSeg, options, depth + 1);
                         acc.Merged = new List<byte>(acc.FirstLength + subLen);
                         AppendSpanToList(acc.Merged, firstSeg);
                     }
                     else
                     {
-                        OmniBufDecoder.ValidateMessage(nextSeg, depth + 1, maxDepth);
+                        OmniBufDecoder.ValidateMessage(nextSeg, options, depth + 1);
                     }
 
                     AppendSpanToList(acc.Merged, nextSeg);
@@ -238,9 +251,10 @@ public static class OmniBufBlind
                 continue;
             }
 
-            object? val = DecodeValue(data, ref pos, wt, activeSchema?.Child(fnum), depth, maxDepth);
+            object? val = DecodeValue(data, ref pos, wt, activeSchema?.Child(fnum), depth, options);
             if (wt == OmniBufWireType.Array && result.TryGetValue(key, out object? prevArrObj) && prevArrObj is List<object?> prevList && val is List<object?> nextList)
             {
+                options.ValidateCollectionCount((long)prevList.Count + nextList.Count);
                 prevList.AddRange(nextList);
             }
             else if (wt == OmniBufWireType.Map && result.TryGetValue(key, out object? prevMapObj) && prevMapObj is Dictionary<string, object?> prevMap && val is Dictionary<string, object?> nextMap)
@@ -249,6 +263,8 @@ public static class OmniBufBlind
                 {
                     prevMap[kv.Key] = kv.Value;
                 }
+
+                options.ValidateCollectionCount(prevMap.Count);
             }
             else
             {
@@ -265,7 +281,7 @@ public static class OmniBufBlind
                 ReadOnlySpan<byte> subSpan = acc.Merged is null
                     ? data.Slice(acc.FirstOffset, acc.FirstLength)
                     : CollectionsMarshal.AsSpan(acc.Merged);
-                result[key] = DecodeMessage(subSpan, activeSchema?.Child(fnum), depth + 1, maxDepth);
+                result[key] = DecodeMessage(subSpan, activeSchema?.Child(fnum), depth + 1, options);
             }
         }
 
@@ -289,7 +305,7 @@ public static class OmniBufBlind
         int pos,
         OmniBufWireType wt,
         int depth,
-        int maxDepth,
+        UnmarshalOptions options,
         out ContainerShape? nestedShape)
     {
         nestedShape = null;
@@ -298,14 +314,15 @@ public static class OmniBufBlind
         {
             int p = pos;
             ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref p, 2);
-            if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out _, out _))
+            if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out int count, out _))
             {
                 throw new OmniBufException("omnibuf: invalid WireArray header");
             }
 
+            options.ValidateCollectionCount(count);
             if (elemWt is OmniBufWireType.Array or OmniBufWireType.Map)
             {
-                nestedShape = InspectContainerBodyShape(body, OmniBufWireType.Array, depth + 1, maxDepth);
+                nestedShape = InspectContainerBodyShape(body, OmniBufWireType.Array, depth + 1, options);
             }
 
             return (uint)OmniBufWireType.Array | ((uint)elemWt << 8);
@@ -315,14 +332,15 @@ public static class OmniBufBlind
         {
             int p = pos;
             ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref p, 3);
-            if (!OmniBufDecoder.TryParseMapHeader(body, out OmniBufWireType keyWt, out OmniBufWireType valWt, out _, out _))
+            if (!OmniBufDecoder.TryParseMapHeader(body, out OmniBufWireType keyWt, out OmniBufWireType valWt, out int count, out _))
             {
                 throw new OmniBufException("omnibuf: invalid WireMap header");
             }
 
+            options.ValidateCollectionCount(count);
             if (valWt is OmniBufWireType.Array or OmniBufWireType.Map)
             {
-                nestedShape = InspectContainerBodyShape(body, OmniBufWireType.Map, depth + 1, maxDepth);
+                nestedShape = InspectContainerBodyShape(body, OmniBufWireType.Map, depth + 1, options);
             }
 
             return (uint)OmniBufWireType.Map | ((uint)keyWt << 8) | ((uint)valWt << 16);
@@ -335,8 +353,9 @@ public static class OmniBufBlind
         ReadOnlySpan<byte> body,
         OmniBufWireType containerKind,
         int depth,
-        int maxDepth)
+        UnmarshalOptions options)
     {
+        int maxDepth = options.MaxNestingDepth;
         if (depth > maxDepth)
         {
             throw new OmniBufException($"omnibuf: container nesting depth {depth} exceeds maximum {maxDepth}");
@@ -349,6 +368,7 @@ public static class OmniBufBlind
                 throw new OmniBufException("omnibuf: invalid WireArray header in DecodeBlind");
             }
 
+            options.ValidateCollectionCount(count);
             ContainerShape? unifiedInner = null;
             if (elemWt is OmniBufWireType.Array or OmniBufWireType.Map)
             {
@@ -356,7 +376,7 @@ public static class OmniBufBlind
                 for (int i = 0; i < count; i++)
                 {
                     ReadOnlySpan<byte> childBody = OmniBufDecoder.ReadLenSlice(body, ref p, minChildLen);
-                    ContainerShape elemShape = InspectContainerBodyShape(childBody, elemWt, depth + 1, maxDepth);
+                    ContainerShape elemShape = InspectContainerBodyShape(childBody, elemWt, depth + 1, options);
                     if (unifiedInner is null)
                     {
                         unifiedInner = elemShape;
@@ -381,6 +401,7 @@ public static class OmniBufBlind
             throw new OmniBufException("omnibuf: invalid WireMap header in DecodeBlind");
         }
 
+        options.ValidateCollectionCount(mapCount);
         ContainerShape? unifiedMapInner = null;
         if (valWt is OmniBufWireType.Array or OmniBufWireType.Map)
         {
@@ -393,11 +414,11 @@ public static class OmniBufBlind
                 }
                 else
                 {
-                    OmniBufDecoder.ValidateValue(body, ref mp, keyWt, depth + 1, maxDepth);
+                    OmniBufDecoder.ValidateValue(body, ref mp, keyWt, depth + 1, options);
                 }
 
                 ReadOnlySpan<byte> childBody = OmniBufDecoder.ReadLenSlice(body, ref mp, minChildLen);
-                ContainerShape valShape = InspectContainerBodyShape(childBody, valWt, depth + 1, maxDepth);
+                ContainerShape valShape = InspectContainerBodyShape(childBody, valWt, depth + 1, options);
                 if (unifiedMapInner is null)
                 {
                     unifiedMapInner = valShape;
@@ -456,8 +477,9 @@ public static class OmniBufBlind
         OmniBufWireType wt,
         BlindSchema? childSchema,
         int depth,
-        int maxDepth)
+        UnmarshalOptions options)
     {
+        int maxDepth = options.MaxNestingDepth;
         if (depth > maxDepth)
         {
             throw new OmniBufException($"omnibuf: blind decode depth {depth} exceeds maximum {maxDepth}");
@@ -504,7 +526,7 @@ public static class OmniBufBlind
             case OmniBufWireType.SubMsg:
                 {
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    return DecodeMessage(sub, childSchema, depth + 1, maxDepth);
+                    return DecodeMessage(sub, childSchema, depth + 1, options);
                 }
 
             case OmniBufWireType.Array:
@@ -520,6 +542,7 @@ public static class OmniBufBlind
                         throw new OmniBufException("omnibuf: invalid WireArray header in DecodeBlind");
                     }
 
+                    options.ValidateCollectionCount(count);
                     var items = new List<object?>(Math.Min(count, 4096));
                     for (int i = 0; i < count; i++)
                     {
@@ -529,7 +552,7 @@ public static class OmniBufBlind
                         }
                         else
                         {
-                            items.Add(DecodeValue(body, ref p, elemWt, childSchema, depth + 1, maxDepth));
+                            items.Add(DecodeValue(body, ref p, elemWt, childSchema, depth + 1, options));
                         }
                     }
 
@@ -554,17 +577,18 @@ public static class OmniBufBlind
                         throw new OmniBufException("omnibuf: invalid WireMap header in DecodeBlind");
                     }
 
+                    options.ValidateCollectionCount(count);
                     var map = new Dictionary<string, object?>(Math.Min(count, 4096), StringComparer.Ordinal);
                     for (int i = 0; i < count; i++)
                     {
                         object? keyObj = keyWt == OmniBufWireType.BoolFalse
                             ? OmniBufDecoder.ReadBoolElement(body, ref p)
-                            : DecodeValue(body, ref p, keyWt, null, depth + 1, maxDepth);
+                            : DecodeValue(body, ref p, keyWt, null, depth + 1, options);
                         string keyStr = FormatMapKey(keyObj);
 
                         object? valObj = valWt == OmniBufWireType.BoolFalse
                             ? OmniBufDecoder.ReadBoolElement(body, ref p)
-                            : DecodeValue(body, ref p, valWt, childSchema, depth + 1, maxDepth);
+                            : DecodeValue(body, ref p, valWt, childSchema, depth + 1, options);
                         map[keyStr] = valObj;
                     }
 

@@ -337,12 +337,12 @@ public sealed class OpaqueLocation
 
     private long[]? GetOrBuildIndex()
     {
-        long[]? idx = _fieldIndex;
+        long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (_readCount == 0) { _readCount = 1; return null; }
-        idx = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
-        _fieldIndex = idx;
-        return idx;
+        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
+        System.Threading.Volatile.Write(ref _fieldIndex, built);
+        return built;
     }
 
     private bool IsDirty(uint fieldNum) => fieldNum < 64
@@ -903,12 +903,12 @@ public sealed class OpaqueNeighbor
 
     private long[]? GetOrBuildIndex()
     {
-        long[]? idx = _fieldIndex;
+        long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (_readCount == 0) { _readCount = 1; return null; }
-        idx = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
-        _fieldIndex = idx;
-        return idx;
+        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
+        System.Threading.Volatile.Write(ref _fieldIndex, built);
+        return built;
     }
 
     private bool IsDirty(uint fieldNum) => fieldNum < 64
@@ -1784,12 +1784,12 @@ public sealed class OpaquePeerUpdate
 
     private long[]? GetOrBuildIndex()
     {
-        long[]? idx = _fieldIndex;
+        long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (_readCount == 0) { _readCount = 1; return null; }
-        idx = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
-        _fieldIndex = idx;
-        return idx;
+        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
+        System.Threading.Volatile.Write(ref _fieldIndex, built);
+        return built;
     }
 
     private bool IsDirty(uint fieldNum) => fieldNum < 64

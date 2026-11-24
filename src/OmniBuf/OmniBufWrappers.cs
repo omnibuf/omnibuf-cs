@@ -243,58 +243,85 @@ public static class OmniBufWrappers
         return result;
     }
 
-    public static double? ReadElemDouble(ReadOnlySpan<byte> data, ref int pos)
+    public static double? ReadElemDouble(ReadOnlySpan<byte> data, ref int pos) =>
+        ReadElemDouble(data, ref pos, depth: 2);
+
+    public static double? ReadElemDouble(ReadOnlySpan<byte> data, ref int pos, int depth, int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-        return DecodeDouble(sub, 0d, 2, OmniBufConstants.MaxNestingDepth);
+        return DecodeDouble(sub, 0d, depth, maxDepth);
     }
 
-    public static float? ReadElemFloat(ReadOnlySpan<byte> data, ref int pos)
+    public static float? ReadElemFloat(ReadOnlySpan<byte> data, ref int pos) =>
+        ReadElemFloat(data, ref pos, depth: 2);
+
+    public static float? ReadElemFloat(ReadOnlySpan<byte> data, ref int pos, int depth, int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-        return DecodeFloat(sub, 0f, 2, OmniBufConstants.MaxNestingDepth);
+        return DecodeFloat(sub, 0f, depth, maxDepth);
     }
 
-    public static long? ReadElemInt64(ReadOnlySpan<byte> data, ref int pos)
+    public static long? ReadElemInt64(ReadOnlySpan<byte> data, ref int pos) =>
+        ReadElemInt64(data, ref pos, depth: 2);
+
+    public static long? ReadElemInt64(ReadOnlySpan<byte> data, ref int pos, int depth, int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-        return DecodeInt64(sub, 0L, 2, OmniBufConstants.MaxNestingDepth);
+        return DecodeInt64(sub, 0L, depth, maxDepth);
     }
 
-    public static ulong? ReadElemUInt64(ReadOnlySpan<byte> data, ref int pos)
+    public static ulong? ReadElemUInt64(ReadOnlySpan<byte> data, ref int pos) =>
+        ReadElemUInt64(data, ref pos, depth: 2);
+
+    public static ulong? ReadElemUInt64(ReadOnlySpan<byte> data, ref int pos, int depth, int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-        return DecodeUInt64(sub, 0UL, 2, OmniBufConstants.MaxNestingDepth);
+        return DecodeUInt64(sub, 0UL, depth, maxDepth);
     }
 
-    public static int? ReadElemInt32(ReadOnlySpan<byte> data, ref int pos)
+    public static int? ReadElemInt32(ReadOnlySpan<byte> data, ref int pos) =>
+        ReadElemInt32(data, ref pos, depth: 2);
+
+    public static int? ReadElemInt32(ReadOnlySpan<byte> data, ref int pos, int depth, int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-        return DecodeInt32(sub, 0, 2, OmniBufConstants.MaxNestingDepth);
+        return DecodeInt32(sub, 0, depth, maxDepth);
     }
 
-    public static uint? ReadElemUInt32(ReadOnlySpan<byte> data, ref int pos)
+    public static uint? ReadElemUInt32(ReadOnlySpan<byte> data, ref int pos) =>
+        ReadElemUInt32(data, ref pos, depth: 2);
+
+    public static uint? ReadElemUInt32(ReadOnlySpan<byte> data, ref int pos, int depth, int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-        return DecodeUInt32(sub, 0u, 2, OmniBufConstants.MaxNestingDepth);
+        return DecodeUInt32(sub, 0u, depth, maxDepth);
     }
 
-    public static bool? ReadElemBool(ReadOnlySpan<byte> data, ref int pos)
+    public static bool? ReadElemBool(ReadOnlySpan<byte> data, ref int pos) =>
+        ReadElemBool(data, ref pos, depth: 2);
+
+    public static bool? ReadElemBool(ReadOnlySpan<byte> data, ref int pos, int depth, int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-        return DecodeBool(sub, false, 2, OmniBufConstants.MaxNestingDepth);
+        return DecodeBool(sub, false, depth, maxDepth);
     }
 
-    public static string ReadElemString(ReadOnlySpan<byte> data, ref int pos)
+    public static string ReadElemString(ReadOnlySpan<byte> data, ref int pos) =>
+        ReadElemString(data, ref pos, depth: 2);
+
+    public static string ReadElemString(ReadOnlySpan<byte> data, ref int pos, int depth, int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-        return DecodeString(sub, string.Empty, 2, OmniBufConstants.MaxNestingDepth);
+        return DecodeString(sub, string.Empty, depth, maxDepth);
     }
 
-    public static ByteString ReadElemBytes(ReadOnlySpan<byte> data, ref int pos)
+    public static ByteString ReadElemBytes(ReadOnlySpan<byte> data, ref int pos) =>
+        ReadElemBytes(data, ref pos, depth: 2);
+
+    public static ByteString ReadElemBytes(ReadOnlySpan<byte> data, ref int pos, int depth, int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-        return DecodeBytes(sub, ByteString.Empty, 2, OmniBufConstants.MaxNestingDepth);
+        return DecodeBytes(sub, ByteString.Empty, depth, maxDepth);
     }
 
     public static SchemaMeta? BuildSchemaMeta(string wrapperTypeName, int depth)

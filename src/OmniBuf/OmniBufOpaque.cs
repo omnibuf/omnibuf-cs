@@ -1,4 +1,6 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Text.Unicode;
 using Google.Protobuf;
 
 namespace OmniBuf;
@@ -343,7 +345,11 @@ public static class OmniBufOpaque
                 ThrowCorruptPacket("trailing bytes in String field", p);
             }
 
-            _ = OmniBufConstants.DecodeUtf8Strict(utf8Bytes);
+            if (!Utf8.IsValid(utf8Bytes))
+            {
+                throw new OmniBufException("omnibuf: invalid UTF-8 string payload");
+            }
+
             return true;
         }
 
@@ -503,14 +509,14 @@ public static class OmniBufOpaque
                         OmniBufDecoder.ValidateMessage(singleSlice, 1, OmniBufConstants.MaxNestingDepth);
                         OmniBufDecoder.ValidateMessage(body, 1, OmniBufConstants.MaxNestingDepth);
                         merged = new List<byte>(singleSlice.Length + body.Length);
-                        merged.AddRange(singleSlice.ToArray());
+                        AppendSpanToList(merged, singleSlice);
                     }
                     else
                     {
                         OmniBufDecoder.ValidateMessage(body, 1, OmniBufConstants.MaxNestingDepth);
                     }
 
-                    merged.AddRange(body.ToArray());
+                    AppendSpanToList(merged, body);
                 }
 
                 continue;
@@ -528,8 +534,20 @@ public static class OmniBufOpaque
             return false;
         }
 
-        subMsgSpan = matchCount == 1 ? singleSlice : merged!.ToArray();
+        subMsgSpan = matchCount == 1 ? singleSlice : CollectionsMarshal.AsSpan(merged!);
         return true;
+    }
+
+    private static void AppendSpanToList(List<byte> dst, ReadOnlySpan<byte> src)
+    {
+        if (src.IsEmpty)
+        {
+            return;
+        }
+
+        int oldCount = dst.Count;
+        CollectionsMarshal.SetCount(dst, oldCount + src.Length);
+        src.CopyTo(CollectionsMarshal.AsSpan(dst).Slice(oldCount, src.Length));
     }
 
     /// <summary>
@@ -634,14 +652,14 @@ public static class OmniBufOpaque
                         OmniBufDecoder.ValidateMessage(singleSlice, 1, OmniBufConstants.MaxNestingDepth);
                         OmniBufDecoder.ValidateMessage(body, 1, OmniBufConstants.MaxNestingDepth);
                         merged = new List<byte>(singleSlice.Length + body.Length);
-                        merged.AddRange(singleSlice.ToArray());
+                        AppendSpanToList(merged, singleSlice);
                     }
                     else
                     {
                         OmniBufDecoder.ValidateMessage(body, 1, OmniBufConstants.MaxNestingDepth);
                     }
 
-                    merged.AddRange(body.ToArray());
+                    AppendSpanToList(merged, body);
                 }
 
                 continue;

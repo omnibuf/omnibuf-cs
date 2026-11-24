@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Collections;
-using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using Google.Protobuf;
 using Google.Protobuf.Reflection;
 
@@ -11,8 +12,17 @@ namespace OmniBuf;
 /// </summary>
 public static class OmniBufProtobuf
 {
-    private static readonly ConcurrentDictionary<MessageDescriptor, bool> ValidatedDescriptors = new();
+    private const string TrimWarningMessage =
+        "OmniBufProtobuf uses Google.Protobuf descriptor reflection. Use protoc-gen-omnibuf-cs generated codecs for trimming/AOT compatibility.";
 
+    private const string AotWarningMessage =
+        "OmniBufProtobuf uses Google.Protobuf reflection accessors. Use protoc-gen-omnibuf-cs generated codecs for NativeAOT compatibility.";
+
+    private static readonly ConditionalWeakTable<MessageDescriptor, object> ValidatedDescriptors = new();
+    private static readonly object ValidatedSentinel = new();
+
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
     public static byte[] Marshal(IMessage message, MarshalOptions options = default)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -28,6 +38,8 @@ public static class OmniBufProtobuf
         }
     }
 
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
     public static void Marshal(IBufferWriter<byte> writer, IMessage message, MarshalOptions options = default)
     {
         ArgumentNullException.ThrowIfNull(writer);
@@ -44,6 +56,8 @@ public static class OmniBufProtobuf
         }
     }
 
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
     public static void Marshal(OmniBufEncoder encoder, IMessage message, MarshalOptions options = default)
     {
         ArgumentNullException.ThrowIfNull(encoder);
@@ -67,30 +81,46 @@ public static class OmniBufProtobuf
         EncodeMessage(encoder, message, options.Deterministic, depth: 0);
     }
 
-    public static void Unmarshal(ReadOnlySpan<byte> data, IMessage target)
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
+    public static void Unmarshal(ReadOnlySpan<byte> data, IMessage target) =>
+        Unmarshal(data, target, UnmarshalOptions.Default);
+
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
+    public static void Unmarshal(ReadOnlySpan<byte> data, IMessage target, UnmarshalOptions options)
     {
         ArgumentNullException.ThrowIfNull(target);
+        options.ValidateMessageLength(data.Length);
         EnsureDescriptorSupported(target.Descriptor);
-        DecodeMessage(data, target, depth: 0, maxDepth: OmniBufConstants.MaxNestingDepth, merge: false);
+        DecodeMessage(data, target, depth: 0, options: options, merge: false);
     }
 
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
     public static T Unmarshal<T>(ReadOnlySpan<byte> data)
+        where T : IMessage, new() =>
+        Unmarshal<T>(data, UnmarshalOptions.Default);
+
+    [RequiresUnreferencedCode(TrimWarningMessage)]
+    [RequiresDynamicCode(AotWarningMessage)]
+    public static T Unmarshal<T>(ReadOnlySpan<byte> data, UnmarshalOptions options)
         where T : IMessage, new()
     {
         var msg = new T();
-        Unmarshal(data, msg);
+        Unmarshal(data, msg, options);
         return msg;
     }
 
     private static void EnsureDescriptorSupported(MessageDescriptor md)
     {
-        if (ValidatedDescriptors.ContainsKey(md))
+        if (ValidatedDescriptors.TryGetValue(md, out _))
         {
             return;
         }
 
         ValidateDescriptorGraph(md, new HashSet<string>(StringComparer.Ordinal));
-        ValidatedDescriptors[md] = true;
+        ValidatedDescriptors.AddOrUpdate(md, ValidatedSentinel);
     }
 
     private static void ValidateDescriptorGraph(MessageDescriptor md, HashSet<string> visited)
@@ -666,9 +696,10 @@ public static class OmniBufProtobuf
         ReadOnlySpan<byte> data,
         IMessage target,
         int depth,
-        int maxDepth,
+        UnmarshalOptions options,
         bool merge)
     {
+        int maxDepth = options.MaxNestingDepth;
         if (depth > maxDepth)
         {
             throw new OmniBufException($"omnibuf: nesting depth {depth} exceeds maximum {maxDepth}");
@@ -694,7 +725,7 @@ public static class OmniBufProtobuf
             (uint fnumU, OmniBufWireType wt) = OmniBufDecoder.ReadTag(data, ref pos);
             if (fnumU == 0)
             {
-                SchemaMeta.ValidateField0(data, ref pos, wt, depth, maxDepth);
+                SchemaMeta.ValidateField0(data, ref pos, wt, depth, options);
                 continue;
             }
 
@@ -702,7 +733,7 @@ public static class OmniBufProtobuf
             FieldDescriptor? fd = md.FindFieldByNumber(fnum);
             if (fd is null)
             {
-                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                 continue;
             }
 
@@ -715,7 +746,7 @@ public static class OmniBufProtobuf
             {
                 if (wt != OmniBufWireType.Map)
                 {
-                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                     continue;
                 }
 
@@ -738,6 +769,7 @@ public static class OmniBufProtobuf
                     throw new OmniBufException($"omnibuf: WireMap header mismatch on {fd.FullName}");
                 }
 
+                options.ValidateCollectionCount(count);
                 var dict = (IDictionary)fd.Accessor.GetValue(target);
                 if (!alreadySeen)
                 {
@@ -760,7 +792,7 @@ public static class OmniBufProtobuf
                         else
                         {
                             IMessage childMsg = valFd.MessageType.Parser.ParseFrom(ByteString.Empty);
-                            DecodeMessage(sub, childMsg, depth + 2, maxDepth, merge: false);
+                            DecodeMessage(sub, childMsg, depth + 2, options, merge: false);
                             val = childMsg;
                         }
                     }
@@ -771,6 +803,8 @@ public static class OmniBufProtobuf
 
                     dict[key] = val;
                 }
+
+                options.ValidateCollectionCount(dict.Count);
 
                 if (p != body.Length)
                 {
@@ -784,7 +818,7 @@ public static class OmniBufProtobuf
             {
                 if (wt != OmniBufWireType.Array)
                 {
-                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                     continue;
                 }
 
@@ -808,6 +842,8 @@ public static class OmniBufProtobuf
                     list.Clear();
                 }
 
+                options.ValidateCollectionCount((long)list.Count + count);
+
                 FieldType resolvedElemWrapperFt = default;
                 bool isElemWrapper = elemWt == OmniBufWireType.SubMsg && TryGetWrapperFieldType(fd.MessageType, out resolvedElemWrapperFt);
                 for (int i = 0; i < count; i++)
@@ -822,7 +858,7 @@ public static class OmniBufProtobuf
                         else
                         {
                             IMessage elemMsg = fd.MessageType.Parser.ParseFrom(ByteString.Empty);
-                            DecodeMessage(sub, elemMsg, depth + 2, maxDepth, merge: false);
+                            DecodeMessage(sub, elemMsg, depth + 2, options, merge: false);
                             list.Add(elemMsg);
                         }
                     }
@@ -844,7 +880,7 @@ public static class OmniBufProtobuf
             {
                 if (wt != OmniBufWireType.BoolFalse && wt != OmniBufWireType.BoolTrue)
                 {
-                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                    OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                     continue;
                 }
 
@@ -856,7 +892,7 @@ public static class OmniBufProtobuf
             OmniBufWireType expectedWt = ScalarWireType(fd.FieldType);
             if (wt != expectedWt)
             {
-                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, maxDepth);
+                OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
                 continue;
             }
 
@@ -877,12 +913,12 @@ public static class OmniBufProtobuf
                 if (subMsg is null || !fieldAlreadySeen)
                 {
                     subMsg = fd.MessageType.Parser.ParseFrom(ByteString.Empty);
-                    DecodeMessage(subBytes, subMsg, depth + 1, maxDepth, merge: false);
+                    DecodeMessage(subBytes, subMsg, depth + 1, options, merge: false);
                     fd.Accessor.SetValue(target, subMsg);
                 }
                 else
                 {
-                    DecodeMessage(subBytes, subMsg, depth + 1, maxDepth, merge: true);
+                    DecodeMessage(subBytes, subMsg, depth + 1, options, merge: true);
                 }
 
                 continue;

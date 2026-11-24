@@ -3,7 +3,7 @@
     <RootNamespace>OmniBuf</RootNamespace>
     <AssemblyName>OmniBuf</AssemblyName>
     <PackageId>OmniBuf</PackageId>
-    <Version>0.1.4</Version>
+    <Version>0.1.5</Version>
     <Authors>OmniBuf Contributors</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <Description>Self-delimiting, SIMD-friendly binary serialization format for .NET 8.</Description>
@@ -13,6 +13,12 @@
     <RepositoryType>git</RepositoryType>
     <PackageTags>omnibuf;protobuf;serialization;binary;wire-format</PackageTags>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <Deterministic>true</Deterministic>
   </PropertyGroup>
 
   <ItemGroup>

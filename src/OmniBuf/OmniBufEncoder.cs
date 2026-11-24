@@ -24,6 +24,7 @@ public sealed class OmniBufEncoder
     private int _pos;
     private int[] _containerStack;
     private int _depth;
+    private readonly int _maxDepth;
     private bool _inUse;
 
     public static OmniBufEncoder RentThreadLocal(out bool rented)
@@ -65,15 +66,18 @@ public sealed class OmniBufEncoder
         }
     }
 
-    public OmniBufEncoder(int initialCapacity = InitialBufferCapacity)
+    public OmniBufEncoder(int initialCapacity = InitialBufferCapacity, int maxDepth = OmniBufConstants.MaxNestingDepth)
     {
         if (initialCapacity < 16)
         {
             initialCapacity = 16;
         }
 
+        ArgumentOutOfRangeException.ThrowIfNegative(maxDepth);
+
         _buf = new byte[initialCapacity];
         _containerStack = new int[InitialStackCapacity];
+        _maxDepth = maxDepth;
     }
 
     public int Length => _pos;
@@ -81,6 +85,8 @@ public sealed class OmniBufEncoder
     public int Capacity => _buf.Length;
 
     public int ContainerDepth => _depth;
+
+    public int MaxDepth => _maxDepth;
 
     public ReadOnlySpan<byte> WrittenSpan => _buf.AsSpan(0, _pos);
 
@@ -484,6 +490,11 @@ public sealed class OmniBufEncoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void BeginContainer()
     {
+        if (_depth >= _maxDepth)
+        {
+            ThrowMaxDepthExceeded(_depth + 1, _maxDepth);
+        }
+
         if (_depth == _containerStack.Length)
         {
             GrowContainerStack();
@@ -514,6 +525,11 @@ public sealed class OmniBufEncoder
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void BeginContainerLarge()
     {
+        if (_depth >= _maxDepth)
+        {
+            ThrowMaxDepthExceeded(_depth + 1, _maxDepth);
+        }
+
         if (_depth == _containerStack.Length)
         {
             GrowContainerStack();
@@ -524,6 +540,10 @@ public sealed class OmniBufEncoder
         _buf.AsSpan(_pos, 4).Clear();
         _pos += 4;
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowMaxDepthExceeded(int depth, int maxDepth) =>
+        throw new OmniBufException($"omnibuf: encode nesting depth {depth} exceeds maximum {maxDepth}");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void GrowContainerStack()
