@@ -1,0 +1,27 @@
+edition = "2023";
+
+package omnibuf.test.ed2023imp;
+
+option csharp_namespace = "OmniBuf.Tests.Editions2023Implicit";
+option features.field_presence = IMPLICIT;
+option features.repeated_field_encoding = EXPANDED;
+option features.json_format = LEGACY_BEST_EFFORT;
+option features.message_encoding = DELIMITED;
+
+message Ed2023ImpChild {
+  int32 count = 1;
+  string tag = 2 [features.field_presence = EXPLICIT];
+}
+
+message Ed2023ImpEnvelope {
+  int32 imp_default_i32 = 1;
+  bool imp_default_bool = 2;
+  string imp_default_str = 3;
+  int32 exp_override_i32 = 4 [features.field_presence = EXPLICIT];
+  bool exp_override_bool = 5 [features.field_presence = EXPLICIT];
+  repeated int32 nums = 6;
+  Ed2023ImpChild delim_default_child = 7;
+  Ed2023ImpChild len_override_child = 8 [features.message_encoding = LENGTH_PREFIXED];
+  repeated Ed2023ImpChild rep_delim_children = 9;
+  map<string, Ed2023ImpChild> map_delim_children = 10;
+}

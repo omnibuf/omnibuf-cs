@@ -3,7 +3,7 @@
     <RootNamespace>OmniBuf</RootNamespace>
     <AssemblyName>OmniBuf</AssemblyName>
     <PackageId>OmniBuf</PackageId>
-    <Version>0.1.7</Version>
+    <Version>0.1.8</Version>
     <Authors>OmniBuf Contributors</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <Description>Self-delimiting, SIMD-friendly binary serialization format for .NET 8.</Description>

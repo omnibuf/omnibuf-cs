@@ -9,6 +9,7 @@ namespace OmniBuf.ProtocGen;
 public static class Program
 {
     private const ulong FeatureProto3Optional = 1UL;
+    private const ulong FeatureSupportsEditions = 2UL;
     private const int MaxFieldNumber = 536_870_911;
 
     private static readonly HashSet<string> ReservedMemberNames = new(StringComparer.Ordinal)
@@ -81,20 +82,30 @@ public static class Program
         IReadOnlyList<string> filesToGenerate,
         IReadOnlyList<FileDescriptorProto> protoFiles)
     {
-        Dictionary<string, TypeSymbol> symbolTable = BuildSymbolTable(protoFiles);
+        Dictionary<string, bool> closedEnums = EditionResolver.BuildClosedEnumMap(protoFiles);
+        var normalizedFiles = new List<FileDescriptorProto>(protoFiles.Count);
+        var originalByName = new Dictionary<string, FileDescriptorProto>(protoFiles.Count, StringComparer.Ordinal);
+        foreach (FileDescriptorProto rawFile in protoFiles)
+        {
+            originalByName[rawFile.Name] = rawFile;
+            normalizedFiles.Add(EditionResolver.NormalizeForCodeGen(rawFile));
+        }
+
+        Dictionary<string, TypeSymbol> symbolTable = BuildSymbolTable(normalizedFiles, originalByName);
         var generatedFiles = new List<(string Name, string Content)>();
         var targetSet = new HashSet<string>(filesToGenerate, StringComparer.Ordinal);
         var validatedMessages = new HashSet<string>(StringComparer.Ordinal);
         var usedOutputNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (FileDescriptorProto file in protoFiles)
+        foreach (FileDescriptorProto file in normalizedFiles)
         {
             if (!targetSet.Contains(file.Name))
             {
                 continue;
             }
 
-            string? validationError = ValidateFile(file, symbolTable, validatedMessages);
+            FileDescriptorProto originalFile = originalByName[file.Name];
+            string? validationError = ValidateFile(originalFile, file, symbolTable, closedEnums, validatedMessages);
             if (validationError is not null)
             {
                 return (validationError, new List<(string Name, string Content)>());
@@ -149,7 +160,11 @@ public static class Program
             }
 
             cos.WriteTag(2, WireFormat.WireType.Varint);
-            cos.WriteUInt64(FeatureProto3Optional);
+            cos.WriteUInt64(FeatureProto3Optional | FeatureSupportsEditions);
+            cos.WriteTag(3, WireFormat.WireType.Varint);
+            cos.WriteInt32(EditionResolver.MinimumSupportedEdition);
+            cos.WriteTag(4, WireFormat.WireType.Varint);
+            cos.WriteInt32(EditionResolver.MaximumSupportedEdition);
 
             foreach ((string name, string content) in files)
             {
@@ -179,6 +194,7 @@ public static class Program
         public required string CSharpSpanViewFullName { get; init; }
         public required string SimpleName { get; init; }
         public required bool IsProto2 { get; init; }
+        public required FileDescriptorProto SourceFile { get; init; }
         public DescriptorProto? Message { get; init; }
         public EnumDescriptorProto? Enum { get; init; }
         public bool IsMapEntry => Message?.Options?.MapEntry == true;
@@ -187,11 +203,14 @@ public static class Program
     private static bool IsProto2File(FileDescriptorProto file) =>
         !string.Equals(file.Syntax, "proto3", StringComparison.Ordinal);
 
-    private static Dictionary<string, TypeSymbol> BuildSymbolTable(IReadOnlyList<FileDescriptorProto> files)
+    private static Dictionary<string, TypeSymbol> BuildSymbolTable(
+        IReadOnlyList<FileDescriptorProto> files,
+        IReadOnlyDictionary<string, FileDescriptorProto> originalByName)
     {
         var table = new Dictionary<string, TypeSymbol>(StringComparer.Ordinal);
         foreach (FileDescriptorProto file in files)
         {
+            FileDescriptorProto sourceFile = originalByName[file.Name];
             bool isProto2 = IsProto2File(file);
             string ns = GetCSharpNamespace(file);
             string protoPrefix = string.IsNullOrEmpty(file.Package) ? string.Empty : "." + file.Package;
@@ -208,13 +227,14 @@ public static class Program
                     CSharpSpanViewFullName = csPrefix + en.Name,
                     SimpleName = en.Name,
                     IsProto2 = isProto2,
+                    SourceFile = sourceFile,
                     Enum = en,
                 };
             }
 
             foreach (DescriptorProto msg in file.MessageType)
             {
-                RegisterMessageSymbols(table, msg, protoPrefix, csPrefix, isNested: false, isProto2: isProto2);
+                RegisterMessageSymbols(table, msg, protoPrefix, csPrefix, isNested: false, isProto2: isProto2, sourceFile: sourceFile);
             }
         }
 
@@ -227,7 +247,8 @@ public static class Program
         string protoParent,
         string csParent,
         bool isNested,
-        bool isProto2)
+        bool isProto2,
+        FileDescriptorProto sourceFile)
     {
         string protoName = $"{protoParent}.{msg.Name}";
         string csName = isNested ? $"{csParent}Types.{msg.Name}" : $"{csParent}{msg.Name}";
@@ -242,6 +263,7 @@ public static class Program
             CSharpSpanViewFullName = csSpanViewName,
             SimpleName = msg.Name,
             IsProto2 = isProto2,
+            SourceFile = sourceFile,
             Message = msg,
         };
 
@@ -256,13 +278,14 @@ public static class Program
                 CSharpSpanViewFullName = $"{csName}.Types.{en.Name}",
                 SimpleName = en.Name,
                 IsProto2 = isProto2,
+                SourceFile = sourceFile,
                 Enum = en,
             };
         }
 
         foreach (DescriptorProto nested in msg.NestedType)
         {
-            RegisterMessageSymbols(table, nested, protoName, csName + ".", isNested: true, isProto2: isProto2);
+            RegisterMessageSymbols(table, nested, protoName, csName + ".", isNested: true, isProto2: isProto2, sourceFile: sourceFile);
         }
     }
 
@@ -287,27 +310,30 @@ public static class Program
             or "google.protobuf.ExtensionRangeOptions";
 
     private static string? ValidateFile(
-        FileDescriptorProto file,
+        FileDescriptorProto originalFile,
+        FileDescriptorProto normalizedFile,
         Dictionary<string, TypeSymbol> symbols,
+        IReadOnlyDictionary<string, bool> closedEnums,
         HashSet<string> validatedMessages)
     {
-        if (string.Equals(file.Syntax, "editions", StringComparison.Ordinal))
+        string? editionErr = EditionResolver.ValidateEditionFile(originalFile, closedEnums);
+        if (editionErr is not null)
         {
-            return $"omnibuf: Protobuf editions syntax in {file.Name} is not supported";
+            return editionErr;
         }
 
-        foreach (FieldDescriptorProto ext in file.Extension)
+        foreach (FieldDescriptorProto ext in originalFile.Extension)
         {
             if (!IsDescriptorOptionsExtendee(ext.Extendee))
             {
-                return $"omnibuf: Protobuf extensions in {file.Name} are not supported";
+                return $"omnibuf: Protobuf extensions in {originalFile.Name} are not supported";
             }
         }
 
-        string protoPrefix = string.IsNullOrEmpty(file.Package) ? string.Empty : "." + file.Package;
-        foreach (DescriptorProto msg in file.MessageType)
+        string protoPrefix = string.IsNullOrEmpty(normalizedFile.Package) ? string.Empty : "." + normalizedFile.Package;
+        foreach (DescriptorProto msg in normalizedFile.MessageType)
         {
-            string? err = ValidateMessage($"{protoPrefix}.{msg.Name}", msg, symbols, validatedMessages);
+            string? err = ValidateMessage($"{protoPrefix}.{msg.Name}", msg, originalFile, symbols, closedEnums, validatedMessages);
             if (err is not null)
             {
                 return err;
@@ -320,13 +346,17 @@ public static class Program
     private static string? ValidateMessage(
         string protoFullName,
         DescriptorProto msg,
+        FileDescriptorProto sourceFile,
         Dictionary<string, TypeSymbol> symbols,
+        IReadOnlyDictionary<string, bool> closedEnums,
         HashSet<string> validatedMessages)
     {
         if (!validatedMessages.Add(protoFullName))
         {
             return null;
         }
+
+        bool isEditions = EditionResolver.IsEditionsFile(sourceFile);
 
         if (msg.Extension.Count > 0 || msg.ExtensionRange.Count > 0)
         {
@@ -340,7 +370,7 @@ public static class Program
                 return $"omnibuf: invalid field number {f.Number} on {protoFullName.TrimStart('.')}.{f.Name}";
             }
 
-            if (f.Type == FieldDescriptorProto.Types.Type.Group)
+            if (f.Type == FieldDescriptorProto.Types.Type.Group && !isEditions)
             {
                 return $"omnibuf: Protobuf group field {protoFullName.TrimStart('.')}.{f.Name} is not supported";
             }
@@ -350,12 +380,39 @@ public static class Program
                 return $"omnibuf: custom non-zero default value '{f.DefaultValue}' on {protoFullName.TrimStart('.')}.{f.Name} is not supported";
             }
 
-            if (f.Type == FieldDescriptorProto.Types.Type.Message
+            if (f.Type == FieldDescriptorProto.Types.Type.Enum
+                && symbols.TryGetValue(f.TypeName, out TypeSymbol? enumRefSym)
+                && EditionResolver.IsEditionsFile(enumRefSym.SourceFile)
+                && !EditionResolver.IsSupportedEdition(enumRefSym.SourceFile.Edition))
+            {
+                return $"omnibuf: unsupported protobuf edition {enumRefSym.SourceFile.Edition} in {enumRefSym.SourceFile.Name}";
+            }
+
+            if ((f.Type == FieldDescriptorProto.Types.Type.Message
+                    || (isEditions && f.Type == FieldDescriptorProto.Types.Type.Group))
                 && !WrapperTypes.ContainsKey(f.TypeName)
                 && symbols.TryGetValue(f.TypeName, out TypeSymbol? refSym)
                 && refSym.Message is not null)
             {
-                string? childErr = ValidateMessage(refSym.ProtoFullName, refSym.Message, symbols, validatedMessages);
+                if (!ReferenceEquals(refSym.SourceFile, sourceFile))
+                {
+                    string? refEditionErr = EditionResolver.ValidateEditionMessageInFile(
+                        refSym.SourceFile,
+                        refSym.ProtoFullName,
+                        closedEnums);
+                    if (refEditionErr is not null)
+                    {
+                        return refEditionErr;
+                    }
+                }
+
+                string? childErr = ValidateMessage(
+                    refSym.ProtoFullName,
+                    refSym.Message,
+                    refSym.SourceFile,
+                    symbols,
+                    closedEnums,
+                    validatedMessages);
                 if (childErr is not null)
                 {
                     return childErr;
@@ -365,7 +422,7 @@ public static class Program
 
         foreach (DescriptorProto nested in msg.NestedType)
         {
-            string? nestedErr = ValidateMessage($"{protoFullName}.{nested.Name}", nested, symbols, validatedMessages);
+            string? nestedErr = ValidateMessage($"{protoFullName}.{nested.Name}", nested, sourceFile, symbols, closedEnums, validatedMessages);
             if (nestedErr is not null)
             {
                 return nestedErr;
@@ -785,7 +842,7 @@ public static class Program
                 }
                 else if (childMsgSym is not null)
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (this.{prop} is not null && this.{prop}.BuildOmniBufValueSchemaMeta(depth + 2, active) is {{ }} sm_{fnum})");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (this.{prop} is {{ }} sv_{fnum} && sv_{fnum}.BuildOmniBufValueSchemaMeta(depth + 2, active) is {{ }} sm_{fnum})");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            {{");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                meta.Children[{fnum}u] = sm_{fnum};");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            }}");
@@ -942,7 +999,7 @@ public static class Program
                 }
                 else if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{oneofPascal}Case == {oneofPascal}OneofCase.{prop} && this.{prop} is not null) total += 3 + this.{prop}.EstimateOmniBufMinSize(depth + 1);");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{oneofPascal}Case == {oneofPascal}OneofCase.{prop} && this.{prop} is {{ }} om_{f.Number}) total += 3 + om_{f.Number}.EstimateOmniBufMinSize(depth + 1);");
                 }
 
                 continue;
@@ -972,7 +1029,7 @@ public static class Program
             }
             else if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
             {
-                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop} is not null) total += 3 + this.{prop}.EstimateOmniBufMinSize(depth + 1);");
+                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop} is {{ }} sm_{f.Number}) total += 3 + sm_{f.Number}.EstimateOmniBufMinSize(depth + 1);");
             }
         }
 
@@ -1129,8 +1186,10 @@ public static class Program
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginSubMsgField({fnum}u);");
                     if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? oWrap))
                     {
-                        string wVal = oWrap.IsValueType ? $"this.{prop}!.Value" : $"this.{prop}";
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        OmniBufWrappers.Write{oWrap.MethodSuffix}Body(encoder, {wVal});");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (this.{prop} is {{ }} ow_{fnum})");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            OmniBufWrappers.Write{oWrap.MethodSuffix}Body(encoder, ow_{fnum});");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
                     }
                     else
                     {
@@ -1152,29 +1211,27 @@ public static class Program
             {
                 if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? sWrap))
                 {
-                    string checkNull = sWrap.IsValueType ? $"this.{prop}.HasValue" : $"this.{prop} is not null";
-                    string wVal = sWrap.IsValueType ? $"this.{prop}.Value" : $"this.{prop}";
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if ({checkNull})");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop} is {{ }} sw_{fnum})");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 1 > OmniBufConstants.MaxNestingDepth)");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            throw new OmniBufException($\"omnibuf: encode nesting depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginSubMsgField({fnum}u);");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        OmniBufWrappers.Write{sWrap.MethodSuffix}Body(encoder, {wVal});");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        OmniBufWrappers.Write{sWrap.MethodSuffix}Body(encoder, sw_{fnum});");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.EndSubMsg();");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
                 }
                 else
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop} is not null)");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop} is {{ }} msg_{fnum})");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 1 > OmniBufConstants.MaxNestingDepth)");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            throw new OmniBufException($\"omnibuf: encode nesting depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginSubMsgField({fnum}u, this.{prop}.EstimateOmniBufMinSize(0));");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        this.{prop}.EncodeOmniBufBody(encoder, deterministic, depth + 1);");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginSubMsgField({fnum}u, msg_{fnum}.EstimateOmniBufMinSize(0));");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        msg_{fnum}.EncodeOmniBufBody(encoder, deterministic, depth + 1);");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.EndSubMsg();");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
                 }
@@ -1733,17 +1790,11 @@ public static class Program
                     {
                         string oneofPascal = ToPascalCase(msg.OneofDecl[f.OneofIndex].Name);
                         string activeCheck = $"alreadySeen && this.{oneofPascal}Case == {oneofPascal}OneofCase.{prop}";
-                        string prevExpr = sWrap.IsValueType
-                            ? $"{activeCheck} && this.{prop}.HasValue ? this.{prop}.Value : {sWrap.DefaultExpr}"
-                            : $"{activeCheck} && this.{prop} is not null ? this.{prop} : {sWrap.DefaultExpr}";
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                {sWrap.ScalarCsType} prev = {prevExpr};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                {sWrap.ScalarCsType} prev = {activeCheck} && this.{prop} is {{ }} prevVal_{fnum} ? prevVal_{fnum} : {sWrap.DefaultExpr};");
                     }
                     else
                     {
-                        string prevExpr = sWrap.IsValueType
-                            ? $"alreadySeen && this.{prop}.HasValue ? this.{prop}.Value : {sWrap.DefaultExpr}"
-                            : $"alreadySeen && this.{prop} is not null ? this.{prop} : {sWrap.DefaultExpr}";
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                {sWrap.ScalarCsType} prev = {prevExpr};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                {sWrap.ScalarCsType} prev = alreadySeen && this.{prop} is {{ }} prevVal_{fnum} ? prevVal_{fnum} : {sWrap.DefaultExpr};");
                     }
 
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                this.{prop} = OmniBufWrappers.Decode{sWrap.MethodSuffix}(sub, prev, depth + 1, maxDepth);");
@@ -1754,23 +1805,26 @@ public static class Program
                     if (IsRealOneof(f))
                     {
                         string oneofPascal = ToPascalCase(msg.OneofDecl[f.OneofIndex].Name);
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                if (this.{oneofPascal}Case != {oneofPascal}OneofCase.{prop} || this.{prop} is null)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                if (this.{oneofPascal}Case != {oneofPascal}OneofCase.{prop} || this.{prop} is not {{ }} existing_{fnum})");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                {{");
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    this.{prop} = new {subCs}();");
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    this.{prop}.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: false);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    var subMsg_{fnum} = new {subCs}();");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    this.{prop} = subMsg_{fnum};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    subMsg_{fnum}.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: false);");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                }}");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                else");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                {{");
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    this.{prop}.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    existing_{fnum}.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                }}");
                     }
                     else
                     {
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                if (this.{prop} is null)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                var subMsg_{fnum} = this.{prop};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                if (subMsg_{fnum} is null)");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                {{");
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    this.{prop} = new {subCs}();");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    subMsg_{fnum} = new {subCs}();");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    this.{prop} = subMsg_{fnum};");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                }}");
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                this.{prop}.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                subMsg_{fnum}.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);");
                     }
                 }
 

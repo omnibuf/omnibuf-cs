@@ -431,9 +431,288 @@ public static class Program
                     }
                 }
 
+            case "omnibuf.conformance.TestEditions2023":
+                return HandlePluginEditions2023(req, opts);
+
+            case "omnibuf.conformance.TestEditions2024":
+                return HandlePluginEditions2024(req, opts);
+
+            case "omnibuf.conformance.TestEditions2026":
+                return HandlePluginEditions2026(req, opts);
+
             default:
-                return new ConformanceResponseFrame { Skipped = "plugin tier generated for PeerUpdate and TestAllTypes" };
+                return new ConformanceResponseFrame { Skipped = "plugin tier generated for PeerUpdate, TestAllTypes, and TestEditions2023/2024/2026" };
         }
+    }
+
+    private static ConformanceResponseFrame HandlePluginEditions2023(ConformanceRequestFrame req, MarshalOptions opts)
+    {
+        var msg = new TestEditions2023
+        {
+            ExplicitInt = 999,
+            ExplicitBool = true,
+            ExplicitString = "stale",
+            ExplicitBytes = ByteString.CopyFrom(0xff),
+            ExplicitDouble = 9.5,
+            Status = Editions2023Status.Active,
+            ImplicitCount = 999,
+            ImplicitFlag = true,
+            Child = new Editions2023Child { Id = 999, Note = "stale-child" },
+            DelimitedChild = new Editions2023Child { Id = 888, Note = "stale-delim" },
+            ChoiceText = "stale-choice",
+        };
+        msg.PackedVals.Add(999);
+        msg.ExpandedVals.Add(888);
+        msg.Scores["stale"] = 999;
+
+        try
+        {
+            msg.UnmarshalOmniBuf(req.OmniBufPayload);
+        }
+        catch (OmniBufException ex)
+        {
+            return new ConformanceResponseFrame { ParseError = ex.Message };
+        }
+
+        var op = new OpaqueTestEditions2023(req.OmniBufPayload);
+        if (op.HasExplicitInt != msg.HasExplicitInt
+            || op.ExplicitInt != msg.ExplicitInt
+            || op.HasExplicitBool != msg.HasExplicitBool
+            || op.ExplicitBool != msg.ExplicitBool
+            || op.HasExplicitString != msg.HasExplicitString
+            || op.ExplicitString != msg.ExplicitString
+            || op.HasExplicitBytes != msg.HasExplicitBytes
+            || !op.ExplicitBytes.AsSpan().SequenceEqual(msg.ExplicitBytes.Span)
+            || op.HasExplicitDouble != msg.HasExplicitDouble
+            || BitConverter.DoubleToUInt64Bits(op.ExplicitDouble) != BitConverter.DoubleToUInt64Bits(msg.ExplicitDouble)
+            || op.HasStatus != msg.HasStatus
+            || op.Status != msg.Status
+            || op.ImplicitCount != msg.ImplicitCount
+            || op.ImplicitFlag != msg.ImplicitFlag
+            || !ChildMatches2023(op.Child, msg.Child)
+            || !ChildMatches2023(op.DelimitedChild, msg.DelimitedChild)
+            || !op.PackedVals.SequenceEqual(msg.PackedVals)
+            || !op.ExpandedVals.SequenceEqual(msg.ExpandedVals)
+            || !MapMatches(op.Scores, msg.Scores)
+            || (msg.ChoiceCase == TestEditions2023.ChoiceOneofCase.ChoiceInt) != op.HasChoiceInt
+            || (op.HasChoiceInt && op.ChoiceInt != msg.ChoiceInt)
+            || (msg.ChoiceCase == TestEditions2023.ChoiceOneofCase.ChoiceText) != op.HasChoiceText
+            || (op.HasChoiceText && op.ChoiceText != msg.ChoiceText)
+            || (msg.ChoiceCase == TestEditions2023.ChoiceOneofCase.ChoiceFlag) != op.HasChoiceFlag
+            || (op.HasChoiceFlag && op.ChoiceFlag != msg.ChoiceFlag)
+            || (msg.ChoiceCase == TestEditions2023.ChoiceOneofCase.ChoiceChild) != (op.ChoiceChild is not null)
+            || (op.ChoiceChild is not null && !ChildMatches2023(op.ChoiceChild, msg.ChoiceChild)))
+        {
+            return new ConformanceResponseFrame { ParseError = "opaque TestEditions2023 getter mismatch with decoded message" };
+        }
+
+        try
+        {
+            return new ConformanceResponseFrame { OmniBufPayload = msg.MarshalOmniBuf(opts) };
+        }
+        catch (OmniBufException ex)
+        {
+            return new ConformanceResponseFrame { SerializeError = ex.Message };
+        }
+    }
+
+    private static ConformanceResponseFrame HandlePluginEditions2024(ConformanceRequestFrame req, MarshalOptions opts)
+    {
+        var msg = new TestEditions2024
+        {
+            ExplicitInt = 999,
+            ExplicitBool = true,
+            ExplicitString = "stale",
+            ExplicitBytes = ByteString.CopyFrom(0xff),
+            ExplicitDouble = 9.5,
+            Status = Editions2024Status.Active,
+            ImplicitCount = 999,
+            ImplicitFlag = true,
+            Child = new Editions2024Child { Id = 999, Note = "stale-child" },
+            DelimitedChild = new Editions2024Child { Id = 888, Note = "stale-delim" },
+            ChoiceText = "stale-choice",
+        };
+        msg.PackedVals.Add(999);
+        msg.ExpandedVals.Add(888);
+        msg.Scores["stale"] = 999;
+
+        try
+        {
+            msg.UnmarshalOmniBuf(req.OmniBufPayload);
+        }
+        catch (OmniBufException ex)
+        {
+            return new ConformanceResponseFrame { ParseError = ex.Message };
+        }
+
+        var op = new OpaqueTestEditions2024(req.OmniBufPayload);
+        if (op.HasExplicitInt != msg.HasExplicitInt
+            || op.ExplicitInt != msg.ExplicitInt
+            || op.HasExplicitBool != msg.HasExplicitBool
+            || op.ExplicitBool != msg.ExplicitBool
+            || op.HasExplicitString != msg.HasExplicitString
+            || op.ExplicitString != msg.ExplicitString
+            || op.HasExplicitBytes != msg.HasExplicitBytes
+            || !op.ExplicitBytes.AsSpan().SequenceEqual(msg.ExplicitBytes.Span)
+            || op.HasExplicitDouble != msg.HasExplicitDouble
+            || BitConverter.DoubleToUInt64Bits(op.ExplicitDouble) != BitConverter.DoubleToUInt64Bits(msg.ExplicitDouble)
+            || op.HasStatus != msg.HasStatus
+            || op.Status != msg.Status
+            || op.ImplicitCount != msg.ImplicitCount
+            || op.ImplicitFlag != msg.ImplicitFlag
+            || !ChildMatches2024(op.Child, msg.Child)
+            || !ChildMatches2024(op.DelimitedChild, msg.DelimitedChild)
+            || !op.PackedVals.SequenceEqual(msg.PackedVals)
+            || !op.ExpandedVals.SequenceEqual(msg.ExpandedVals)
+            || !MapMatches(op.Scores, msg.Scores)
+            || (msg.ChoiceCase == TestEditions2024.ChoiceOneofCase.ChoiceInt) != op.HasChoiceInt
+            || (op.HasChoiceInt && op.ChoiceInt != msg.ChoiceInt)
+            || (msg.ChoiceCase == TestEditions2024.ChoiceOneofCase.ChoiceText) != op.HasChoiceText
+            || (op.HasChoiceText && op.ChoiceText != msg.ChoiceText)
+            || (msg.ChoiceCase == TestEditions2024.ChoiceOneofCase.ChoiceFlag) != op.HasChoiceFlag
+            || (op.HasChoiceFlag && op.ChoiceFlag != msg.ChoiceFlag)
+            || (msg.ChoiceCase == TestEditions2024.ChoiceOneofCase.ChoiceChild) != (op.ChoiceChild is not null)
+            || (op.ChoiceChild is not null && !ChildMatches2024(op.ChoiceChild, msg.ChoiceChild)))
+        {
+            return new ConformanceResponseFrame { ParseError = "opaque TestEditions2024 getter mismatch with decoded message" };
+        }
+
+        try
+        {
+            return new ConformanceResponseFrame { OmniBufPayload = msg.MarshalOmniBuf(opts) };
+        }
+        catch (OmniBufException ex)
+        {
+            return new ConformanceResponseFrame { SerializeError = ex.Message };
+        }
+    }
+
+    private static ConformanceResponseFrame HandlePluginEditions2026(ConformanceRequestFrame req, MarshalOptions opts)
+    {
+        var msg = new TestEditions2026
+        {
+            ExplicitInt = 999,
+            ExplicitBool = true,
+            ExplicitString = "stale",
+            ExplicitBytes = ByteString.CopyFrom(0xff),
+            ExplicitDouble = 9.5,
+            Status = Editions2026Status.Active,
+            ImplicitCount = 999,
+            ImplicitFlag = true,
+            Child = new Editions2026Child { Id = 999, Note = "stale-child" },
+            DelimitedChild = new Editions2026Child { Id = 888, Note = "stale-delim" },
+            ChoiceText = "stale-choice",
+        };
+        msg.PackedVals.Add(999);
+        msg.ExpandedVals.Add(888);
+        msg.Scores["stale"] = 999;
+
+        try
+        {
+            msg.UnmarshalOmniBuf(req.OmniBufPayload);
+        }
+        catch (OmniBufException ex)
+        {
+            return new ConformanceResponseFrame { ParseError = ex.Message };
+        }
+
+        var op = new OpaqueTestEditions2026(req.OmniBufPayload);
+        if (op.HasExplicitInt != msg.HasExplicitInt
+            || op.ExplicitInt != msg.ExplicitInt
+            || op.HasExplicitBool != msg.HasExplicitBool
+            || op.ExplicitBool != msg.ExplicitBool
+            || op.HasExplicitString != msg.HasExplicitString
+            || op.ExplicitString != msg.ExplicitString
+            || op.HasExplicitBytes != msg.HasExplicitBytes
+            || !op.ExplicitBytes.AsSpan().SequenceEqual(msg.ExplicitBytes.Span)
+            || op.HasExplicitDouble != msg.HasExplicitDouble
+            || BitConverter.DoubleToUInt64Bits(op.ExplicitDouble) != BitConverter.DoubleToUInt64Bits(msg.ExplicitDouble)
+            || op.HasStatus != msg.HasStatus
+            || op.Status != msg.Status
+            || op.ImplicitCount != msg.ImplicitCount
+            || op.ImplicitFlag != msg.ImplicitFlag
+            || !ChildMatches2026(op.Child, msg.Child)
+            || !ChildMatches2026(op.DelimitedChild, msg.DelimitedChild)
+            || !op.PackedVals.SequenceEqual(msg.PackedVals)
+            || !op.ExpandedVals.SequenceEqual(msg.ExpandedVals)
+            || !MapMatches(op.Scores, msg.Scores)
+            || (msg.ChoiceCase == TestEditions2026.ChoiceOneofCase.ChoiceInt) != op.HasChoiceInt
+            || (op.HasChoiceInt && op.ChoiceInt != msg.ChoiceInt)
+            || (msg.ChoiceCase == TestEditions2026.ChoiceOneofCase.ChoiceText) != op.HasChoiceText
+            || (op.HasChoiceText && op.ChoiceText != msg.ChoiceText)
+            || (msg.ChoiceCase == TestEditions2026.ChoiceOneofCase.ChoiceFlag) != op.HasChoiceFlag
+            || (op.HasChoiceFlag && op.ChoiceFlag != msg.ChoiceFlag)
+            || (msg.ChoiceCase == TestEditions2026.ChoiceOneofCase.ChoiceChild) != (op.ChoiceChild is not null)
+            || (op.ChoiceChild is not null && !ChildMatches2026(op.ChoiceChild, msg.ChoiceChild)))
+        {
+            return new ConformanceResponseFrame { ParseError = "opaque TestEditions2026 getter mismatch with decoded message" };
+        }
+
+        try
+        {
+            return new ConformanceResponseFrame { OmniBufPayload = msg.MarshalOmniBuf(opts) };
+        }
+        catch (OmniBufException ex)
+        {
+            return new ConformanceResponseFrame { SerializeError = ex.Message };
+        }
+    }
+
+    private static bool ChildMatches2023(OpaqueEditions2023Child? op, Editions2023Child? msg)
+    {
+        if (op is null || msg is null)
+        {
+            return op is null && msg is null;
+        }
+
+        return op.HasId == msg.HasId
+            && op.Id == msg.Id
+            && op.HasNote == msg.HasNote
+            && op.Note == msg.Note;
+    }
+
+    private static bool ChildMatches2024(OpaqueEditions2024Child? op, Editions2024Child? msg)
+    {
+        if (op is null || msg is null)
+        {
+            return op is null && msg is null;
+        }
+
+        return op.HasId == msg.HasId
+            && op.Id == msg.Id
+            && op.HasNote == msg.HasNote
+            && op.Note == msg.Note;
+    }
+
+    private static bool ChildMatches2026(OpaqueEditions2026Child? op, Editions2026Child? msg)
+    {
+        if (op is null || msg is null)
+        {
+            return op is null && msg is null;
+        }
+
+        return op.HasId == msg.HasId
+            && op.Id == msg.Id
+            && op.HasNote == msg.HasNote
+            && op.Note == msg.Note;
+    }
+
+    private static bool MapMatches(IReadOnlyDictionary<string, int> op, IDictionary<string, int> msg)
+    {
+        if (op.Count != msg.Count)
+        {
+            return false;
+        }
+
+        foreach (KeyValuePair<string, int> kv in msg)
+        {
+            if (!op.TryGetValue(kv.Key, out int val) || val != kv.Value)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static string? CheckSpliceAliasedPrefix(byte[] packet)
@@ -544,8 +823,125 @@ public static class Program
                     }
                 }
 
+            case "omnibuf.conformance.TestEditions2023":
+                {
+                    var msg = new TestEditions2023
+                    {
+                        ExplicitInt = 999,
+                        ExplicitBool = true,
+                        ExplicitString = "stale",
+                        ExplicitBytes = ByteString.CopyFrom(0xff),
+                        ExplicitDouble = 9.5,
+                        Status = Editions2023Status.Active,
+                        ImplicitCount = 999,
+                        ImplicitFlag = true,
+                        Child = new Editions2023Child { Id = 999, Note = "stale-child" },
+                        DelimitedChild = new Editions2023Child { Id = 888, Note = "stale-delim" },
+                        ChoiceText = "stale-choice",
+                    };
+                    msg.PackedVals.Add(999);
+                    msg.ExpandedVals.Add(888);
+                    msg.Scores["stale"] = 999;
+
+                    try
+                    {
+                        OmniBufProtobuf.Unmarshal(req.OmniBufPayload, msg);
+                    }
+                    catch (OmniBufException ex)
+                    {
+                        return new ConformanceResponseFrame { ParseError = ex.Message };
+                    }
+
+                    try
+                    {
+                        return new ConformanceResponseFrame { OmniBufPayload = OmniBufProtobuf.Marshal(msg, opts) };
+                    }
+                    catch (OmniBufException ex)
+                    {
+                        return new ConformanceResponseFrame { SerializeError = ex.Message };
+                    }
+                }
+
+            case "omnibuf.conformance.TestEditions2024":
+                {
+                    var msg = new TestEditions2024
+                    {
+                        ExplicitInt = 999,
+                        ExplicitBool = true,
+                        ExplicitString = "stale",
+                        ExplicitBytes = ByteString.CopyFrom(0xff),
+                        ExplicitDouble = 9.5,
+                        Status = Editions2024Status.Active,
+                        ImplicitCount = 999,
+                        ImplicitFlag = true,
+                        Child = new Editions2024Child { Id = 999, Note = "stale-child" },
+                        DelimitedChild = new Editions2024Child { Id = 888, Note = "stale-delim" },
+                        ChoiceText = "stale-choice",
+                    };
+                    msg.PackedVals.Add(999);
+                    msg.ExpandedVals.Add(888);
+                    msg.Scores["stale"] = 999;
+
+                    try
+                    {
+                        OmniBufProtobuf.Unmarshal(req.OmniBufPayload, msg);
+                    }
+                    catch (OmniBufException ex)
+                    {
+                        return new ConformanceResponseFrame { ParseError = ex.Message };
+                    }
+
+                    try
+                    {
+                        return new ConformanceResponseFrame { OmniBufPayload = OmniBufProtobuf.Marshal(msg, opts) };
+                    }
+                    catch (OmniBufException ex)
+                    {
+                        return new ConformanceResponseFrame { SerializeError = ex.Message };
+                    }
+                }
+
+            case "omnibuf.conformance.TestEditions2026":
+                {
+                    var msg = new TestEditions2026
+                    {
+                        ExplicitInt = 999,
+                        ExplicitBool = true,
+                        ExplicitString = "stale",
+                        ExplicitBytes = ByteString.CopyFrom(0xff),
+                        ExplicitDouble = 9.5,
+                        Status = Editions2026Status.Active,
+                        ImplicitCount = 999,
+                        ImplicitFlag = true,
+                        Child = new Editions2026Child { Id = 999, Note = "stale-child" },
+                        DelimitedChild = new Editions2026Child { Id = 888, Note = "stale-delim" },
+                        ChoiceText = "stale-choice",
+                    };
+                    msg.PackedVals.Add(999);
+                    msg.ExpandedVals.Add(888);
+                    msg.Scores["stale"] = 999;
+
+                    try
+                    {
+                        OmniBufProtobuf.Unmarshal(req.OmniBufPayload, msg);
+                    }
+                    catch (OmniBufException ex)
+                    {
+                        return new ConformanceResponseFrame { ParseError = ex.Message };
+                    }
+
+                    try
+                    {
+                        return new ConformanceResponseFrame { OmniBufPayload = OmniBufProtobuf.Marshal(msg, opts) };
+                    }
+                    catch (OmniBufException ex)
+                    {
+                        return new ConformanceResponseFrame { SerializeError = ex.Message };
+                    }
+                }
+
             default:
-                return new ConformanceResponseFrame { Skipped = "protobuf types tier exercises PeerUpdate and TestAllTypes" };
+                return new ConformanceResponseFrame { Skipped = "protobuf types tier exercises PeerUpdate, TestAllTypes, and TestEditions2023/2024/2026" };
         }
     }
 

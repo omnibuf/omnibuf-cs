@@ -1951,7 +1951,7 @@ public sealed partial class TestAllTypes
             meta.Fields[20u] = "f20_overflow_str";
             if (depth + 3 <= OmniBufConstants.MaxNestingDepth)
             {
-                if (this.F8SubMsg is not null && this.F8SubMsg.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_8)
+                if (this.F8SubMsg is { } sv_8 && sv_8.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_8)
                 {
                     meta.Children[8u] = sm_8;
                 }
@@ -2014,7 +2014,7 @@ public sealed partial class TestAllTypes
         int total = 0;
         total += this.F6String?.Length ?? 0;
         total += this.F7Bytes.Length;
-        if (this.F8SubMsg is not null) total += 3 + this.F8SubMsg.EstimateOmniBufMinSize(depth + 1);
+        if (this.F8SubMsg is { } sm_8) total += 3 + sm_8.EstimateOmniBufMinSize(depth + 1);
         for (int i = 0; i < this.F9StringArr.Count; i++) total += 1 + (this.F9StringArr[i]?.Length ?? 0);
         for (int i = 0; i < this.F11SubMsgArr.Count; i++) total += 2 + (this.F11SubMsgArr[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0);
         total += this.F20OverflowStr?.Length ?? 0;
@@ -2051,14 +2051,14 @@ public sealed partial class TestAllTypes
         encoder.WriteBoolField(5u, this.F5Bool);
         encoder.WriteStringField(6u, this.F6String);
         encoder.WriteBytesField(7u, this.F7Bytes.Span);
-        if (this.F8SubMsg is not null)
+        if (this.F8SubMsg is { } msg_8)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
-            encoder.BeginSubMsgField(8u, this.F8SubMsg.EstimateOmniBufMinSize(0));
-            this.F8SubMsg.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            encoder.BeginSubMsgField(8u, msg_8.EstimateOmniBufMinSize(0));
+            msg_8.EncodeOmniBufBody(encoder, deterministic, depth + 1);
             encoder.EndSubMsg();
         }
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
@@ -2197,11 +2197,13 @@ public sealed partial class TestAllTypes
                     bool alreadySeen = ((seenLow & (1UL << 8)) != 0) || merge;
                     seenLow |= (1UL << 8);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    if (this.F8SubMsg is null)
+                    var subMsg_8 = this.F8SubMsg;
+                    if (subMsg_8 is null)
                     {
-                        this.F8SubMsg = new global::Omnibuf.Conformance.AllTypesSubMsg();
+                        subMsg_8 = new global::Omnibuf.Conformance.AllTypesSubMsg();
+                        this.F8SubMsg = subMsg_8;
                     }
-                    this.F8SubMsg.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
+                    subMsg_8.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
                     break;
                 }
                 case 157UL:

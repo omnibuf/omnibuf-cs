@@ -1,0 +1,47 @@
+edition = "2026";
+
+package omnibuf.test.ed2026;
+
+import "google/protobuf/c_sharp_features.proto";
+import "google/protobuf/wrappers.proto";
+
+option csharp_namespace = "OmniBuf.Tests.Editions2026";
+option features.(pb.csharp).nullable_reference_types = true;
+option features.default_symbol_visibility = STRICT;
+option features.enforce_naming_style = STYLE2026;
+
+export enum Ed2026Tier {
+  ED2026_TIER_UNSPECIFIED = 0;
+  ED2026_TIER_CORE = 1;
+  ED2026_TIER_EDGE = 2;
+}
+
+export message Ed2026Item {
+  option features.enforce_proto_limits = PROTO_LIMITS2026;
+
+  int32 key = 1;
+  string value = 2;
+}
+
+export message Ed2026Payload {
+  option features.enforce_proto_limits = PROTO_LIMITS2026;
+
+  int32 seq = 1;
+  bool flag = 2;
+  string label = 3;
+  bytes raw = 4;
+  Ed2026Tier tier = 5;
+  int32 imp_counter = 6 [features.field_presence = IMPLICIT];
+  Ed2026Item primary = 7;
+  Ed2026Item secondary_delim = 8 [features.message_encoding = DELIMITED];
+  repeated Ed2026Item items_delim = 9 [features.message_encoding = DELIMITED];
+  map<string, Ed2026Item> lookup = 10;
+  google.protobuf.StringValue note = 11;
+
+  oneof variant {
+    int32 v_int = 12;
+    bool v_bool = 13;
+    Ed2026Item v_item = 14;
+    google.protobuf.StringValue v_wrap = 15;
+  }
+}

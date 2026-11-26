@@ -342,11 +342,11 @@ public sealed partial class OuterEnvelope
                 {
                     meta.Children[29u] = sw_29;
                 }
-                if (this.OptInner is not null && this.OptInner.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_34)
+                if (this.OptInner is { } sv_34 && sv_34.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_34)
                 {
                     meta.Children[34u] = sm_34;
                 }
-                if (this.CMsg is not null && this.CMsg.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_39)
+                if (this.CMsg is { } sv_39 && sv_39.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_39)
                 {
                     meta.Children[39u] = sm_39;
                 }
@@ -354,11 +354,11 @@ public sealed partial class OuterEnvelope
                 {
                     meta.Children[40u] = sw_40;
                 }
-                if (this.SingleInner is not null && this.SingleInner.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_50)
+                if (this.SingleInner is { } sv_50 && sv_50.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_50)
                 {
                     meta.Children[50u] = sm_50;
                 }
-                if (this.F90Sub is not null && this.F90Sub.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_90)
+                if (this.F90Sub is { } sv_90 && sv_90.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_90)
                 {
                     meta.Children[90u] = sm_90;
                 }
@@ -407,16 +407,16 @@ public sealed partial class OuterEnvelope
         for (int i = 0; i < this.RepBytes.Count; i++) total += 1 + this.RepBytes[i].Length;
         for (int i = 0; i < this.RepInner.Count; i++) total += 2 + (this.RepInner[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0);
         if (this.HasOptStr) total += this.OptStr?.Length ?? 0;
-        if (this.OptInner is not null) total += 3 + this.OptInner.EstimateOmniBufMinSize(depth + 1);
+        if (this.OptInner is { } sm_34) total += 3 + sm_34.EstimateOmniBufMinSize(depth + 1);
         if (this.ChoiceCase == ChoiceOneofCase.CStr) total += this.CStr?.Length ?? 0;
-        if (this.ChoiceCase == ChoiceOneofCase.CMsg && this.CMsg is not null) total += 3 + this.CMsg.EstimateOmniBufMinSize(depth + 1);
+        if (this.ChoiceCase == ChoiceOneofCase.CMsg && this.CMsg is { } om_39) total += 3 + om_39.EstimateOmniBufMinSize(depth + 1);
         total += this.Types_?.Length ?? 0;
         total += this.ToString_?.Length ?? 0;
         total += this.OuterEnvelope_?.Length ?? 0;
         if (this.CollisionChoiceCase == CollisionChoiceOneofCase.Clone_) total += this.Clone_?.Length ?? 0;
-        if (this.SingleInner is not null) total += 3 + this.SingleInner.EstimateOmniBufMinSize(depth + 1);
+        if (this.SingleInner is { } sm_50) total += 3 + sm_50.EstimateOmniBufMinSize(depth + 1);
         total += this.F65High?.Length ?? 0;
-        if (this.F90Sub is not null) total += 3 + this.F90Sub.EstimateOmniBufMinSize(depth + 1);
+        if (this.F90Sub is { } sm_90) total += 3 + sm_90.EstimateOmniBufMinSize(depth + 1);
         return total;
     }
 
@@ -927,94 +927,94 @@ public sealed partial class OuterEnvelope
             encoder.EndContainer();
         }
         encoder.EndArray();
-        if (this.WDouble.HasValue)
+        if (this.WDouble is { } sw_21)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
             encoder.BeginSubMsgField(21u);
-            OmniBufWrappers.WriteDoubleBody(encoder, this.WDouble.Value);
+            OmniBufWrappers.WriteDoubleBody(encoder, sw_21);
             encoder.EndSubMsg();
         }
-        if (this.WFloat.HasValue)
+        if (this.WFloat is { } sw_22)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
             encoder.BeginSubMsgField(22u);
-            OmniBufWrappers.WriteFloatBody(encoder, this.WFloat.Value);
+            OmniBufWrappers.WriteFloatBody(encoder, sw_22);
             encoder.EndSubMsg();
         }
-        if (this.WInt64.HasValue)
+        if (this.WInt64 is { } sw_23)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
             encoder.BeginSubMsgField(23u);
-            OmniBufWrappers.WriteInt64Body(encoder, this.WInt64.Value);
+            OmniBufWrappers.WriteInt64Body(encoder, sw_23);
             encoder.EndSubMsg();
         }
-        if (this.WUint64.HasValue)
+        if (this.WUint64 is { } sw_24)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
             encoder.BeginSubMsgField(24u);
-            OmniBufWrappers.WriteUInt64Body(encoder, this.WUint64.Value);
+            OmniBufWrappers.WriteUInt64Body(encoder, sw_24);
             encoder.EndSubMsg();
         }
-        if (this.WInt32.HasValue)
+        if (this.WInt32 is { } sw_25)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
             encoder.BeginSubMsgField(25u);
-            OmniBufWrappers.WriteInt32Body(encoder, this.WInt32.Value);
+            OmniBufWrappers.WriteInt32Body(encoder, sw_25);
             encoder.EndSubMsg();
         }
-        if (this.WUint32.HasValue)
+        if (this.WUint32 is { } sw_26)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
             encoder.BeginSubMsgField(26u);
-            OmniBufWrappers.WriteUInt32Body(encoder, this.WUint32.Value);
+            OmniBufWrappers.WriteUInt32Body(encoder, sw_26);
             encoder.EndSubMsg();
         }
-        if (this.WBool.HasValue)
+        if (this.WBool is { } sw_27)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
             encoder.BeginSubMsgField(27u);
-            OmniBufWrappers.WriteBoolBody(encoder, this.WBool.Value);
+            OmniBufWrappers.WriteBoolBody(encoder, sw_27);
             encoder.EndSubMsg();
         }
-        if (this.WString is not null)
+        if (this.WString is { } sw_28)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
             encoder.BeginSubMsgField(28u);
-            OmniBufWrappers.WriteStringBody(encoder, this.WString);
+            OmniBufWrappers.WriteStringBody(encoder, sw_28);
             encoder.EndSubMsg();
         }
-        if (this.WBytes is not null)
+        if (this.WBytes is { } sw_29)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
             encoder.BeginSubMsgField(29u);
-            OmniBufWrappers.WriteBytesBody(encoder, this.WBytes);
+            OmniBufWrappers.WriteBytesBody(encoder, sw_29);
             encoder.EndSubMsg();
         }
         if (this.HasOptInt)
@@ -1033,14 +1033,14 @@ public sealed partial class OuterEnvelope
         {
             encoder.WriteSintField(33u, (int)this.OptStatus);
         }
-        if (this.OptInner is not null)
+        if (this.OptInner is { } msg_34)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
-            encoder.BeginSubMsgField(34u, this.OptInner.EstimateOmniBufMinSize(0));
-            this.OptInner.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            encoder.BeginSubMsgField(34u, msg_34.EstimateOmniBufMinSize(0));
+            msg_34.EncodeOmniBufBody(encoder, deterministic, depth + 1);
             encoder.EndSubMsg();
         }
         if (this.ChoiceCase == ChoiceOneofCase.CInt)
@@ -1076,7 +1076,10 @@ public sealed partial class OuterEnvelope
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
             encoder.BeginSubMsgField(40u);
-            OmniBufWrappers.WriteInt32Body(encoder, this.CWrap!.Value);
+            if (this.CWrap is { } ow_40)
+            {
+                OmniBufWrappers.WriteInt32Body(encoder, ow_40);
+            }
             encoder.EndSubMsg();
         }
         encoder.WriteStringField(41u, this.Types_);
@@ -1097,27 +1100,27 @@ public sealed partial class OuterEnvelope
         {
             encoder.WriteSintField(49u, this.MergeFrom_);
         }
-        if (this.SingleInner is not null)
+        if (this.SingleInner is { } msg_50)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
-            encoder.BeginSubMsgField(50u, this.SingleInner.EstimateOmniBufMinSize(0));
-            this.SingleInner.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            encoder.BeginSubMsgField(50u, msg_50.EstimateOmniBufMinSize(0));
+            msg_50.EncodeOmniBufBody(encoder, deterministic, depth + 1);
             encoder.EndSubMsg();
         }
         encoder.WriteUintField(63u, this.F63Boundary);
         encoder.WriteUintField(64u, this.F64Boundary);
         encoder.WriteStringField(65u, this.F65High);
-        if (this.F90Sub is not null)
+        if (this.F90Sub is { } msg_90)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
-            encoder.BeginSubMsgField(90u, this.F90Sub.EstimateOmniBufMinSize(0));
-            this.F90Sub.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            encoder.BeginSubMsgField(90u, msg_90.EstimateOmniBufMinSize(0));
+            msg_90.EncodeOmniBufBody(encoder, deterministic, depth + 1);
             encoder.EndSubMsg();
         }
         if (this.HasF130Opt)
@@ -1792,7 +1795,7 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 21)) != 0) || merge;
                     seenLow |= (1UL << 21);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    double prev = alreadySeen && this.WDouble.HasValue ? this.WDouble.Value : 0d;
+                    double prev = alreadySeen && this.WDouble is { } prevVal_21 ? prevVal_21 : 0d;
                     this.WDouble = OmniBufWrappers.DecodeDouble(sub, prev, depth + 1, maxDepth);
                     break;
                 }
@@ -1801,7 +1804,7 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 22)) != 0) || merge;
                     seenLow |= (1UL << 22);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    float prev = alreadySeen && this.WFloat.HasValue ? this.WFloat.Value : 0f;
+                    float prev = alreadySeen && this.WFloat is { } prevVal_22 ? prevVal_22 : 0f;
                     this.WFloat = OmniBufWrappers.DecodeFloat(sub, prev, depth + 1, maxDepth);
                     break;
                 }
@@ -1810,7 +1813,7 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 23)) != 0) || merge;
                     seenLow |= (1UL << 23);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    long prev = alreadySeen && this.WInt64.HasValue ? this.WInt64.Value : 0L;
+                    long prev = alreadySeen && this.WInt64 is { } prevVal_23 ? prevVal_23 : 0L;
                     this.WInt64 = OmniBufWrappers.DecodeInt64(sub, prev, depth + 1, maxDepth);
                     break;
                 }
@@ -1819,7 +1822,7 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 24)) != 0) || merge;
                     seenLow |= (1UL << 24);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    ulong prev = alreadySeen && this.WUint64.HasValue ? this.WUint64.Value : 0UL;
+                    ulong prev = alreadySeen && this.WUint64 is { } prevVal_24 ? prevVal_24 : 0UL;
                     this.WUint64 = OmniBufWrappers.DecodeUInt64(sub, prev, depth + 1, maxDepth);
                     break;
                 }
@@ -1828,7 +1831,7 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 25)) != 0) || merge;
                     seenLow |= (1UL << 25);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    int prev = alreadySeen && this.WInt32.HasValue ? this.WInt32.Value : 0;
+                    int prev = alreadySeen && this.WInt32 is { } prevVal_25 ? prevVal_25 : 0;
                     this.WInt32 = OmniBufWrappers.DecodeInt32(sub, prev, depth + 1, maxDepth);
                     break;
                 }
@@ -1837,7 +1840,7 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 26)) != 0) || merge;
                     seenLow |= (1UL << 26);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    uint prev = alreadySeen && this.WUint32.HasValue ? this.WUint32.Value : 0u;
+                    uint prev = alreadySeen && this.WUint32 is { } prevVal_26 ? prevVal_26 : 0u;
                     this.WUint32 = OmniBufWrappers.DecodeUInt32(sub, prev, depth + 1, maxDepth);
                     break;
                 }
@@ -1846,7 +1849,7 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 27)) != 0) || merge;
                     seenLow |= (1UL << 27);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    bool prev = alreadySeen && this.WBool.HasValue ? this.WBool.Value : false;
+                    bool prev = alreadySeen && this.WBool is { } prevVal_27 ? prevVal_27 : false;
                     this.WBool = OmniBufWrappers.DecodeBool(sub, prev, depth + 1, maxDepth);
                     break;
                 }
@@ -1855,7 +1858,7 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 28)) != 0) || merge;
                     seenLow |= (1UL << 28);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    string prev = alreadySeen && this.WString is not null ? this.WString : string.Empty;
+                    string prev = alreadySeen && this.WString is { } prevVal_28 ? prevVal_28 : string.Empty;
                     this.WString = OmniBufWrappers.DecodeString(sub, prev, depth + 1, maxDepth);
                     break;
                 }
@@ -1864,7 +1867,7 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 29)) != 0) || merge;
                     seenLow |= (1UL << 29);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    ByteString prev = alreadySeen && this.WBytes is not null ? this.WBytes : ByteString.Empty;
+                    ByteString prev = alreadySeen && this.WBytes is { } prevVal_29 ? prevVal_29 : ByteString.Empty;
                     this.WBytes = OmniBufWrappers.DecodeBytes(sub, prev, depth + 1, maxDepth);
                     break;
                 }
@@ -1893,11 +1896,13 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 34)) != 0) || merge;
                     seenLow |= (1UL << 34);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    if (this.OptInner is null)
+                    var subMsg_34 = this.OptInner;
+                    if (subMsg_34 is null)
                     {
-                        this.OptInner = new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
+                        subMsg_34 = new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
+                        this.OptInner = subMsg_34;
                     }
-                    this.OptInner.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
+                    subMsg_34.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
                     break;
                 }
                 case 561UL:
@@ -1925,14 +1930,15 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 39)) != 0) || merge;
                     seenLow |= (1UL << 39);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    if (this.ChoiceCase != ChoiceOneofCase.CMsg || this.CMsg is null)
+                    if (this.ChoiceCase != ChoiceOneofCase.CMsg || this.CMsg is not { } existing_39)
                     {
-                        this.CMsg = new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
-                        this.CMsg.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: false);
+                        var subMsg_39 = new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
+                        this.CMsg = subMsg_39;
+                        subMsg_39.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: false);
                     }
                     else
                     {
-                        this.CMsg.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
+                        existing_39.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
                     }
                     break;
                 }
@@ -1941,7 +1947,7 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 40)) != 0) || merge;
                     seenLow |= (1UL << 40);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    int prev = alreadySeen && this.ChoiceCase == ChoiceOneofCase.CWrap && this.CWrap.HasValue ? this.CWrap.Value : 0;
+                    int prev = alreadySeen && this.ChoiceCase == ChoiceOneofCase.CWrap && this.CWrap is { } prevVal_40 ? prevVal_40 : 0;
                     this.CWrap = OmniBufWrappers.DecodeInt32(sub, prev, depth + 1, maxDepth);
                     break;
                 }
@@ -1990,11 +1996,13 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = ((seenLow & (1UL << 50)) != 0) || merge;
                     seenLow |= (1UL << 50);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    if (this.SingleInner is null)
+                    var subMsg_50 = this.SingleInner;
+                    if (subMsg_50 is null)
                     {
-                        this.SingleInner = new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
+                        subMsg_50 = new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
+                        this.SingleInner = subMsg_50;
                     }
-                    this.SingleInner.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
+                    subMsg_50.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
                     break;
                 }
                 case 1008UL:
@@ -2014,11 +2022,13 @@ public sealed partial class OuterEnvelope
                     bool alreadySeen = (seenHigh is not null && seenHigh.Contains(90u)) || merge;
                     (seenHigh ??= new HashSet<uint>()).Add(90u);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    if (this.F90Sub is null)
+                    var subMsg_90 = this.F90Sub;
+                    if (subMsg_90 is null)
                     {
-                        this.F90Sub = new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
+                        subMsg_90 = new global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload();
+                        this.F90Sub = subMsg_90;
                     }
-                    this.F90Sub.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
+                    subMsg_90.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
                     break;
                 }
                 case 2081UL:
@@ -5151,7 +5161,7 @@ public sealed partial class ProtoTreeNode
             meta.Fields[5u] = "branches";
             if (depth + 3 <= OmniBufConstants.MaxNestingDepth)
             {
-                if (this.Primary is not null && this.Primary.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_3)
+                if (this.Primary is { } sv_3 && sv_3.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_3)
                 {
                     meta.Children[3u] = sm_3;
                 }
@@ -5228,7 +5238,7 @@ public sealed partial class ProtoTreeNode
         if (depth > 8) return 0;
         int total = 0;
         total += this.Name?.Length ?? 0;
-        if (this.Primary is not null) total += 3 + this.Primary.EstimateOmniBufMinSize(depth + 1);
+        if (this.Primary is { } sm_3) total += 3 + sm_3.EstimateOmniBufMinSize(depth + 1);
         for (int i = 0; i < this.Children.Count; i++) total += 2 + (this.Children[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0);
         return total;
     }
@@ -5258,14 +5268,14 @@ public sealed partial class ProtoTreeNode
         }
         encoder.WriteUintField(1u, this.Id);
         encoder.WriteStringField(2u, this.Name);
-        if (this.Primary is not null)
+        if (this.Primary is { } msg_3)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
-            encoder.BeginSubMsgField(3u, this.Primary.EstimateOmniBufMinSize(0));
-            this.Primary.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            encoder.BeginSubMsgField(3u, msg_3.EstimateOmniBufMinSize(0));
+            msg_3.EncodeOmniBufBody(encoder, deterministic, depth + 1);
             encoder.EndSubMsg();
         }
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
@@ -5367,11 +5377,13 @@ public sealed partial class ProtoTreeNode
                     bool alreadySeen = ((seenLow & (1UL << 3)) != 0) || merge;
                     seenLow |= (1UL << 3);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    if (this.Primary is null)
+                    var subMsg_3 = this.Primary;
+                    if (subMsg_3 is null)
                     {
-                        this.Primary = new global::Omnibuf.Conformance.ProtoTreeNode();
+                        subMsg_3 = new global::Omnibuf.Conformance.ProtoTreeNode();
+                        this.Primary = subMsg_3;
                     }
-                    this.Primary.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
+                    subMsg_3.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
                     break;
                 }
                 case 77UL:

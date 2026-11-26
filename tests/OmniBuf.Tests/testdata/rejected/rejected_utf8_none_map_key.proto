@@ -1,0 +1,10 @@
+edition = "2023";
+
+package omnibuf.test.rejectedutf8mk;
+
+option csharp_namespace = "OmniBuf.Tests.Rejected";
+option features.utf8_validation = NONE;
+
+message Utf8NoneMapKeyMsg {
+  map<string, int32> labels = 1;
+}

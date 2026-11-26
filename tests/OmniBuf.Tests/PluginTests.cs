@@ -136,21 +136,25 @@ public sealed class PluginTests
     }
 
     [Fact]
-    public void ProtocGenOmniBufCs_RejectsEditionsAndTopLevelExtensions()
+    public void ProtocGenOmniBufCs_RejectsUnsupportedEditionsAndTopLevelExtensions()
     {
-        var editionsFile = new FileDescriptorProto
+        foreach (Edition badEdition in new[] { Edition.Unknown, (Edition)1003, (Edition)9999 })
         {
-            Name = "editions_test.proto",
-            Package = "omnibuf.editions",
-            Syntax = "editions",
-        };
-        editionsFile.MessageType.Add(new DescriptorProto { Name = "EditionsMsg" });
+            var editionsFile = new FileDescriptorProto
+            {
+                Name = $"editions_{(int)badEdition}.proto",
+                Package = "omnibuf.editions",
+                Syntax = "editions",
+                Edition = badEdition,
+            };
+            editionsFile.MessageType.Add(new DescriptorProto { Name = "EditionsMsg" });
 
-        (string? edErr, _) = OmniBuf.ProtocGen.Program.GenerateCode(
-            new[] { editionsFile.Name },
-            new[] { editionsFile });
-        Assert.NotNull(edErr);
-        Assert.Contains("editions", edErr, StringComparison.OrdinalIgnoreCase);
+            (string? edErr, _) = OmniBuf.ProtocGen.Program.GenerateCode(
+                new[] { editionsFile.Name },
+                new[] { editionsFile });
+            Assert.NotNull(edErr);
+            Assert.Contains("unsupported protobuf edition", edErr, StringComparison.OrdinalIgnoreCase);
+        }
 
         var extFile = new FileDescriptorProto
         {

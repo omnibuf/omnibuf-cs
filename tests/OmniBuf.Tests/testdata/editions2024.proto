@@ -1,0 +1,43 @@
+edition = "2024";
+
+package omnibuf.test.ed2024;
+
+import "google/protobuf/descriptor.proto";
+import "google/protobuf/wrappers.proto";
+
+option csharp_namespace = "OmniBuf.Tests.Editions2024";
+option features.default_symbol_visibility = STRICT;
+option features.enforce_naming_style = STYLE2024;
+
+extend google.protobuf.FieldOptions {
+  string ed2024_note = 50201;
+}
+
+export enum Ed2024Mode {
+  ED2024_MODE_UNSPECIFIED = 0;
+  ED2024_MODE_FAST = 1;
+  ED2024_MODE_SAFE = 2;
+}
+
+local message Ed2024LocalMeta {
+  int32 version = 1;
+  string owner = 2 [features.field_presence = IMPLICIT];
+}
+
+export message Ed2024Envelope {
+  int32 id = 1 [(ed2024_note) = "explicit id"];
+  bool enabled = 2;
+  string name = 3 [features.field_presence = IMPLICIT];
+  Ed2024Mode mode = 4;
+  Ed2024LocalMeta meta_delim = 5 [features.message_encoding = DELIMITED];
+  repeated Ed2024LocalMeta history = 6 [features.message_encoding = DELIMITED];
+  repeated int32 scores = 7 [features.repeated_field_encoding = EXPANDED];
+  map<string, int32> counters = 8;
+  google.protobuf.Int32Value boxed = 9;
+
+  oneof payload {
+    int32 code = 10;
+    string text = 11;
+    Ed2024LocalMeta detail = 12;
+  }
+}

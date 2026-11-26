@@ -3,7 +3,7 @@
     <RootNamespace>OmniBuf.Grpc</RootNamespace>
     <AssemblyName>OmniBuf.Grpc</AssemblyName>
     <PackageId>OmniBuf.Grpc</PackageId>
-    <Version>0.1.7</Version>
+    <Version>0.1.8</Version>
     <Authors>OmniBuf Contributors</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <Description>OmniBuf gRPC marshaller for Grpc.Core.Api and Grpc.Net.Client.</Description>

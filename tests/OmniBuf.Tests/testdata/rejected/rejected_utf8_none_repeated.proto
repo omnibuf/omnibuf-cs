@@ -1,0 +1,9 @@
+edition = "2023";
+
+package omnibuf.test.rejectedutf8r;
+
+option csharp_namespace = "OmniBuf.Tests.Rejected";
+
+message Utf8NoneRepeatedMsg {
+  repeated string items = 1 [features.utf8_validation = NONE];
+}

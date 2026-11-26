@@ -1232,7 +1232,7 @@ public sealed partial class PeerUpdate
             meta.Fields[11u] = "sequence";
             if (depth + 3 <= OmniBufConstants.MaxNestingDepth)
             {
-                if (this.Location is not null && this.Location.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_9)
+                if (this.Location is { } sv_9 && sv_9.BuildOmniBufValueSchemaMeta(depth + 2, active) is { } sm_9)
                 {
                     meta.Children[9u] = sm_9;
                 }
@@ -1295,7 +1295,7 @@ public sealed partial class PeerUpdate
         int total = 0;
         total += this.RouterId?.Length ?? 0;
         for (int i = 0; i < this.Tags.Count; i++) total += 1 + (this.Tags[i]?.Length ?? 0);
-        if (this.Location is not null) total += 3 + this.Location.EstimateOmniBufMinSize(depth + 1);
+        if (this.Location is { } sm_9) total += 3 + sm_9.EstimateOmniBufMinSize(depth + 1);
         for (int i = 0; i < this.Neighbors.Count; i++) total += 2 + (this.Neighbors[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0);
         return total;
     }
@@ -1349,14 +1349,14 @@ public sealed partial class PeerUpdate
             encoder.WriteUintValue(this.Prefixes[i]);
         }
         encoder.EndArray();
-        if (this.Location is not null)
+        if (this.Location is { } msg_9)
         {
             if (depth + 1 > OmniBufConstants.MaxNestingDepth)
             {
                 throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
             }
-            encoder.BeginSubMsgField(9u, this.Location.EstimateOmniBufMinSize(0));
-            this.Location.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            encoder.BeginSubMsgField(9u, msg_9.EstimateOmniBufMinSize(0));
+            msg_9.EncodeOmniBufBody(encoder, deterministic, depth + 1);
             encoder.EndSubMsg();
         }
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
@@ -1610,11 +1610,13 @@ public sealed partial class PeerUpdate
                     bool alreadySeen = ((seenLow & (1UL << 9)) != 0) || merge;
                     seenLow |= (1UL << 9);
                     ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
-                    if (this.Location is null)
+                    var subMsg_9 = this.Location;
+                    if (subMsg_9 is null)
                     {
-                        this.Location = new global::Omnibuf.Bench.Location();
+                        subMsg_9 = new global::Omnibuf.Bench.Location();
+                        this.Location = subMsg_9;
                     }
-                    this.Location.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
+                    subMsg_9.DecodeOmniBuf(sub, depth + 1, maxDepth, merge: alreadySeen);
                     break;
                 }
                 case 173UL:

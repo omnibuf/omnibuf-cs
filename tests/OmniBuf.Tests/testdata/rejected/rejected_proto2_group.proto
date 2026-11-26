@@ -1,0 +1,11 @@
+syntax = "proto2";
+
+package omnibuf.test.rejectedp2;
+
+option csharp_namespace = "OmniBuf.Tests.Rejected";
+
+message Proto2GroupMsg {
+  optional group LegacyGroup = 1 {
+    optional int32 a = 2;
+  }
+}

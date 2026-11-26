@@ -1,0 +1,55 @@
+edition = "2023";
+
+package omnibuf.test.ed2023;
+
+option csharp_namespace = "OmniBuf.Tests.Editions2023";
+
+enum Ed2023Status {
+  ED2023_STATUS_UNSPECIFIED = 0;
+  ED2023_STATUS_ACTIVE = 1;
+  ED2023_STATUS_PAUSED = 2;
+}
+
+message Ed2023Child {
+  int32 id = 1;
+  string label = 2;
+  bool active = 3;
+}
+
+message Ed2023Record {
+  message NestedDetail {
+    int32 code = 1;
+    string note = 2 [features.field_presence = IMPLICIT];
+  }
+
+  int32 exp_i32 = 1 [default = 0];
+  double exp_dbl = 2 [default = 0.0];
+  bool exp_bool = 3 [default = false];
+  string exp_str = 4 [default = ""];
+  bytes exp_bytes = 5 [default = ""];
+  Ed2023Status exp_status = 6 [default = ED2023_STATUS_UNSPECIFIED];
+
+  int32 imp_i32 = 7 [features.field_presence = IMPLICIT];
+  bool imp_bool = 8 [features.field_presence = IMPLICIT];
+  string imp_str = 9 [features.field_presence = IMPLICIT];
+
+  repeated int32 rep_packed = 10;
+  repeated int32 rep_expanded = 11 [features.repeated_field_encoding = EXPANDED];
+  repeated Ed2023Child rep_child_len = 12;
+  repeated Ed2023Child rep_child_delim = 13 [features.message_encoding = DELIMITED];
+
+  map<string, int32> map_str_i32 = 14;
+  map<string, Ed2023Child> map_str_child = 15;
+
+  Ed2023Child child_len = 16;
+  Ed2023Child child_delim = 17 [features.message_encoding = DELIMITED];
+  NestedDetail nested = 18;
+
+  oneof choice {
+    int32 oneof_i32 = 19;
+    bool oneof_bool = 20;
+    string oneof_str = 21;
+    Ed2023Child oneof_child = 22;
+    Ed2023Child oneof_delim = 23 [features.message_encoding = DELIMITED];
+  }
+}

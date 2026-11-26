@@ -1,0 +1,9 @@
+edition = "2023";
+
+package omnibuf.test.rejecteddef;
+
+option csharp_namespace = "OmniBuf.Tests.Rejected";
+
+message NonZeroDefaultMsg {
+  int32 retries = 1 [default = 5];
+}

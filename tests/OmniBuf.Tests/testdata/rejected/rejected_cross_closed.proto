@@ -1,0 +1,11 @@
+edition = "2023";
+
+package omnibuf.test.rejectedcross;
+
+import "rejected/rejected_closed_enum.proto";
+
+option csharp_namespace = "OmniBuf.Tests.Rejected";
+
+message CrossFileClosedHolder {
+  omnibuf.test.rejected.ClosedState state = 1;
+}

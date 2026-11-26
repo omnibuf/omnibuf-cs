@@ -1,0 +1,16 @@
+edition = "2023";
+
+package omnibuf.test.rejected;
+
+option csharp_namespace = "OmniBuf.Tests.Rejected";
+
+enum ClosedState {
+  option features.enum_type = CLOSED;
+
+  CLOSED_STATE_UNSPECIFIED = 0;
+  CLOSED_STATE_ON = 1;
+}
+
+message ClosedEnumHolder {
+  ClosedState state = 1;
+}

@@ -19,6 +19,9 @@ public static class OmniBufProtobuf
     private const string AotWarningMessage =
         "OmniBufProtobuf uses Google.Protobuf reflection accessors. Use protoc-gen-omnibuf-cs generated codecs for NativeAOT compatibility.";
 
+    private const int MinimumSupportedEdition = 1000;
+    private const int MaximumSupportedEdition = 1002;
+
     private static readonly ConditionalWeakTable<MessageDescriptor, object> ValidatedDescriptors = new();
     private static readonly object ValidatedSentinel = new();
 
@@ -120,11 +123,123 @@ public static class OmniBufProtobuf
             return;
         }
 
-        ValidateDescriptorGraph(md, new HashSet<string>(StringComparer.Ordinal));
+        ValidateDescriptorGraph(md, new HashSet<string>(StringComparer.Ordinal), new HashSet<string>(StringComparer.Ordinal));
         ValidatedDescriptors.AddOrUpdate(md, ValidatedSentinel);
     }
 
-    private static void ValidateDescriptorGraph(MessageDescriptor md, HashSet<string> visited)
+    private static bool IsEditionsFile(FileDescriptor file) =>
+        string.Equals(file.ToProto().Syntax, "editions", StringComparison.Ordinal);
+
+    private static bool IsEditionsFile(FileDescriptorProto fileProto) =>
+        string.Equals(fileProto.Syntax, "editions", StringComparison.Ordinal);
+
+    private static bool IsSupportedEdition(Edition edition) =>
+        (int)edition is >= MinimumSupportedEdition and <= MaximumSupportedEdition;
+
+    private static bool IsSupportedMessageField(FieldDescriptor fd) =>
+        fd.FieldType == FieldType.Message
+        || (fd.FieldType == FieldType.Group && IsEditionsFile(fd.File));
+
+    private static OmniBufWireType FieldWireType(FieldDescriptor fd) =>
+        IsSupportedMessageField(fd) ? OmniBufWireType.SubMsg : ScalarWireType(fd.FieldType);
+
+    private static FeatureSet CreateEditionBaseline() =>
+        new()
+        {
+            FieldPresence = FeatureSet.Types.FieldPresence.Explicit,
+            EnumType = FeatureSet.Types.EnumType.Open,
+            RepeatedFieldEncoding = FeatureSet.Types.RepeatedFieldEncoding.Packed,
+            Utf8Validation = FeatureSet.Types.Utf8Validation.Verify,
+            MessageEncoding = FeatureSet.Types.MessageEncoding.LengthPrefixed,
+            JsonFormat = FeatureSet.Types.JsonFormat.Allow,
+        };
+
+    private static FeatureSet MergeFeatures(FeatureSet parent, FeatureSet? child)
+    {
+        FeatureSet merged = parent.Clone();
+        if (child is not null)
+        {
+            merged.MergeFrom(child);
+        }
+
+        return merged;
+    }
+
+    private static FeatureSet ResolveFileFeatures(FileDescriptor file)
+    {
+        FileDescriptorProto fileProto = file.ToProto();
+        if (!IsSupportedEdition(fileProto.Edition))
+        {
+            throw new OmniBufException($"omnibuf: unsupported protobuf edition {fileProto.Edition} in {file.Name}");
+        }
+
+        return MergeFeatures(CreateEditionBaseline(), fileProto.Options?.Features);
+    }
+
+    private static FeatureSet ResolveMessageFeatures(MessageDescriptor md)
+    {
+        var chain = new Stack<MessageDescriptor>();
+        for (MessageDescriptor? cur = md; cur is not null; cur = cur.ContainingType)
+        {
+            chain.Push(cur);
+        }
+
+        FeatureSet features = ResolveFileFeatures(md.File);
+        while (chain.Count > 0)
+        {
+            MessageDescriptor next = chain.Pop();
+            if (next.ToProto().Options?.Features is { } msgFeatures)
+            {
+                features.MergeFrom(msgFeatures);
+            }
+        }
+
+        return features;
+    }
+
+    private static FeatureSet ResolveEnumFeatures(EnumDescriptor ed)
+    {
+        FeatureSet parent = ed.ContainingType is not null
+            ? ResolveMessageFeatures(ed.ContainingType)
+            : ResolveFileFeatures(ed.File);
+        return MergeFeatures(parent, ed.ToProto().Options?.Features);
+    }
+
+    private static FeatureSet ResolveFieldFeatures(FieldDescriptor fd, FeatureSet parentFeatures)
+    {
+        FeatureSet resolved = parentFeatures.Clone();
+        if (fd.ContainingOneof is { IsSynthetic: false } oneof
+            && oneof.ToProto().Options?.Features is { } oneofFeatures)
+        {
+            resolved.MergeFrom(oneofFeatures);
+        }
+
+        if (fd.ToProto().Options?.Features is { } fieldFeatures)
+        {
+            resolved.MergeFrom(fieldFeatures);
+        }
+
+        return resolved;
+    }
+
+    private static bool IsClosedEnum(EnumDescriptor ed)
+    {
+        FileDescriptorProto enumFileProto = ed.File.ToProto();
+        if (string.Equals(enumFileProto.Syntax, "proto3", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (IsEditionsFile(enumFileProto))
+        {
+            FeatureSet resolved = ResolveEnumFeatures(ed);
+            return resolved.EnumType != FeatureSet.Types.EnumType.Open;
+        }
+
+        return true;
+    }
+
+    private static void ValidateDescriptorGraph(MessageDescriptor md, HashSet<string> visited, HashSet<string> validatedFiles)
     {
         if (!visited.Add(md.FullName))
         {
@@ -132,16 +247,28 @@ public static class OmniBufProtobuf
         }
 
         FileDescriptorProto fileProto = md.File.ToProto();
-        if (string.Equals(fileProto.Syntax, "editions", StringComparison.Ordinal))
-        {
-            throw new OmniBufException($"omnibuf: Protobuf editions syntax in {md.File.Name} is not supported");
-        }
+        bool isEditions = IsEditionsFile(fileProto);
+        FeatureSet? msgFeatures = isEditions ? ResolveMessageFeatures(md) : null;
 
-        foreach (FieldDescriptorProto ext in fileProto.Extension)
+        if (validatedFiles.Add(md.File.Name))
         {
-            if (!IsDescriptorOptionsExtendee(ext.Extendee))
+            foreach (FieldDescriptorProto ext in fileProto.Extension)
             {
-                throw new OmniBufException($"omnibuf: Protobuf extensions in {md.File.Name} are not supported");
+                if (!IsDescriptorOptionsExtendee(ext.Extendee))
+                {
+                    throw new OmniBufException($"omnibuf: Protobuf extensions in {md.File.Name} are not supported");
+                }
+            }
+
+            if (isEditions)
+            {
+                foreach (EnumDescriptor fileEnum in md.File.EnumTypes)
+                {
+                    if (IsClosedEnum(fileEnum))
+                    {
+                        throw new OmniBufException($"omnibuf: editions CLOSED enum {fileEnum.FullName} is not supported");
+                    }
+                }
             }
         }
 
@@ -151,9 +278,20 @@ public static class OmniBufProtobuf
             throw new OmniBufException($"omnibuf: Protobuf extensions on {md.FullName} are not supported");
         }
 
+        if (isEditions)
+        {
+            foreach (EnumDescriptor nestedEnum in md.EnumTypes)
+            {
+                if (IsClosedEnum(nestedEnum))
+                {
+                    throw new OmniBufException($"omnibuf: editions CLOSED enum {nestedEnum.FullName} is not supported");
+                }
+            }
+        }
+
         foreach (FieldDescriptor fd in md.Fields.InFieldNumberOrder())
         {
-            if (fd.FieldType == FieldType.Group)
+            if (fd.FieldType == FieldType.Group && !isEditions)
             {
                 throw new OmniBufException($"omnibuf: Protobuf group field {fd.FullName} is not supported");
             }
@@ -163,22 +301,68 @@ public static class OmniBufProtobuf
                 throw new OmniBufException($"omnibuf: custom non-zero default value on {fd.FullName} is not supported");
             }
 
+            FeatureSet? fieldFeatures = isEditions ? ResolveFieldFeatures(fd, msgFeatures!) : null;
+            if (isEditions)
+            {
+                if (fieldFeatures!.FieldPresence is not (FeatureSet.Types.FieldPresence.Explicit or FeatureSet.Types.FieldPresence.Implicit)
+                    || fd.IsRequired)
+                {
+                    throw new OmniBufException($"omnibuf: editions LEGACY_REQUIRED field presence on {fd.FullName} is not supported");
+                }
+
+                if (fd.FieldType == FieldType.String
+                    && fieldFeatures.Utf8Validation != FeatureSet.Types.Utf8Validation.Verify)
+                {
+                    throw new OmniBufException($"omnibuf: editions UTF-8 validation NONE on {fd.FullName} is not supported");
+                }
+
+                if (fd.FieldType == FieldType.Enum && IsClosedEnum(fd.EnumType))
+                {
+                    throw new OmniBufException($"omnibuf: editions CLOSED enum {fd.EnumType.FullName} referenced by {fd.FullName} is not supported");
+                }
+            }
+
             if (fd.IsMap)
             {
+                FieldDescriptor keyFd = fd.MessageType.FindFieldByNumber(1);
                 FieldDescriptor valFd = fd.MessageType.FindFieldByNumber(2);
-                if (valFd.FieldType == FieldType.Group)
+                if (valFd.FieldType == FieldType.Group && !isEditions)
                 {
                     throw new OmniBufException($"omnibuf: Protobuf group map value on {fd.FullName} is not supported");
                 }
 
-                if (valFd.FieldType == FieldType.Message && !TryGetWrapperFieldType(valFd.MessageType, out _))
+                if (isEditions)
                 {
-                    ValidateDescriptorGraph(valFd.MessageType, visited);
+                    FeatureSet entryFeatures = MergeFeatures(fieldFeatures!, fd.MessageType.ToProto().Options?.Features);
+                    FeatureSet keyFeatures = ResolveFieldFeatures(keyFd, entryFeatures);
+                    FeatureSet valFeatures = ResolveFieldFeatures(valFd, entryFeatures);
+
+                    if (keyFd.FieldType == FieldType.String
+                        && keyFeatures.Utf8Validation != FeatureSet.Types.Utf8Validation.Verify)
+                    {
+                        throw new OmniBufException($"omnibuf: editions UTF-8 validation NONE on {keyFd.FullName} is not supported");
+                    }
+
+                    if (valFd.FieldType == FieldType.String
+                        && valFeatures.Utf8Validation != FeatureSet.Types.Utf8Validation.Verify)
+                    {
+                        throw new OmniBufException($"omnibuf: editions UTF-8 validation NONE on {valFd.FullName} is not supported");
+                    }
+
+                    if (valFd.FieldType == FieldType.Enum && IsClosedEnum(valFd.EnumType))
+                    {
+                        throw new OmniBufException($"omnibuf: editions CLOSED enum {valFd.EnumType.FullName} referenced by {fd.FullName} is not supported");
+                    }
+                }
+
+                if (IsSupportedMessageField(valFd) && !TryGetWrapperFieldType(valFd.MessageType, out _))
+                {
+                    ValidateDescriptorGraph(valFd.MessageType, visited, validatedFiles);
                 }
             }
-            else if (fd.FieldType == FieldType.Message && !TryGetWrapperFieldType(fd.MessageType, out _))
+            else if (IsSupportedMessageField(fd) && !TryGetWrapperFieldType(fd.MessageType, out _))
             {
-                ValidateDescriptorGraph(fd.MessageType, visited);
+                ValidateDescriptorGraph(fd.MessageType, visited, validatedFiles);
             }
         }
     }
@@ -217,8 +401,9 @@ public static class OmniBufProtobuf
             FieldType.Bool => dv == "false",
             FieldType.String or FieldType.Bytes => dv.Length == 0,
             FieldType.Enum => fd.EnumType.FindValueByName(dv)?.Number == 0,
-            FieldType.Float or FieldType.Double => double.TryParse(dv, System.Globalization.CultureInfo.InvariantCulture, out double d) && d == 0d && !double.IsNegative(d),
-            _ => long.TryParse(dv, System.Globalization.CultureInfo.InvariantCulture, out long l) && l == 0L,
+            FieldType.Float or FieldType.Double => double.TryParse(dv, NumberStyles.Float, CultureInfo.InvariantCulture, out double d) && d == 0d && !double.IsNegative(d),
+            FieldType.UInt32 or FieldType.UInt64 or FieldType.Fixed32 or FieldType.Fixed64 => ulong.TryParse(dv, NumberStyles.Integer, CultureInfo.InvariantCulture, out ulong u) && u == 0UL,
+            _ => long.TryParse(dv, NumberStyles.Integer, CultureInfo.InvariantCulture, out long l) && l == 0L,
         };
     }
 
@@ -292,12 +477,12 @@ public static class OmniBufProtobuf
                 if (fd.IsMap)
                 {
                     FieldDescriptor valFd = fd.MessageType.FindFieldByNumber(2);
-                    if (valFd.FieldType == FieldType.Message)
+                    if (IsSupportedMessageField(valFd))
                     {
                         childMd = valFd.MessageType;
                     }
                 }
-                else if (fd.FieldType == FieldType.Message)
+                else if (IsSupportedMessageField(fd))
                 {
                     childMd = fd.MessageType;
                 }
@@ -358,7 +543,7 @@ public static class OmniBufProtobuf
                 if (fd.IsMap)
                 {
                     FieldDescriptor valFd = fd.MessageType.FindFieldByNumber(2);
-                    if (valFd.FieldType == FieldType.Message)
+                    if (IsSupportedMessageField(valFd))
                     {
                         var dict = (IDictionary)fd.Accessor.GetValue(message)!;
                         if (dict.Count == 0)
@@ -392,7 +577,7 @@ public static class OmniBufProtobuf
                         }
                     }
                 }
-                else if (fd.IsRepeated && fd.FieldType == FieldType.Message)
+                else if (fd.IsRepeated && IsSupportedMessageField(fd))
                 {
                     var list = (IList)fd.Accessor.GetValue(message)!;
                     if (list.Count == 0)
@@ -425,7 +610,7 @@ public static class OmniBufProtobuf
                         }
                     }
                 }
-                else if (fd.FieldType == FieldType.Message)
+                else if (IsSupportedMessageField(fd))
                 {
                     object? val = fd.Accessor.GetValue(message);
                     if (val is null)
@@ -464,7 +649,7 @@ public static class OmniBufProtobuf
             FieldDescriptor fd = fields[i];
             uint fnum = (uint)fd.FieldNumber;
 
-            if (fd.FieldType == FieldType.Group)
+            if (fd.FieldType == FieldType.Group && !IsEditionsFile(fd.File))
             {
                 throw new OmniBufException($"omnibuf: Protobuf group field {fd.FullName} is not supported");
             }
@@ -479,8 +664,8 @@ public static class OmniBufProtobuf
                 object? mapObj = fd.Accessor.GetValue(message);
                 FieldDescriptor keyFd = fd.MessageType.FindFieldByNumber(1);
                 FieldDescriptor valFd = fd.MessageType.FindFieldByNumber(2);
-                OmniBufWireType keyWt = ScalarWireType(keyFd.FieldType);
-                OmniBufWireType valWt = ScalarWireType(valFd.FieldType);
+                OmniBufWireType keyWt = FieldWireType(keyFd);
+                OmniBufWireType valWt = FieldWireType(valFd);
 
                 var dict = (IDictionary)mapObj!;
                 int count = dict.Count;
@@ -520,7 +705,7 @@ public static class OmniBufProtobuf
                 }
 
                 object? listObj = fd.Accessor.GetValue(message);
-                OmniBufWireType elemWt = ScalarWireType(fd.FieldType);
+                OmniBufWireType elemWt = FieldWireType(fd);
                 var list = (IList)listObj!;
                 int count = list.Count;
                 encoder.BeginArrayField(fnum, elemWt, count);
@@ -563,7 +748,7 @@ public static class OmniBufProtobuf
                 continue;
             }
 
-            if (fd.FieldType == FieldType.Message)
+            if (IsSupportedMessageField(fd))
             {
                 object? msgVal = fd.Accessor.GetValue(message);
                 if (msgVal is null)
@@ -609,7 +794,7 @@ public static class OmniBufProtobuf
                 continue;
             }
 
-            OmniBufWireType wt = ScalarWireType(fd.FieldType);
+            OmniBufWireType wt = FieldWireType(fd);
             encoder.WriteTag(fnum, wt);
             WriteScalarPayload(encoder, fd.FieldType, val);
         }
@@ -617,7 +802,7 @@ public static class OmniBufProtobuf
 
     private static void WriteMapValuePayload(OmniBufEncoder encoder, FieldDescriptor valFd, object? value, bool deterministic, int childDepth)
     {
-        if (valFd.FieldType == FieldType.Message)
+        if (IsSupportedMessageField(valFd))
         {
             if (childDepth > OmniBufConstants.MaxNestingDepth)
             {
@@ -738,7 +923,7 @@ public static class OmniBufProtobuf
                 continue;
             }
 
-            if (fd.FieldType == FieldType.Group)
+            if (fd.FieldType == FieldType.Group && !IsEditionsFile(fd.File))
             {
                 throw new OmniBufException($"omnibuf: Protobuf group field {fd.FullName} is not supported");
             }
@@ -760,8 +945,8 @@ public static class OmniBufProtobuf
                 ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 3);
                 FieldDescriptor keyFd = fd.MessageType.FindFieldByNumber(1);
                 FieldDescriptor valFd = fd.MessageType.FindFieldByNumber(2);
-                OmniBufWireType expKeyWt = ScalarWireType(keyFd.FieldType);
-                OmniBufWireType expValWt = ScalarWireType(valFd.FieldType);
+                OmniBufWireType expKeyWt = FieldWireType(keyFd);
+                OmniBufWireType expValWt = FieldWireType(valFd);
 
                 if (!OmniBufDecoder.TryParseMapHeader(body, out OmniBufWireType keyWt, out OmniBufWireType valWt, out int count, out int p)
                     || keyWt != expKeyWt
@@ -777,13 +962,14 @@ public static class OmniBufProtobuf
                     dict.Clear();
                 }
 
+                bool isValMessage = IsSupportedMessageField(valFd);
                 FieldType resolvedMapWrapperFt = default;
-                bool isValWrapper = valFd.FieldType == FieldType.Message && TryGetWrapperFieldType(valFd.MessageType, out resolvedMapWrapperFt);
+                bool isValWrapper = isValMessage && TryGetWrapperFieldType(valFd.MessageType, out resolvedMapWrapperFt);
                 for (int i = 0; i < count; i++)
                 {
                     object key = ReadScalarPayload(body, ref p, keyFd);
                     object val;
-                    if (valFd.FieldType == FieldType.Message)
+                    if (isValMessage)
                     {
                         ReadOnlySpan<byte> sub = OmniBufDecoder.ReadLenSlice(body, ref p, 0);
                         if (isValWrapper)
@@ -830,7 +1016,7 @@ public static class OmniBufProtobuf
 
                 bool alreadySeen = !seen.Add(fnum) || merge;
                 ReadOnlySpan<byte> body = OmniBufDecoder.ReadLenSlice(data, ref pos, 2);
-                OmniBufWireType expElemWt = ScalarWireType(fd.FieldType);
+                OmniBufWireType expElemWt = FieldWireType(fd);
                 if (!OmniBufDecoder.TryParseArrayHeader(body, out OmniBufWireType elemWt, out int count, out int p)
                     || elemWt != expElemWt)
                 {
@@ -890,7 +1076,7 @@ public static class OmniBufProtobuf
                 continue;
             }
 
-            OmniBufWireType expectedWt = ScalarWireType(fd.FieldType);
+            OmniBufWireType expectedWt = FieldWireType(fd);
             if (wt != expectedWt)
             {
                 OmniBufDecoder.ValidateValue(data, ref pos, wt, depth, options);
@@ -898,7 +1084,7 @@ public static class OmniBufProtobuf
             }
 
             bool fieldAlreadySeen = !seen.Add(fnum) || merge;
-            if (fd.FieldType == FieldType.Message)
+            if (IsSupportedMessageField(fd))
             {
                 ReadOnlySpan<byte> subBytes = OmniBufDecoder.ReadLenSlice(data, ref pos, 0);
                 if (TryGetWrapperFieldType(fd.MessageType, out FieldType wrapperFt))
