@@ -147,17 +147,39 @@ public static class OmniBufConstants
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static unsafe string DecodeUtf8StrictPinnedShort(byte* ptr, int len)
+    internal static unsafe string DecodeUtf8StrictPinnedShort(byte* ptr, int len)
     {
-        bool ok = true;
-        string s = string.Create(len, ((nint)ptr, (nint)(&ok)), static (dst, state) =>
+        if (IsAsciiShort(ptr, len))
         {
-            if (!TryWidenAsciiFast((byte*)state.Item1, ref MemoryMarshal.GetReference(dst), dst.Length))
+            return Latin1.GetString(ptr, len);
+        }
+
+        return DecodeUtf8StrictNonAscii(new ReadOnlySpan<byte>(ptr, len));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static unsafe string DecodeUtf8StrictPinnedArrayElem(byte* ptr, int len)
+    {
+        if (len <= 512)
+        {
+            bool ok = true;
+            string s = string.Create(len, ((nint)ptr, (nint)(&ok)), static (dst, state) =>
             {
-                *(bool*)state.Item2 = false;
-            }
-        });
-        return ok ? s : DecodeUtf8StrictNonAscii(new ReadOnlySpan<byte>(ptr, len));
+                if (!TryWidenAsciiFast((byte*)state.Item1, ref MemoryMarshal.GetReference(dst), dst.Length))
+                {
+                    *(bool*)state.Item2 = false;
+                }
+            });
+            return ok ? s : DecodeUtf8StrictNonAscii(new ReadOnlySpan<byte>(ptr, len));
+        }
+
+        ReadOnlySpan<byte> bytes = new(ptr, len);
+        if (Ascii.IsValid(bytes))
+        {
+            return Latin1.GetString(bytes);
+        }
+
+        return DecodeUtf8StrictNonAscii(bytes);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -239,6 +261,56 @@ public static class OmniBufConstants
             byte b = src[i];
             orAll |= b;
             Unsafe.Add(ref d, i) = b;
+        }
+
+        return (orAll & 0x80u) == 0;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static unsafe bool IsAsciiShort(byte* src, int len)
+    {
+        if (Vector128.IsHardwareAccelerated && len >= 16)
+        {
+            int i = 0;
+            int end16 = len - 16;
+            while (true)
+            {
+                if (Vector128.LessThanAny(Vector128.Load(src + i).AsSByte(), Vector128<sbyte>.Zero))
+                {
+                    return false;
+                }
+
+                if (i == end16)
+                {
+                    return true;
+                }
+
+                i += 16;
+                if (i > end16)
+                {
+                    i = end16;
+                }
+            }
+        }
+
+        if (Vector64.IsHardwareAccelerated && len >= 8)
+        {
+            Vector64<byte> v0 = Vector64.Load(src);
+            Vector64<byte> v1 = Vector64.Load(src + len - 8);
+            return !Vector64.LessThanAny((v0 | v1).AsSByte(), Vector64<sbyte>.Zero);
+        }
+
+        if (len >= 4)
+        {
+            uint u0 = Unsafe.ReadUnaligned<uint>(src);
+            uint u1 = Unsafe.ReadUnaligned<uint>(src + len - 4);
+            return ((u0 | u1) & 0x80808080u) == 0;
+        }
+
+        uint orAll = 0;
+        for (int i = 0; i < len; i++)
+        {
+            orAll |= src[i];
         }
 
         return (orAll & 0x80u) == 0;

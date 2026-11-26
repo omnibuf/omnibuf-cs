@@ -403,20 +403,78 @@ public sealed partial class OuterEnvelope
     internal int EstimateOmniBufMinSize(int depth = 0)
     {
         if (depth > 8) return 0;
-        int total = 0;
-        for (int i = 0; i < this.RepBytes.Count; i++) total += 1 + this.RepBytes[i].Length;
-        for (int i = 0; i < this.RepInner.Count; i++) total += 2 + (this.RepInner[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0);
-        if (this.HasOptStr) total += this.OptStr?.Length ?? 0;
-        if (this.OptInner is { } sm_34) total += 3 + sm_34.EstimateOmniBufMinSize(depth + 1);
+        int total = 151;
+        if (this.MapI32Str.Count > 8191) return 16_384;
+        total += this.MapI32Str.Count * 2;
+        if (total > 16_383) return 16_384;
+        if (this.MapI64U32.Count > 8191) return 16_384;
+        total += this.MapI64U32.Count * 2;
+        if (total > 16_383) return 16_384;
+        if (this.MapU32Enum.Count > 8191) return 16_384;
+        total += this.MapU32Enum.Count * 2;
+        if (total > 16_383) return 16_384;
+        if (this.MapU64Msg.Count > 8191) return 16_384;
+        total += this.MapU64Msg.Count * 2;
+        if (total > 16_383) return 16_384;
+        if (this.MapS32S64.Count > 8191) return 16_384;
+        total += this.MapS32S64.Count * 2;
+        if (total > 16_383) return 16_384;
+        if (this.MapS64Bool.Count > 8191) return 16_384;
+        total += this.MapS64Bool.Count * 2;
+        if (total > 16_383) return 16_384;
+        if (this.MapF32Flt.Count > 2047) return 16_384;
+        total += this.MapF32Flt.Count * 8;
+        if (total > 16_383) return 16_384;
+        if (this.MapF64Dbl.Count > 1023) return 16_384;
+        total += this.MapF64Dbl.Count * 16;
+        if (total > 16_383) return 16_384;
+        if (this.MapSf32Bytes.Count > 3276) return 16_384;
+        total += this.MapSf32Bytes.Count * 5;
+        if (total > 16_383) return 16_384;
+        if (this.MapSf64F64.Count > 1023) return 16_384;
+        total += this.MapSf64F64.Count * 16;
+        if (total > 16_383) return 16_384;
+        if (this.MapBoolStr.Count > 8191) return 16_384;
+        total += this.MapBoolStr.Count * 2;
+        if (total > 16_383) return 16_384;
+        if (this.MapStrWrap.Count > 8191) return 16_384;
+        total += this.MapStrWrap.Count * 2;
+        if (total > 16_383) return 16_384;
+        if (this.RepStatus.Count > 16_383) return 16_384;
+        total += this.RepStatus.Count;
+        if (total > 16_383) return 16_384;
+        if (this.RepBool.Count > 16_383) return 16_384;
+        total += this.RepBool.Count;
+        if (total > 16_383) return 16_384;
+        if (this.RepSint64.Count > 16_383) return 16_384;
+        total += this.RepSint64.Count;
+        if (total > 16_383) return 16_384;
+        if (this.RepDouble.Count > 2047) return 16_384;
+        total += this.RepDouble.Count * 8;
+        if (total > 16_383) return 16_384;
+        var est_17 = this.RepBytes;
+        if (est_17.Count > 16_383) return 16_384;
+        for (int i = 0; i < est_17.Count; i++) { total += 1 + est_17[i].Length; if (total > 16_383) return 16_384; }
+        if (this.RepI32Wrap.Count > 8191) return 16_384;
+        total += this.RepI32Wrap.Count * 2;
+        if (total > 16_383) return 16_384;
+        if (this.RepStrWrap.Count > 8191) return 16_384;
+        total += this.RepStrWrap.Count * 2;
+        if (total > 16_383) return 16_384;
+        var est_20 = this.RepInner;
+        if (est_20.Count > 8191) return 16_384;
+        for (int i = 0; i < est_20.Count; i++) { total += 2 + (est_20[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0); if (total > 16_383) return 16_384; }
+        if (this.HasOptStr) total += 3 + (this.OptStr?.Length ?? 0);
+        if (this.OptInner is { } sm_34) { total += 3 + sm_34.EstimateOmniBufMinSize(depth + 1); if (total > 16_383) return 16_384; }
         if (this.ChoiceCase == ChoiceOneofCase.CStr) total += this.CStr?.Length ?? 0;
-        if (this.ChoiceCase == ChoiceOneofCase.CMsg && this.CMsg is { } om_39) total += 3 + om_39.EstimateOmniBufMinSize(depth + 1);
+        if (this.ChoiceCase == ChoiceOneofCase.CMsg && this.CMsg is { } om_39) { total += 3 + om_39.EstimateOmniBufMinSize(depth + 1); if (total > 16_383) return 16_384; }
         total += this.Types_?.Length ?? 0;
         total += this.ToString_?.Length ?? 0;
         total += this.OuterEnvelope_?.Length ?? 0;
         if (this.CollisionChoiceCase == CollisionChoiceOneofCase.Clone_) total += this.Clone_?.Length ?? 0;
-        if (this.SingleInner is { } sm_50) total += 3 + sm_50.EstimateOmniBufMinSize(depth + 1);
+        if (this.SingleInner is { } sm_50) { total += 3 + sm_50.EstimateOmniBufMinSize(depth + 1); if (total > 16_383) return 16_384; }
         total += this.F65High?.Length ?? 0;
-        if (this.F90Sub is { } sm_90) total += 3 + sm_90.EstimateOmniBufMinSize(depth + 1);
+        if (this.F90Sub is { } sm_90) { total += 3 + sm_90.EstimateOmniBufMinSize(depth + 1); if (total > 16_383) return 16_384; }
         return total;
     }
 
@@ -437,15 +495,15 @@ public sealed partial class OuterEnvelope
         EncodeOmniBufBody(encoder, options.Deterministic, 0);
     }
 
-    internal void EncodeOmniBufBody(OmniBufEncoder encoder, bool deterministic, int depth = 0)
+    internal void EncodeOmniBufBody(OmniBufEncoder encoder, bool deterministic, int depth = 0, bool knownSmall = false)
     {
         if (depth > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: encode nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth);
         }
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(1u, OmniBufWireType.Sint, OmniBufWireType.String, this.MapI32Str.Count);
         if (this.MapI32Str.Count > 0)
@@ -474,7 +532,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(2u, OmniBufWireType.Sint, OmniBufWireType.Uint, this.MapI64U32.Count);
         if (this.MapI64U32.Count > 0)
@@ -503,7 +561,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(3u, OmniBufWireType.Uint, OmniBufWireType.Sint, this.MapU32Enum.Count);
         if (this.MapU32Enum.Count > 0)
@@ -532,7 +590,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(4u, OmniBufWireType.Uint, OmniBufWireType.SubMsg, this.MapU64Msg.Count);
         if (this.MapU64Msg.Count > 0)
@@ -573,7 +631,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(5u, OmniBufWireType.Sint, OmniBufWireType.Sint, this.MapS32S64.Count);
         if (this.MapS32S64.Count > 0)
@@ -602,7 +660,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(6u, OmniBufWireType.Sint, OmniBufWireType.BoolFalse, this.MapS64Bool.Count);
         if (this.MapS64Bool.Count > 0)
@@ -631,7 +689,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(7u, OmniBufWireType.Fixed32, OmniBufWireType.Float32, this.MapF32Flt.Count);
         if (this.MapF32Flt.Count > 0)
@@ -660,7 +718,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(8u, OmniBufWireType.Fixed64, OmniBufWireType.Float64, this.MapF64Dbl.Count);
         if (this.MapF64Dbl.Count > 0)
@@ -689,7 +747,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(9u, OmniBufWireType.Sfixed32, OmniBufWireType.Bytes, this.MapSf32Bytes.Count);
         if (this.MapSf32Bytes.Count > 0)
@@ -718,7 +776,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(10u, OmniBufWireType.Sfixed64, OmniBufWireType.Fixed64, this.MapSf64F64.Count);
         if (this.MapSf64F64.Count > 0)
@@ -747,7 +805,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(11u, OmniBufWireType.BoolFalse, OmniBufWireType.String, this.MapBoolStr.Count);
         if (this.MapBoolStr.Count > 0)
@@ -776,7 +834,7 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(12u, OmniBufWireType.String, OmniBufWireType.SubMsg, this.MapStrWrap.Count);
         if (this.MapStrWrap.Count > 0)
@@ -823,309 +881,318 @@ public sealed partial class OuterEnvelope
         encoder.EndMap();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
-        encoder.BeginArrayField(13u, OmniBufWireType.Sint, this.RepStatus.Count);
-        for (int i = 0; i < this.RepStatus.Count; i++)
+        var list_13 = this.RepStatus;
+        int count_13 = list_13.Count;
+        encoder.BeginArrayFieldTag2(0x0376, OmniBufWireType.Sint, count_13);
+        for (int i = 0; i < count_13; i++)
         {
-            encoder.WriteSintValue((int)this.RepStatus[i]);
-        }
-        encoder.EndArray();
-        if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-        {
-            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-        }
-        encoder.BeginArrayField(14u, OmniBufWireType.BoolFalse, this.RepBool.Count);
-        for (int i = 0; i < this.RepBool.Count; i++)
-        {
-            encoder.WriteBoolElement(this.RepBool[i]);
+            encoder.WriteSintValue((int)list_13[i]);
         }
         encoder.EndArray();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
-        encoder.BeginArrayField(15u, OmniBufWireType.Sint, this.RepSint64.Count);
-        for (int i = 0; i < this.RepSint64.Count; i++)
+        var list_14 = this.RepBool;
+        int count_14 = list_14.Count;
+        encoder.BeginArrayFieldTag2(0x03B6, OmniBufWireType.BoolFalse, count_14);
+        for (int i = 0; i < count_14; i++)
         {
-            encoder.WriteSintValue(this.RepSint64[i]);
-        }
-        encoder.EndArray();
-        if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-        {
-            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-        }
-        encoder.BeginArrayField(16u, OmniBufWireType.Float64, this.RepDouble.Count);
-        for (int i = 0; i < this.RepDouble.Count; i++)
-        {
-            encoder.WriteFloat64Value(this.RepDouble[i]);
+            encoder.WriteBoolElement(list_14[i]);
         }
         encoder.EndArray();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
-        encoder.BeginArrayField(17u, OmniBufWireType.Bytes, this.RepBytes.Count);
-        for (int i = 0; i < this.RepBytes.Count; i++)
+        var list_15 = this.RepSint64;
+        int count_15 = list_15.Count;
+        encoder.BeginArrayFieldTag2(0x03F6, OmniBufWireType.Sint, count_15);
+        for (int i = 0; i < count_15; i++)
         {
-            encoder.WriteBytesValue(this.RepBytes[i].Span);
+            encoder.WriteSintValue(list_15[i]);
         }
         encoder.EndArray();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
-        encoder.BeginArrayField(18u, OmniBufWireType.SubMsg, this.RepI32Wrap.Count);
-        for (int i = 0; i < this.RepI32Wrap.Count; i++)
+        encoder.WriteFloat64ArrayFieldTag2(0x0436, this.RepDouble);
+        if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            if (depth + 2 > OmniBufConstants.MaxNestingDepth)
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+        }
+        var list_17 = this.RepBytes;
+        int count_17 = list_17.Count;
+        encoder.BeginArrayFieldTag2(0x0476, OmniBufWireType.Bytes, count_17);
+        for (int i = 0; i < count_17; i++)
+        {
+            encoder.WriteBytesValue(list_17[i].Span);
+        }
+        encoder.EndArray();
+        if (depth + 1 > OmniBufConstants.MaxNestingDepth)
+        {
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+        }
+        var list_18 = this.RepI32Wrap;
+        int count_18 = list_18.Count;
+        encoder.BeginArrayFieldTag2(0x04B6, OmniBufWireType.SubMsg, count_18);
+        if (count_18 > 0)
+        {
+            if (depth + 2 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 2);
+            for (int i = 0; i < count_18; i++)
             {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                encoder.BeginContainer();
+                if (list_18[i].HasValue)
+                {
+                    OmniBufWrappers.WriteInt32Body(encoder, list_18[i]!.Value);
+                }
+                encoder.EndContainer();
             }
-            encoder.BeginContainer();
-            if (this.RepI32Wrap[i].HasValue)
-            {
-                OmniBufWrappers.WriteInt32Body(encoder, this.RepI32Wrap[i]!.Value);
-            }
-            encoder.EndContainer();
         }
         encoder.EndArray();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
-        encoder.BeginArrayField(19u, OmniBufWireType.SubMsg, this.RepStrWrap.Count);
-        for (int i = 0; i < this.RepStrWrap.Count; i++)
+        var list_19 = this.RepStrWrap;
+        int count_19 = list_19.Count;
+        encoder.BeginArrayFieldTag2(0x04F6, OmniBufWireType.SubMsg, count_19);
+        if (count_19 > 0)
         {
-            if (depth + 2 > OmniBufConstants.MaxNestingDepth)
+            if (depth + 2 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 2);
+            for (int i = 0; i < count_19; i++)
             {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                encoder.BeginContainer();
+                if (list_19[i] is not null)
+                {
+                    OmniBufWrappers.WriteStringBody(encoder, list_19[i]);
+                }
+                encoder.EndContainer();
             }
-            encoder.BeginContainer();
-            if (this.RepStrWrap[i] is not null)
-            {
-                OmniBufWrappers.WriteStringBody(encoder, this.RepStrWrap[i]);
-            }
-            encoder.EndContainer();
         }
         encoder.EndArray();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
+        var list_20 = this.RepInner;
+        int count_20 = list_20.Count;
         int arrMin_20 = 2;
-        for (int i = 0; i < this.RepInner.Count; i++) arrMin_20 += 2 + (this.RepInner[i]?.EstimateOmniBufMinSize(0) ?? 0);
-        encoder.BeginArrayField(20u, OmniBufWireType.SubMsg, this.RepInner.Count, arrMin_20);
-        for (int i = 0; i < this.RepInner.Count; i++)
+        bool childKnownSmall_20 = knownSmall;
+        if (!knownSmall && count_20 > 0)
         {
-            if (depth + 2 > OmniBufConstants.MaxNestingDepth)
+            if (count_20 > 8191)
             {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                arrMin_20 = 16_384;
             }
-            encoder.BeginContainer(this.RepInner[i]?.EstimateOmniBufMinSize(0) ?? 0);
-            this.RepInner[i]?.EncodeOmniBufBody(encoder, deterministic, depth + 2);
-            encoder.EndContainer();
+            else
+            {
+                bool anyLarge_20 = false;
+                for (int i = 0; i < count_20; i++)
+                {
+                    int elemMin = list_20[i]?.EstimateOmniBufMinSize(0) ?? 0;
+                    if (elemMin > 16_383)
+                    {
+                        anyLarge_20 = true;
+                        arrMin_20 = 16_384;
+                        break;
+                    }
+                    arrMin_20 += 2 + elemMin;
+                }
+                childKnownSmall_20 = !anyLarge_20;
+            }
+        }
+        encoder.BeginArrayFieldTag2(0x0536, OmniBufWireType.SubMsg, count_20, arrMin_20);
+        if (count_20 > 0)
+        {
+            if (depth + 2 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 2);
+            int childDepth_20 = depth + 2;
+            if (childKnownSmall_20)
+            {
+                for (int i = 0; i < count_20; i++)
+                {
+                    encoder.BeginContainer();
+                    list_20[i]?.EncodeOmniBufBody(encoder, deterministic, childDepth_20, knownSmall: true);
+                    encoder.EndContainer();
+                }
+            }
+            else
+            {
+                for (int i = 0; i < count_20; i++)
+                {
+                    var item = list_20[i];
+                    int elemMin = item?.EstimateOmniBufMinSize(0) ?? 0;
+                    encoder.BeginContainer(elemMin);
+                    item?.EncodeOmniBufBody(encoder, deterministic, childDepth_20, knownSmall: elemMin <= 16_383);
+                    encoder.EndContainer();
+                }
+            }
         }
         encoder.EndArray();
         if (this.WDouble is { } sw_21)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(21u);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            encoder.BeginSubMsgFieldTag2(0x0572);
             OmniBufWrappers.WriteDoubleBody(encoder, sw_21);
             encoder.EndSubMsg();
         }
         if (this.WFloat is { } sw_22)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(22u);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            encoder.BeginSubMsgFieldTag2(0x05B2);
             OmniBufWrappers.WriteFloatBody(encoder, sw_22);
             encoder.EndSubMsg();
         }
         if (this.WInt64 is { } sw_23)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(23u);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            encoder.BeginSubMsgFieldTag2(0x05F2);
             OmniBufWrappers.WriteInt64Body(encoder, sw_23);
             encoder.EndSubMsg();
         }
         if (this.WUint64 is { } sw_24)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(24u);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            encoder.BeginSubMsgFieldTag2(0x0632);
             OmniBufWrappers.WriteUInt64Body(encoder, sw_24);
             encoder.EndSubMsg();
         }
         if (this.WInt32 is { } sw_25)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(25u);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            encoder.BeginSubMsgFieldTag2(0x0672);
             OmniBufWrappers.WriteInt32Body(encoder, sw_25);
             encoder.EndSubMsg();
         }
         if (this.WUint32 is { } sw_26)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(26u);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            encoder.BeginSubMsgFieldTag2(0x06B2);
             OmniBufWrappers.WriteUInt32Body(encoder, sw_26);
             encoder.EndSubMsg();
         }
         if (this.WBool is { } sw_27)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(27u);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            encoder.BeginSubMsgFieldTag2(0x06F2);
             OmniBufWrappers.WriteBoolBody(encoder, sw_27);
             encoder.EndSubMsg();
         }
         if (this.WString is { } sw_28)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(28u);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            encoder.BeginSubMsgFieldTag2(0x0732);
             OmniBufWrappers.WriteStringBody(encoder, sw_28);
             encoder.EndSubMsg();
         }
         if (this.WBytes is { } sw_29)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(29u);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            encoder.BeginSubMsgFieldTag2(0x0772);
             OmniBufWrappers.WriteBytesBody(encoder, sw_29);
             encoder.EndSubMsg();
         }
         if (this.HasOptInt)
         {
-            encoder.WriteSintField(30u, this.OptInt);
+            encoder.WriteSintFieldTag2(0x0786, this.OptInt);
         }
         if (this.HasOptBool)
         {
-            encoder.WriteBoolField(31u, this.OptBool);
+            encoder.WriteBoolFieldTag2(0x07CA, this.OptBool);
         }
         if (this.HasOptStr)
         {
-            encoder.WriteStringField(32u, this.OptStr);
+            encoder.WriteStringFieldTag2(0x082A, this.OptStr);
         }
         if (this.HasOptStatus)
         {
-            encoder.WriteSintField(33u, (int)this.OptStatus);
+            encoder.WriteSintFieldTag2(0x0846, (int)this.OptStatus);
         }
         if (this.OptInner is { } msg_34)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(34u, msg_34.EstimateOmniBufMinSize(0));
-            msg_34.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            int subMin_34 = knownSmall ? 0 : msg_34.EstimateOmniBufMinSize(0);
+            encoder.BeginSubMsgFieldTag2(0x08B2, subMin_34);
+            msg_34.EncodeOmniBufBody(encoder, deterministic, depth + 1, knownSmall: knownSmall || subMin_34 <= 16_383);
             encoder.EndSubMsg();
         }
         if (this.ChoiceCase == ChoiceOneofCase.CInt)
         {
-            encoder.WriteSintField(35u, this.CInt);
+            encoder.WriteSintFieldTag2(0x08C6, this.CInt);
         }
         if (this.ChoiceCase == ChoiceOneofCase.CStr)
         {
-            encoder.WriteStringField(36u, this.CStr);
+            encoder.WriteStringFieldTag2(0x092A, this.CStr);
         }
         if (this.ChoiceCase == ChoiceOneofCase.CBool)
         {
-            encoder.WriteBoolField(37u, this.CBool);
+            encoder.WriteBoolFieldTag2(0x094A, this.CBool);
         }
         if (this.ChoiceCase == ChoiceOneofCase.CStatus)
         {
-            encoder.WriteSintField(38u, (int)this.CStatus);
+            encoder.WriteSintFieldTag2(0x0986, (int)this.CStatus);
         }
         if (this.ChoiceCase == ChoiceOneofCase.CMsg)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(39u);
-            this.CMsg?.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            int subMin_39 = knownSmall ? 0 : (this.CMsg?.EstimateOmniBufMinSize(0) ?? 0);
+            encoder.BeginSubMsgFieldTag2(0x09F2, subMin_39);
+            this.CMsg?.EncodeOmniBufBody(encoder, deterministic, depth + 1, knownSmall: knownSmall || subMin_39 <= 16_383);
             encoder.EndSubMsg();
         }
         if (this.ChoiceCase == ChoiceOneofCase.CWrap)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(40u);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            encoder.BeginSubMsgFieldTag2(0x0A32);
             if (this.CWrap is { } ow_40)
             {
                 OmniBufWrappers.WriteInt32Body(encoder, ow_40);
             }
             encoder.EndSubMsg();
         }
-        encoder.WriteStringField(41u, this.Types_);
+        encoder.WriteStringFieldTag2(0x0A6A, this.Types_);
         if (this.HasDescriptor_)
         {
-            encoder.WriteSintField(42u, this.Descriptor_);
+            encoder.WriteSintFieldTag2(0x0A86, this.Descriptor_);
         }
-        encoder.WriteUintField(43u, this.Parser_);
-        encoder.WriteBoolField(44u, this.Equals_);
-        encoder.WriteStringField(45u, this.ToString_);
-        encoder.WriteUintField(46u, this.GetHashCode_);
-        encoder.WriteStringField(47u, this.OuterEnvelope_);
+        encoder.WriteUintFieldTag2(0x0AC2, this.Parser_);
+        encoder.WriteBoolFieldTag2(0x0B0A, this.Equals_);
+        encoder.WriteStringFieldTag2(0x0B6A, this.ToString_);
+        encoder.WriteUintFieldTag2(0x0B82, this.GetHashCode_);
+        encoder.WriteStringFieldTag2(0x0BEA, this.OuterEnvelope_);
         if (this.CollisionChoiceCase == CollisionChoiceOneofCase.Clone_)
         {
-            encoder.WriteStringField(48u, this.Clone_);
+            encoder.WriteStringFieldTag2(0x0C2A, this.Clone_);
         }
         if (this.CollisionChoiceCase == CollisionChoiceOneofCase.MergeFrom_)
         {
-            encoder.WriteSintField(49u, this.MergeFrom_);
+            encoder.WriteSintFieldTag2(0x0C46, this.MergeFrom_);
         }
         if (this.SingleInner is { } msg_50)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(50u, msg_50.EstimateOmniBufMinSize(0));
-            msg_50.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            int subMin_50 = knownSmall ? 0 : msg_50.EstimateOmniBufMinSize(0);
+            encoder.BeginSubMsgFieldTag2(0x0CB2, subMin_50);
+            msg_50.EncodeOmniBufBody(encoder, deterministic, depth + 1, knownSmall: knownSmall || subMin_50 <= 16_383);
             encoder.EndSubMsg();
         }
-        encoder.WriteUintField(63u, this.F63Boundary);
-        encoder.WriteUintField(64u, this.F64Boundary);
-        encoder.WriteStringField(65u, this.F65High);
+        encoder.WriteUintFieldTag2(0x0FC2, this.F63Boundary);
+        encoder.WriteUintFieldTag2(0x1002, this.F64Boundary);
+        encoder.WriteStringFieldTag2(0x106A, this.F65High);
         if (this.F90Sub is { } msg_90)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(90u, msg_90.EstimateOmniBufMinSize(0));
-            msg_90.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            int subMin_90 = knownSmall ? 0 : msg_90.EstimateOmniBufMinSize(0);
+            encoder.BeginSubMsgFieldTag2(0x16B2, subMin_90);
+            msg_90.EncodeOmniBufBody(encoder, deterministic, depth + 1, knownSmall: knownSmall || subMin_90 <= 16_383);
             encoder.EndSubMsg();
         }
         if (this.HasF130Opt)
         {
-            encoder.WriteSintField(130u, this.F130Opt);
+            encoder.WriteSintFieldTag2(0x2086, this.F130Opt);
         }
     }
 
@@ -2329,10 +2396,10 @@ public sealed partial class OuterEnvelope
                 }
             }
 
+            [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
             internal int EstimateOmniBufMinSize(int depth = 0)
             {
-                if (depth > 8) return 0;
-                int total = 0;
+                int total = 6;
                 total += this.Detail?.Length ?? 0;
                 return total;
             }
@@ -2354,15 +2421,16 @@ public sealed partial class OuterEnvelope
                 EncodeOmniBufBody(encoder, options.Deterministic, 0);
             }
 
-            internal void EncodeOmniBufBody(OmniBufEncoder encoder, bool deterministic, int depth = 0)
+            [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+            internal void EncodeOmniBufBody(OmniBufEncoder encoder, bool deterministic, int depth = 0, bool knownSmall = false)
             {
                 if (depth > OmniBufConstants.MaxNestingDepth)
                 {
-                    throw new OmniBufException($"omnibuf: encode nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                    OmniBufEncoder.ThrowMaxDepthExceeded(depth);
                 }
-                encoder.WriteUintField(1u, this.Code);
-                encoder.WriteStringField(2u, this.Detail);
-                encoder.WriteSintField(3u, (int)this.Mode);
+                encoder.WriteUintFieldTag1(0x21, this.Code);
+                encoder.WriteStringFieldTag1(0x55, this.Detail);
+                encoder.WriteSintFieldTag1(0x63, (int)this.Mode);
             }
 
             private readonly struct OmniBufFreshDecoder : IOmniBufFreshDecoder<global::Omnibuf.Conformance.OuterEnvelope.Types.InnerPayload>
@@ -2393,10 +2461,6 @@ public sealed partial class OuterEnvelope
             [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
             internal void DecodeOmniBufFresh(OmniBufSpanReader rd, int depth, int maxDepth)
             {
-                if (depth > maxDepth)
-                {
-                    OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);
-                }
                 if (rd.MatchTag1(0x21))
                 {
                     this.Code = (uint)rd.ReadVarint();
@@ -2705,17 +2769,17 @@ public sealed partial class OuterEnvelope
                 {
                     case 1u:
                     {
-                        encoder.WriteUintField(1u, d.f_Code!);
+                        encoder.WriteUintFieldTag1(0x21, d.f_Code!);
                         break;
                     }
                     case 2u:
                     {
-                        encoder.WriteStringField(2u, d.f_Detail!);
+                        encoder.WriteStringFieldTag1(0x55, d.f_Detail!);
                         break;
                     }
                     case 3u:
                     {
-                        encoder.WriteSintField(3u, (int)d.f_Mode!);
+                        encoder.WriteSintFieldTag1(0x63, (int)d.f_Mode!);
                         break;
                     }
                 }
@@ -4783,7 +4847,7 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_OptInt)
                 {
-                    encoder.WriteSintField(30u, d.f_OptInt!);
+                    encoder.WriteSintFieldTag2(0x0786, d.f_OptInt!);
                 }
                 break;
             }
@@ -4791,7 +4855,7 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_OptBool)
                 {
-                    encoder.WriteBoolField(31u, d.f_OptBool!);
+                    encoder.WriteBoolFieldTag2(0x07CA, d.f_OptBool!);
                 }
                 break;
             }
@@ -4799,7 +4863,7 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_OptStr)
                 {
-                    encoder.WriteStringField(32u, d.f_OptStr!);
+                    encoder.WriteStringFieldTag2(0x082A, d.f_OptStr!);
                 }
                 break;
             }
@@ -4807,7 +4871,7 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_OptStatus)
                 {
-                    encoder.WriteSintField(33u, (int)d.f_OptStatus!);
+                    encoder.WriteSintFieldTag2(0x0846, (int)d.f_OptStatus!);
                 }
                 break;
             }
@@ -4829,7 +4893,7 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_CInt)
                 {
-                    encoder.WriteSintField(35u, d.f_CInt!);
+                    encoder.WriteSintFieldTag2(0x08C6, d.f_CInt!);
                 }
                 break;
             }
@@ -4837,7 +4901,7 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_CStr)
                 {
-                    encoder.WriteStringField(36u, d.f_CStr!);
+                    encoder.WriteStringFieldTag2(0x092A, d.f_CStr!);
                 }
                 break;
             }
@@ -4845,7 +4909,7 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_CBool)
                 {
-                    encoder.WriteBoolField(37u, d.f_CBool!);
+                    encoder.WriteBoolFieldTag2(0x094A, d.f_CBool!);
                 }
                 break;
             }
@@ -4853,7 +4917,7 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_CStatus)
                 {
-                    encoder.WriteSintField(38u, (int)d.f_CStatus!);
+                    encoder.WriteSintFieldTag2(0x0986, (int)d.f_CStatus!);
                 }
                 break;
             }
@@ -4887,47 +4951,47 @@ public sealed class OpaqueOuterEnvelope
             }
             case 41u:
             {
-                encoder.WriteStringField(41u, d.f_Types_!);
+                encoder.WriteStringFieldTag2(0x0A6A, d.f_Types_!);
                 break;
             }
             case 42u:
             {
                 if (d.present_Descriptor_)
                 {
-                    encoder.WriteSintField(42u, d.f_Descriptor_!);
+                    encoder.WriteSintFieldTag2(0x0A86, d.f_Descriptor_!);
                 }
                 break;
             }
             case 43u:
             {
-                encoder.WriteUintField(43u, d.f_Parser_!);
+                encoder.WriteUintFieldTag2(0x0AC2, d.f_Parser_!);
                 break;
             }
             case 44u:
             {
-                encoder.WriteBoolField(44u, d.f_Equals_!);
+                encoder.WriteBoolFieldTag2(0x0B0A, d.f_Equals_!);
                 break;
             }
             case 45u:
             {
-                encoder.WriteStringField(45u, d.f_ToString_!);
+                encoder.WriteStringFieldTag2(0x0B6A, d.f_ToString_!);
                 break;
             }
             case 46u:
             {
-                encoder.WriteUintField(46u, d.f_GetHashCode_!);
+                encoder.WriteUintFieldTag2(0x0B82, d.f_GetHashCode_!);
                 break;
             }
             case 47u:
             {
-                encoder.WriteStringField(47u, d.f_OuterEnvelope_!);
+                encoder.WriteStringFieldTag2(0x0BEA, d.f_OuterEnvelope_!);
                 break;
             }
             case 48u:
             {
                 if (d.present_Clone_)
                 {
-                    encoder.WriteStringField(48u, d.f_Clone_!);
+                    encoder.WriteStringFieldTag2(0x0C2A, d.f_Clone_!);
                 }
                 break;
             }
@@ -4935,7 +4999,7 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_MergeFrom_)
                 {
-                    encoder.WriteSintField(49u, d.f_MergeFrom_!);
+                    encoder.WriteSintFieldTag2(0x0C46, d.f_MergeFrom_!);
                 }
                 break;
             }
@@ -4955,17 +5019,17 @@ public sealed class OpaqueOuterEnvelope
             }
             case 63u:
             {
-                encoder.WriteUintField(63u, d.f_F63Boundary!);
+                encoder.WriteUintFieldTag2(0x0FC2, d.f_F63Boundary!);
                 break;
             }
             case 64u:
             {
-                encoder.WriteUintField(64u, d.f_F64Boundary!);
+                encoder.WriteUintFieldTag2(0x1002, d.f_F64Boundary!);
                 break;
             }
             case 65u:
             {
-                encoder.WriteStringField(65u, d.f_F65High!);
+                encoder.WriteStringFieldTag2(0x106A, d.f_F65High!);
                 break;
             }
             case 90u:
@@ -4986,7 +5050,7 @@ public sealed class OpaqueOuterEnvelope
             {
                 if (d.present_F130Opt)
                 {
-                    encoder.WriteSintField(130u, d.f_F130Opt!);
+                    encoder.WriteSintFieldTag2(0x2086, d.f_F130Opt!);
                 }
                 break;
             }
@@ -5236,10 +5300,15 @@ public sealed partial class ProtoTreeNode
     internal int EstimateOmniBufMinSize(int depth = 0)
     {
         if (depth > 8) return 0;
-        int total = 0;
+        int total = 15;
         total += this.Name?.Length ?? 0;
-        if (this.Primary is { } sm_3) total += 3 + sm_3.EstimateOmniBufMinSize(depth + 1);
-        for (int i = 0; i < this.Children.Count; i++) total += 2 + (this.Children[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0);
+        if (this.Primary is { } sm_3) { total += 3 + sm_3.EstimateOmniBufMinSize(depth + 1); if (total > 16_383) return 16_384; }
+        var est_4 = this.Children;
+        if (est_4.Count > 8191) return 16_384;
+        for (int i = 0; i < est_4.Count; i++) { total += 2 + (est_4[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0); if (total > 16_383) return 16_384; }
+        if (this.Branches.Count > 8191) return 16_384;
+        total += this.Branches.Count * 2;
+        if (total > 16_383) return 16_384;
         return total;
     }
 
@@ -5260,45 +5329,83 @@ public sealed partial class ProtoTreeNode
         EncodeOmniBufBody(encoder, options.Deterministic, 0);
     }
 
-    internal void EncodeOmniBufBody(OmniBufEncoder encoder, bool deterministic, int depth = 0)
+    internal void EncodeOmniBufBody(OmniBufEncoder encoder, bool deterministic, int depth = 0, bool knownSmall = false)
     {
         if (depth > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: encode nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth);
         }
-        encoder.WriteUintField(1u, this.Id);
-        encoder.WriteStringField(2u, this.Name);
+        encoder.WriteUintFieldTag1(0x21, this.Id);
+        encoder.WriteStringFieldTag1(0x55, this.Name);
         if (this.Primary is { } msg_3)
         {
-            if (depth + 1 > OmniBufConstants.MaxNestingDepth)
-            {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
-            }
-            encoder.BeginSubMsgField(3u, msg_3.EstimateOmniBufMinSize(0));
-            msg_3.EncodeOmniBufBody(encoder, deterministic, depth + 1);
+            if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
+            int subMin_3 = knownSmall ? 0 : msg_3.EstimateOmniBufMinSize(0);
+            encoder.BeginSubMsgFieldTag1(0x79, subMin_3);
+            msg_3.EncodeOmniBufBody(encoder, deterministic, depth + 1, knownSmall: knownSmall || subMin_3 <= 16_383);
             encoder.EndSubMsg();
         }
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
+        var list_4 = this.Children;
+        int count_4 = list_4.Count;
         int arrMin_4 = 2;
-        for (int i = 0; i < this.Children.Count; i++) arrMin_4 += 2 + (this.Children[i]?.EstimateOmniBufMinSize(0) ?? 0);
-        encoder.BeginArrayField(4u, OmniBufWireType.SubMsg, this.Children.Count, arrMin_4);
-        for (int i = 0; i < this.Children.Count; i++)
+        bool childKnownSmall_4 = knownSmall;
+        if (!knownSmall && count_4 > 0)
         {
-            if (depth + 2 > OmniBufConstants.MaxNestingDepth)
+            if (count_4 > 8191)
             {
-                throw new OmniBufException($"omnibuf: encode nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+                arrMin_4 = 16_384;
             }
-            encoder.BeginContainer(this.Children[i]?.EstimateOmniBufMinSize(0) ?? 0);
-            this.Children[i]?.EncodeOmniBufBody(encoder, deterministic, depth + 2);
-            encoder.EndContainer();
+            else
+            {
+                bool anyLarge_4 = false;
+                for (int i = 0; i < count_4; i++)
+                {
+                    int elemMin = list_4[i]?.EstimateOmniBufMinSize(0) ?? 0;
+                    if (elemMin > 16_383)
+                    {
+                        anyLarge_4 = true;
+                        arrMin_4 = 16_384;
+                        break;
+                    }
+                    arrMin_4 += 2 + elemMin;
+                }
+                childKnownSmall_4 = !anyLarge_4;
+            }
+        }
+        encoder.BeginArrayFieldTag1(0x9B, OmniBufWireType.SubMsg, count_4, arrMin_4);
+        if (count_4 > 0)
+        {
+            if (depth + 2 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 2);
+            int childDepth_4 = depth + 2;
+            if (childKnownSmall_4)
+            {
+                for (int i = 0; i < count_4; i++)
+                {
+                    encoder.BeginContainer();
+                    list_4[i]?.EncodeOmniBufBody(encoder, deterministic, childDepth_4, knownSmall: true);
+                    encoder.EndContainer();
+                }
+            }
+            else
+            {
+                for (int i = 0; i < count_4; i++)
+                {
+                    var item = list_4[i];
+                    int elemMin = item?.EstimateOmniBufMinSize(0) ?? 0;
+                    encoder.BeginContainer(elemMin);
+                    item?.EncodeOmniBufBody(encoder, deterministic, childDepth_4, knownSmall: elemMin <= 16_383);
+                    encoder.EndContainer();
+                }
+            }
         }
         encoder.EndArray();
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireMap encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
         encoder.BeginMapField(5u, OmniBufWireType.String, OmniBufWireType.SubMsg, this.Branches.Count);
         if (this.Branches.Count > 0)
@@ -5871,12 +5978,12 @@ public sealed class OpaqueProtoTreeNode
         {
             case 1u:
             {
-                encoder.WriteUintField(1u, d.f_Id!);
+                encoder.WriteUintFieldTag1(0x21, d.f_Id!);
                 break;
             }
             case 2u:
             {
-                encoder.WriteStringField(2u, d.f_Name!);
+                encoder.WriteStringFieldTag1(0x55, d.f_Name!);
                 break;
             }
             case 3u:
@@ -6224,11 +6331,14 @@ public sealed partial class WideMessage
         }
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     internal int EstimateOmniBufMinSize(int depth = 0)
     {
-        if (depth > 8) return 0;
-        int total = 0;
+        int total = 194;
         total += this.F65?.Length ?? 0;
+        if (this.F66.Count > 16_383) return 16_384;
+        total += this.F66.Count;
+        if (total > 16_383) return 16_384;
         return total;
     }
 
@@ -6249,85 +6359,87 @@ public sealed partial class WideMessage
         EncodeOmniBufBody(encoder, options.Deterministic, 0);
     }
 
-    internal void EncodeOmniBufBody(OmniBufEncoder encoder, bool deterministic, int depth = 0)
+    internal void EncodeOmniBufBody(OmniBufEncoder encoder, bool deterministic, int depth = 0, bool knownSmall = false)
     {
         if (depth > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: encode nesting depth {depth} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth);
         }
-        encoder.WriteUintField(1u, this.F1);
-        encoder.WriteUintField(2u, this.F2);
-        encoder.WriteUintField(3u, this.F3);
-        encoder.WriteUintField(4u, this.F4);
-        encoder.WriteUintField(5u, this.F5);
-        encoder.WriteUintField(6u, this.F6);
-        encoder.WriteUintField(7u, this.F7);
-        encoder.WriteUintField(8u, this.F8);
-        encoder.WriteUintField(9u, this.F9);
-        encoder.WriteUintField(10u, this.F10);
-        encoder.WriteUintField(11u, this.F11);
-        encoder.WriteUintField(12u, this.F12);
-        encoder.WriteUintField(13u, this.F13);
-        encoder.WriteUintField(14u, this.F14);
-        encoder.WriteUintField(15u, this.F15);
-        encoder.WriteUintField(16u, this.F16);
-        encoder.WriteUintField(17u, this.F17);
-        encoder.WriteUintField(18u, this.F18);
-        encoder.WriteUintField(19u, this.F19);
-        encoder.WriteUintField(20u, this.F20);
-        encoder.WriteUintField(21u, this.F21);
-        encoder.WriteUintField(22u, this.F22);
-        encoder.WriteUintField(23u, this.F23);
-        encoder.WriteUintField(24u, this.F24);
-        encoder.WriteUintField(25u, this.F25);
-        encoder.WriteUintField(26u, this.F26);
-        encoder.WriteUintField(27u, this.F27);
-        encoder.WriteUintField(28u, this.F28);
-        encoder.WriteUintField(29u, this.F29);
-        encoder.WriteUintField(30u, this.F30);
-        encoder.WriteUintField(31u, this.F31);
-        encoder.WriteUintField(32u, this.F32);
-        encoder.WriteUintField(33u, this.F33);
-        encoder.WriteUintField(34u, this.F34);
-        encoder.WriteUintField(35u, this.F35);
-        encoder.WriteUintField(36u, this.F36);
-        encoder.WriteUintField(37u, this.F37);
-        encoder.WriteUintField(38u, this.F38);
-        encoder.WriteUintField(39u, this.F39);
-        encoder.WriteUintField(40u, this.F40);
-        encoder.WriteUintField(41u, this.F41);
-        encoder.WriteUintField(42u, this.F42);
-        encoder.WriteUintField(43u, this.F43);
-        encoder.WriteUintField(44u, this.F44);
-        encoder.WriteUintField(45u, this.F45);
-        encoder.WriteUintField(46u, this.F46);
-        encoder.WriteUintField(47u, this.F47);
-        encoder.WriteUintField(48u, this.F48);
-        encoder.WriteUintField(49u, this.F49);
-        encoder.WriteUintField(50u, this.F50);
-        encoder.WriteUintField(51u, this.F51);
-        encoder.WriteUintField(52u, this.F52);
-        encoder.WriteUintField(53u, this.F53);
-        encoder.WriteUintField(54u, this.F54);
-        encoder.WriteUintField(55u, this.F55);
-        encoder.WriteUintField(56u, this.F56);
-        encoder.WriteUintField(57u, this.F57);
-        encoder.WriteUintField(58u, this.F58);
-        encoder.WriteUintField(59u, this.F59);
-        encoder.WriteUintField(60u, this.F60);
-        encoder.WriteUintField(61u, this.F61);
-        encoder.WriteUintField(62u, this.F62);
-        encoder.WriteUintField(63u, this.F63);
-        encoder.WriteUintField(64u, this.F64);
-        encoder.WriteStringField(65u, this.F65);
+        encoder.WriteUintFieldTag1(0x21, this.F1);
+        encoder.WriteUintFieldTag1(0x41, this.F2);
+        encoder.WriteUintFieldTag1(0x61, this.F3);
+        encoder.WriteUintFieldTag1(0x81, this.F4);
+        encoder.WriteUintFieldTag1(0xA1, this.F5);
+        encoder.WriteUintFieldTag1(0xC1, this.F6);
+        encoder.WriteUintFieldTag1(0xE1, this.F7);
+        encoder.WriteUintFieldTag2(0x0202, this.F8);
+        encoder.WriteUintFieldTag2(0x0242, this.F9);
+        encoder.WriteUintFieldTag2(0x0282, this.F10);
+        encoder.WriteUintFieldTag2(0x02C2, this.F11);
+        encoder.WriteUintFieldTag2(0x0302, this.F12);
+        encoder.WriteUintFieldTag2(0x0342, this.F13);
+        encoder.WriteUintFieldTag2(0x0382, this.F14);
+        encoder.WriteUintFieldTag2(0x03C2, this.F15);
+        encoder.WriteUintFieldTag2(0x0402, this.F16);
+        encoder.WriteUintFieldTag2(0x0442, this.F17);
+        encoder.WriteUintFieldTag2(0x0482, this.F18);
+        encoder.WriteUintFieldTag2(0x04C2, this.F19);
+        encoder.WriteUintFieldTag2(0x0502, this.F20);
+        encoder.WriteUintFieldTag2(0x0542, this.F21);
+        encoder.WriteUintFieldTag2(0x0582, this.F22);
+        encoder.WriteUintFieldTag2(0x05C2, this.F23);
+        encoder.WriteUintFieldTag2(0x0602, this.F24);
+        encoder.WriteUintFieldTag2(0x0642, this.F25);
+        encoder.WriteUintFieldTag2(0x0682, this.F26);
+        encoder.WriteUintFieldTag2(0x06C2, this.F27);
+        encoder.WriteUintFieldTag2(0x0702, this.F28);
+        encoder.WriteUintFieldTag2(0x0742, this.F29);
+        encoder.WriteUintFieldTag2(0x0782, this.F30);
+        encoder.WriteUintFieldTag2(0x07C2, this.F31);
+        encoder.WriteUintFieldTag2(0x0802, this.F32);
+        encoder.WriteUintFieldTag2(0x0842, this.F33);
+        encoder.WriteUintFieldTag2(0x0882, this.F34);
+        encoder.WriteUintFieldTag2(0x08C2, this.F35);
+        encoder.WriteUintFieldTag2(0x0902, this.F36);
+        encoder.WriteUintFieldTag2(0x0942, this.F37);
+        encoder.WriteUintFieldTag2(0x0982, this.F38);
+        encoder.WriteUintFieldTag2(0x09C2, this.F39);
+        encoder.WriteUintFieldTag2(0x0A02, this.F40);
+        encoder.WriteUintFieldTag2(0x0A42, this.F41);
+        encoder.WriteUintFieldTag2(0x0A82, this.F42);
+        encoder.WriteUintFieldTag2(0x0AC2, this.F43);
+        encoder.WriteUintFieldTag2(0x0B02, this.F44);
+        encoder.WriteUintFieldTag2(0x0B42, this.F45);
+        encoder.WriteUintFieldTag2(0x0B82, this.F46);
+        encoder.WriteUintFieldTag2(0x0BC2, this.F47);
+        encoder.WriteUintFieldTag2(0x0C02, this.F48);
+        encoder.WriteUintFieldTag2(0x0C42, this.F49);
+        encoder.WriteUintFieldTag2(0x0C82, this.F50);
+        encoder.WriteUintFieldTag2(0x0CC2, this.F51);
+        encoder.WriteUintFieldTag2(0x0D02, this.F52);
+        encoder.WriteUintFieldTag2(0x0D42, this.F53);
+        encoder.WriteUintFieldTag2(0x0D82, this.F54);
+        encoder.WriteUintFieldTag2(0x0DC2, this.F55);
+        encoder.WriteUintFieldTag2(0x0E02, this.F56);
+        encoder.WriteUintFieldTag2(0x0E42, this.F57);
+        encoder.WriteUintFieldTag2(0x0E82, this.F58);
+        encoder.WriteUintFieldTag2(0x0EC2, this.F59);
+        encoder.WriteUintFieldTag2(0x0F02, this.F60);
+        encoder.WriteUintFieldTag2(0x0F42, this.F61);
+        encoder.WriteUintFieldTag2(0x0F82, this.F62);
+        encoder.WriteUintFieldTag2(0x0FC2, this.F63);
+        encoder.WriteUintFieldTag2(0x1002, this.F64);
+        encoder.WriteStringFieldTag2(0x106A, this.F65);
         if (depth + 1 > OmniBufConstants.MaxNestingDepth)
         {
-            throw new OmniBufException($"omnibuf: WireArray encode depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
+            OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);
         }
-        encoder.BeginArrayField(66u, OmniBufWireType.Uint, this.F66.Count);
-        for (int i = 0; i < this.F66.Count; i++)
+        var list_66 = this.F66;
+        int count_66 = list_66.Count;
+        encoder.BeginArrayFieldTag2(0x10B6, OmniBufWireType.Uint, count_66);
+        for (int i = 0; i < count_66; i++)
         {
-            encoder.WriteUintValue(this.F66[i]);
+            encoder.WriteUintValue(list_66[i]);
         }
         encoder.EndArray();
     }
@@ -7612,327 +7724,327 @@ public sealed class OpaqueWideMessage
         {
             case 1u:
             {
-                encoder.WriteUintField(1u, d.f_F1!);
+                encoder.WriteUintFieldTag1(0x21, d.f_F1!);
                 break;
             }
             case 2u:
             {
-                encoder.WriteUintField(2u, d.f_F2!);
+                encoder.WriteUintFieldTag1(0x41, d.f_F2!);
                 break;
             }
             case 3u:
             {
-                encoder.WriteUintField(3u, d.f_F3!);
+                encoder.WriteUintFieldTag1(0x61, d.f_F3!);
                 break;
             }
             case 4u:
             {
-                encoder.WriteUintField(4u, d.f_F4!);
+                encoder.WriteUintFieldTag1(0x81, d.f_F4!);
                 break;
             }
             case 5u:
             {
-                encoder.WriteUintField(5u, d.f_F5!);
+                encoder.WriteUintFieldTag1(0xA1, d.f_F5!);
                 break;
             }
             case 6u:
             {
-                encoder.WriteUintField(6u, d.f_F6!);
+                encoder.WriteUintFieldTag1(0xC1, d.f_F6!);
                 break;
             }
             case 7u:
             {
-                encoder.WriteUintField(7u, d.f_F7!);
+                encoder.WriteUintFieldTag1(0xE1, d.f_F7!);
                 break;
             }
             case 8u:
             {
-                encoder.WriteUintField(8u, d.f_F8!);
+                encoder.WriteUintFieldTag2(0x0202, d.f_F8!);
                 break;
             }
             case 9u:
             {
-                encoder.WriteUintField(9u, d.f_F9!);
+                encoder.WriteUintFieldTag2(0x0242, d.f_F9!);
                 break;
             }
             case 10u:
             {
-                encoder.WriteUintField(10u, d.f_F10!);
+                encoder.WriteUintFieldTag2(0x0282, d.f_F10!);
                 break;
             }
             case 11u:
             {
-                encoder.WriteUintField(11u, d.f_F11!);
+                encoder.WriteUintFieldTag2(0x02C2, d.f_F11!);
                 break;
             }
             case 12u:
             {
-                encoder.WriteUintField(12u, d.f_F12!);
+                encoder.WriteUintFieldTag2(0x0302, d.f_F12!);
                 break;
             }
             case 13u:
             {
-                encoder.WriteUintField(13u, d.f_F13!);
+                encoder.WriteUintFieldTag2(0x0342, d.f_F13!);
                 break;
             }
             case 14u:
             {
-                encoder.WriteUintField(14u, d.f_F14!);
+                encoder.WriteUintFieldTag2(0x0382, d.f_F14!);
                 break;
             }
             case 15u:
             {
-                encoder.WriteUintField(15u, d.f_F15!);
+                encoder.WriteUintFieldTag2(0x03C2, d.f_F15!);
                 break;
             }
             case 16u:
             {
-                encoder.WriteUintField(16u, d.f_F16!);
+                encoder.WriteUintFieldTag2(0x0402, d.f_F16!);
                 break;
             }
             case 17u:
             {
-                encoder.WriteUintField(17u, d.f_F17!);
+                encoder.WriteUintFieldTag2(0x0442, d.f_F17!);
                 break;
             }
             case 18u:
             {
-                encoder.WriteUintField(18u, d.f_F18!);
+                encoder.WriteUintFieldTag2(0x0482, d.f_F18!);
                 break;
             }
             case 19u:
             {
-                encoder.WriteUintField(19u, d.f_F19!);
+                encoder.WriteUintFieldTag2(0x04C2, d.f_F19!);
                 break;
             }
             case 20u:
             {
-                encoder.WriteUintField(20u, d.f_F20!);
+                encoder.WriteUintFieldTag2(0x0502, d.f_F20!);
                 break;
             }
             case 21u:
             {
-                encoder.WriteUintField(21u, d.f_F21!);
+                encoder.WriteUintFieldTag2(0x0542, d.f_F21!);
                 break;
             }
             case 22u:
             {
-                encoder.WriteUintField(22u, d.f_F22!);
+                encoder.WriteUintFieldTag2(0x0582, d.f_F22!);
                 break;
             }
             case 23u:
             {
-                encoder.WriteUintField(23u, d.f_F23!);
+                encoder.WriteUintFieldTag2(0x05C2, d.f_F23!);
                 break;
             }
             case 24u:
             {
-                encoder.WriteUintField(24u, d.f_F24!);
+                encoder.WriteUintFieldTag2(0x0602, d.f_F24!);
                 break;
             }
             case 25u:
             {
-                encoder.WriteUintField(25u, d.f_F25!);
+                encoder.WriteUintFieldTag2(0x0642, d.f_F25!);
                 break;
             }
             case 26u:
             {
-                encoder.WriteUintField(26u, d.f_F26!);
+                encoder.WriteUintFieldTag2(0x0682, d.f_F26!);
                 break;
             }
             case 27u:
             {
-                encoder.WriteUintField(27u, d.f_F27!);
+                encoder.WriteUintFieldTag2(0x06C2, d.f_F27!);
                 break;
             }
             case 28u:
             {
-                encoder.WriteUintField(28u, d.f_F28!);
+                encoder.WriteUintFieldTag2(0x0702, d.f_F28!);
                 break;
             }
             case 29u:
             {
-                encoder.WriteUintField(29u, d.f_F29!);
+                encoder.WriteUintFieldTag2(0x0742, d.f_F29!);
                 break;
             }
             case 30u:
             {
-                encoder.WriteUintField(30u, d.f_F30!);
+                encoder.WriteUintFieldTag2(0x0782, d.f_F30!);
                 break;
             }
             case 31u:
             {
-                encoder.WriteUintField(31u, d.f_F31!);
+                encoder.WriteUintFieldTag2(0x07C2, d.f_F31!);
                 break;
             }
             case 32u:
             {
-                encoder.WriteUintField(32u, d.f_F32!);
+                encoder.WriteUintFieldTag2(0x0802, d.f_F32!);
                 break;
             }
             case 33u:
             {
-                encoder.WriteUintField(33u, d.f_F33!);
+                encoder.WriteUintFieldTag2(0x0842, d.f_F33!);
                 break;
             }
             case 34u:
             {
-                encoder.WriteUintField(34u, d.f_F34!);
+                encoder.WriteUintFieldTag2(0x0882, d.f_F34!);
                 break;
             }
             case 35u:
             {
-                encoder.WriteUintField(35u, d.f_F35!);
+                encoder.WriteUintFieldTag2(0x08C2, d.f_F35!);
                 break;
             }
             case 36u:
             {
-                encoder.WriteUintField(36u, d.f_F36!);
+                encoder.WriteUintFieldTag2(0x0902, d.f_F36!);
                 break;
             }
             case 37u:
             {
-                encoder.WriteUintField(37u, d.f_F37!);
+                encoder.WriteUintFieldTag2(0x0942, d.f_F37!);
                 break;
             }
             case 38u:
             {
-                encoder.WriteUintField(38u, d.f_F38!);
+                encoder.WriteUintFieldTag2(0x0982, d.f_F38!);
                 break;
             }
             case 39u:
             {
-                encoder.WriteUintField(39u, d.f_F39!);
+                encoder.WriteUintFieldTag2(0x09C2, d.f_F39!);
                 break;
             }
             case 40u:
             {
-                encoder.WriteUintField(40u, d.f_F40!);
+                encoder.WriteUintFieldTag2(0x0A02, d.f_F40!);
                 break;
             }
             case 41u:
             {
-                encoder.WriteUintField(41u, d.f_F41!);
+                encoder.WriteUintFieldTag2(0x0A42, d.f_F41!);
                 break;
             }
             case 42u:
             {
-                encoder.WriteUintField(42u, d.f_F42!);
+                encoder.WriteUintFieldTag2(0x0A82, d.f_F42!);
                 break;
             }
             case 43u:
             {
-                encoder.WriteUintField(43u, d.f_F43!);
+                encoder.WriteUintFieldTag2(0x0AC2, d.f_F43!);
                 break;
             }
             case 44u:
             {
-                encoder.WriteUintField(44u, d.f_F44!);
+                encoder.WriteUintFieldTag2(0x0B02, d.f_F44!);
                 break;
             }
             case 45u:
             {
-                encoder.WriteUintField(45u, d.f_F45!);
+                encoder.WriteUintFieldTag2(0x0B42, d.f_F45!);
                 break;
             }
             case 46u:
             {
-                encoder.WriteUintField(46u, d.f_F46!);
+                encoder.WriteUintFieldTag2(0x0B82, d.f_F46!);
                 break;
             }
             case 47u:
             {
-                encoder.WriteUintField(47u, d.f_F47!);
+                encoder.WriteUintFieldTag2(0x0BC2, d.f_F47!);
                 break;
             }
             case 48u:
             {
-                encoder.WriteUintField(48u, d.f_F48!);
+                encoder.WriteUintFieldTag2(0x0C02, d.f_F48!);
                 break;
             }
             case 49u:
             {
-                encoder.WriteUintField(49u, d.f_F49!);
+                encoder.WriteUintFieldTag2(0x0C42, d.f_F49!);
                 break;
             }
             case 50u:
             {
-                encoder.WriteUintField(50u, d.f_F50!);
+                encoder.WriteUintFieldTag2(0x0C82, d.f_F50!);
                 break;
             }
             case 51u:
             {
-                encoder.WriteUintField(51u, d.f_F51!);
+                encoder.WriteUintFieldTag2(0x0CC2, d.f_F51!);
                 break;
             }
             case 52u:
             {
-                encoder.WriteUintField(52u, d.f_F52!);
+                encoder.WriteUintFieldTag2(0x0D02, d.f_F52!);
                 break;
             }
             case 53u:
             {
-                encoder.WriteUintField(53u, d.f_F53!);
+                encoder.WriteUintFieldTag2(0x0D42, d.f_F53!);
                 break;
             }
             case 54u:
             {
-                encoder.WriteUintField(54u, d.f_F54!);
+                encoder.WriteUintFieldTag2(0x0D82, d.f_F54!);
                 break;
             }
             case 55u:
             {
-                encoder.WriteUintField(55u, d.f_F55!);
+                encoder.WriteUintFieldTag2(0x0DC2, d.f_F55!);
                 break;
             }
             case 56u:
             {
-                encoder.WriteUintField(56u, d.f_F56!);
+                encoder.WriteUintFieldTag2(0x0E02, d.f_F56!);
                 break;
             }
             case 57u:
             {
-                encoder.WriteUintField(57u, d.f_F57!);
+                encoder.WriteUintFieldTag2(0x0E42, d.f_F57!);
                 break;
             }
             case 58u:
             {
-                encoder.WriteUintField(58u, d.f_F58!);
+                encoder.WriteUintFieldTag2(0x0E82, d.f_F58!);
                 break;
             }
             case 59u:
             {
-                encoder.WriteUintField(59u, d.f_F59!);
+                encoder.WriteUintFieldTag2(0x0EC2, d.f_F59!);
                 break;
             }
             case 60u:
             {
-                encoder.WriteUintField(60u, d.f_F60!);
+                encoder.WriteUintFieldTag2(0x0F02, d.f_F60!);
                 break;
             }
             case 61u:
             {
-                encoder.WriteUintField(61u, d.f_F61!);
+                encoder.WriteUintFieldTag2(0x0F42, d.f_F61!);
                 break;
             }
             case 62u:
             {
-                encoder.WriteUintField(62u, d.f_F62!);
+                encoder.WriteUintFieldTag2(0x0F82, d.f_F62!);
                 break;
             }
             case 63u:
             {
-                encoder.WriteUintField(63u, d.f_F63!);
+                encoder.WriteUintFieldTag2(0x0FC2, d.f_F63!);
                 break;
             }
             case 64u:
             {
-                encoder.WriteUintField(64u, d.f_F64!);
+                encoder.WriteUintFieldTag2(0x1002, d.f_F64!);
                 break;
             }
             case 65u:
             {
-                encoder.WriteStringField(65u, d.f_F65!);
+                encoder.WriteStringFieldTag2(0x106A, d.f_F65!);
                 break;
             }
             case 66u:

@@ -1,9 +1,12 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Text;
 using System.Text.Unicode;
+using Google.Protobuf.Collections;
 
 namespace OmniBuf;
 
@@ -134,10 +137,9 @@ public sealed class OmniBufEncoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void EnsureSpace(int needed)
     {
-        long required = (long)_pos + needed;
-        if (needed < 0 || required > _buf.Length)
+        if ((uint)(_buf.Length - _pos) < (uint)needed)
         {
-            GrowBuffer(required);
+            GrowBuffer(needed < 0 ? -1L : (long)_pos + needed);
         }
     }
 
@@ -290,15 +292,120 @@ public sealed class OmniBufEncoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void WriteStringValue(string? value)
     {
-        string s = value ?? string.Empty;
-        int charLen = s.Length;
-        if (charLen == 0)
+        if (string.IsNullOrEmpty(value))
         {
             EnsureSpace(1);
-            _buf[_pos++] = 1; // 1B Prefix-Varint for 0
+            Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos++) = 1; // 1B Prefix-Varint for 0
             return;
         }
 
+        int charLen = value.Length;
+        if (charLen <= 127)
+        {
+            EnsureSpace(1 + charLen);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            dst = (byte)((charLen << 1) | 1);
+            if (TryNarrowAsciiShort(ref MemoryMarshal.GetReference(value.AsSpan()), ref Unsafe.Add(ref dst, 1), charLen))
+            {
+                _pos += 1 + charLen;
+                return;
+            }
+        }
+
+        WriteStringValueSlow(value);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool TryNarrowAsciiShort(ref char src, ref byte dst, int charLen)
+    {
+        if (Vector128.IsHardwareAccelerated && charLen >= 8)
+        {
+            if (charLen <= 16)
+            {
+                ref ushort s = ref Unsafe.As<char, ushort>(ref src);
+                Vector128<ushort> v0 = Vector128.LoadUnsafe(ref s);
+                Vector128<ushort> v1 = Vector128.LoadUnsafe(ref s, (nuint)(charLen - 8));
+                if (Vector128.GreaterThanAny(v0 | v1, Vector128.Create((ushort)0x007F)))
+                {
+                    return false;
+                }
+
+                Vector128<byte> narrowed = Vector128.Narrow(v0, v1);
+                narrowed.GetLower().StoreUnsafe(ref dst);
+                narrowed.GetUpper().StoreUnsafe(ref dst, (nuint)(charLen - 8));
+                return true;
+            }
+
+            return TryNarrowAsciiMedium(ref src, ref dst, charLen);
+        }
+
+        if (BitConverter.IsLittleEndian && charLen >= 4)
+        {
+            ref byte sb = ref Unsafe.As<char, byte>(ref src);
+            ulong u0 = Unsafe.ReadUnaligned<ulong>(ref sb);
+            int tail = charLen - 4;
+            ulong u1 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref sb, tail * 2));
+            if (((u0 | u1) & 0xFF80FF80FF80FF80UL) != 0)
+            {
+                return false;
+            }
+
+            dst = (byte)u0;
+            Unsafe.Add(ref dst, 1) = (byte)(u0 >> 16);
+            Unsafe.Add(ref dst, 2) = (byte)(u0 >> 32);
+            Unsafe.Add(ref dst, 3) = (byte)(u0 >> 48);
+            Unsafe.Add(ref dst, tail) = (byte)u1;
+            Unsafe.Add(ref dst, tail + 1) = (byte)(u1 >> 16);
+            Unsafe.Add(ref dst, tail + 2) = (byte)(u1 >> 32);
+            Unsafe.Add(ref dst, tail + 3) = (byte)(u1 >> 48);
+            return true;
+        }
+
+        uint orAll = 0;
+        for (int i = 0; i < charLen; i++)
+        {
+            uint c = Unsafe.Add(ref src, i);
+            orAll |= c;
+            Unsafe.Add(ref dst, i) = (byte)c;
+        }
+
+        return (orAll & ~0x7Fu) == 0;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool TryNarrowAsciiMedium(ref char src, ref byte dst, int charLen)
+    {
+        ref ushort s = ref Unsafe.As<char, ushort>(ref src);
+        Vector128<ushort> asciiMax = Vector128.Create((ushort)0x007F);
+        int i = 0;
+        int end16 = charLen - 16;
+        while (true)
+        {
+            Vector128<ushort> v0 = Vector128.LoadUnsafe(ref s, (nuint)i);
+            Vector128<ushort> v1 = Vector128.LoadUnsafe(ref s, (nuint)(i + 8));
+            if (Vector128.GreaterThanAny(v0 | v1, asciiMax))
+            {
+                return false;
+            }
+
+            Vector128.Narrow(v0, v1).StoreUnsafe(ref dst, (nuint)i);
+            if (i == end16)
+            {
+                return true;
+            }
+
+            i += 16;
+            if (i > end16)
+            {
+                i = end16;
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void WriteStringValueSlow(string s)
+    {
+        int charLen = s.Length;
         int headerLen = charLen <= 127 ? 1 : (charLen <= 16_383 ? 2 : (charLen <= 536_870_911 ? 4 : 9));
         long minNeeded = (long)headerLen + charLen;
         if (minNeeded > Array.MaxLength)
@@ -320,22 +427,36 @@ public sealed class OmniBufEncoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void WriteFixedWidthVarintAt(int offset, ulong v, int width)
     {
+        ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), offset);
         if (width == 1)
         {
-            _buf[offset] = (byte)((v << 1) | 1);
+            dst = (byte)((v << 1) | 1);
         }
         else if (width == 2)
         {
-            BinaryPrimitives.WriteUInt16LittleEndian(_buf.AsSpan(offset, 2), (ushort)((v << 2) | 2));
+            ushort enc = (ushort)((v << 2) | 2);
+            if (!BitConverter.IsLittleEndian)
+            {
+                enc = BinaryPrimitives.ReverseEndianness(enc);
+            }
+
+            Unsafe.WriteUnaligned(ref dst, enc);
         }
         else if (width == 4)
         {
-            BinaryPrimitives.WriteUInt32LittleEndian(_buf.AsSpan(offset, 4), (uint)((v << 3) | 4));
+            uint enc = (uint)((v << 3) | 4);
+            if (!BitConverter.IsLittleEndian)
+            {
+                enc = BinaryPrimitives.ReverseEndianness(enc);
+            }
+
+            Unsafe.WriteUnaligned(ref dst, enc);
         }
         else
         {
-            _buf[offset] = 0;
-            BinaryPrimitives.WriteUInt64LittleEndian(_buf.AsSpan(offset + 1, 8), v);
+            dst = 0;
+            ulong enc = BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 1), enc);
         }
     }
 
@@ -484,6 +605,783 @@ public sealed class OmniBufEncoder
         WriteRawBytes(payload);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteTag1(byte encodedTag)
+    {
+        EnsureSpace(1);
+        Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos++) = encodedTag;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteTag2(ushort encodedTagLE)
+    {
+        EnsureSpace(2);
+        ushort enc = BitConverter.IsLittleEndian ? encodedTagLE : BinaryPrimitives.ReverseEndianness(encodedTagLE);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos), enc);
+        _pos += 2;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteBoolFieldTag1(byte encodedFalseTag, bool v)
+    {
+        EnsureSpace(1);
+        Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos++) = (byte)(encodedFalseTag + (v ? 2 : 0));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteBoolFieldTag2(ushort encodedFalseTagLE, bool v)
+    {
+        EnsureSpace(2);
+        ushort enc = (ushort)(encodedFalseTagLE + (v ? 4 : 0));
+        if (!BitConverter.IsLittleEndian)
+        {
+            enc = BinaryPrimitives.ReverseEndianness(enc);
+        }
+
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos), enc);
+        _pos += 2;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteUintFieldTag1(byte encodedTag, ulong v)
+    {
+        if (v <= 127)
+        {
+            EnsureSpace(2);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            dst = encodedTag;
+            Unsafe.Add(ref dst, 1) = (byte)((v << 1) | 1);
+            _pos += 2;
+        }
+        else if (v <= 16_383)
+        {
+            EnsureSpace(3);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            dst = encodedTag;
+            ushort enc = (ushort)((v << 2) | 2);
+            if (!BitConverter.IsLittleEndian)
+            {
+                enc = BinaryPrimitives.ReverseEndianness(enc);
+            }
+
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 1), enc);
+            _pos += 3;
+        }
+        else if (v <= 536_870_911)
+        {
+            EnsureSpace(5);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            dst = encodedTag;
+            uint enc = (uint)((v << 3) | 4);
+            if (!BitConverter.IsLittleEndian)
+            {
+                enc = BinaryPrimitives.ReverseEndianness(enc);
+            }
+
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 1), enc);
+            _pos += 5;
+        }
+        else
+        {
+            EnsureSpace(10);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            dst = encodedTag;
+            Unsafe.Add(ref dst, 1) = 0;
+            ulong enc = BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 2), enc);
+            _pos += 10;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteUintFieldTag2(ushort encodedTagLE, ulong v)
+    {
+        ushort tagEnc = BitConverter.IsLittleEndian ? encodedTagLE : BinaryPrimitives.ReverseEndianness(encodedTagLE);
+        if (v <= 127)
+        {
+            EnsureSpace(3);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            Unsafe.WriteUnaligned(ref dst, tagEnc);
+            Unsafe.Add(ref dst, 2) = (byte)((v << 1) | 1);
+            _pos += 3;
+        }
+        else if (v <= 16_383)
+        {
+            EnsureSpace(4);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            ushort valEnc = (ushort)((v << 2) | 2);
+            if (!BitConverter.IsLittleEndian)
+            {
+                valEnc = BinaryPrimitives.ReverseEndianness(valEnc);
+            }
+
+            Unsafe.WriteUnaligned(ref dst, tagEnc);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 2), valEnc);
+            _pos += 4;
+        }
+        else if (v <= 536_870_911)
+        {
+            EnsureSpace(6);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            uint valEnc = (uint)((v << 3) | 4);
+            if (!BitConverter.IsLittleEndian)
+            {
+                valEnc = BinaryPrimitives.ReverseEndianness(valEnc);
+            }
+
+            Unsafe.WriteUnaligned(ref dst, tagEnc);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 2), valEnc);
+            _pos += 6;
+        }
+        else
+        {
+            EnsureSpace(11);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            ulong valEnc = BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
+            Unsafe.WriteUnaligned(ref dst, tagEnc);
+            Unsafe.Add(ref dst, 2) = 0;
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 3), valEnc);
+            _pos += 11;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteSintFieldTag1(byte encodedTag, long v) =>
+        WriteUintFieldTag1(encodedTag, OmniBufConstants.ZigZagEncode64(v));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteSintFieldTag2(ushort encodedTagLE, long v) =>
+        WriteUintFieldTag2(encodedTagLE, OmniBufConstants.ZigZagEncode64(v));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteFixed32FieldTag1(byte encodedTag, uint v)
+    {
+        EnsureSpace(5);
+        ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+        dst = encodedTag;
+        uint enc = BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 1), enc);
+        _pos += 5;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteFixed32FieldTag2(ushort encodedTagLE, uint v)
+    {
+        EnsureSpace(6);
+        ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+        ushort tagEnc = BitConverter.IsLittleEndian ? encodedTagLE : BinaryPrimitives.ReverseEndianness(encodedTagLE);
+        uint valEnc = BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
+        Unsafe.WriteUnaligned(ref dst, tagEnc);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 2), valEnc);
+        _pos += 6;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteSfixed32FieldTag1(byte encodedTag, int v) => WriteFixed32FieldTag1(encodedTag, (uint)v);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteSfixed32FieldTag2(ushort encodedTagLE, int v) => WriteFixed32FieldTag2(encodedTagLE, (uint)v);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteFloat32FieldTag1(byte encodedTag, float v) => WriteFixed32FieldTag1(encodedTag, BitConverter.SingleToUInt32Bits(v));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteFloat32FieldTag2(ushort encodedTagLE, float v) => WriteFixed32FieldTag2(encodedTagLE, BitConverter.SingleToUInt32Bits(v));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteFixed64FieldTag1(byte encodedTag, ulong v)
+    {
+        EnsureSpace(9);
+        ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+        dst = encodedTag;
+        ulong enc = BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 1), enc);
+        _pos += 9;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteFixed64FieldTag2(ushort encodedTagLE, ulong v)
+    {
+        EnsureSpace(10);
+        ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+        ushort tagEnc = BitConverter.IsLittleEndian ? encodedTagLE : BinaryPrimitives.ReverseEndianness(encodedTagLE);
+        ulong valEnc = BitConverter.IsLittleEndian ? v : BinaryPrimitives.ReverseEndianness(v);
+        Unsafe.WriteUnaligned(ref dst, tagEnc);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 2), valEnc);
+        _pos += 10;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteSfixed64FieldTag1(byte encodedTag, long v) => WriteFixed64FieldTag1(encodedTag, (ulong)v);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteSfixed64FieldTag2(ushort encodedTagLE, long v) => WriteFixed64FieldTag2(encodedTagLE, (ulong)v);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteFloat64FieldTag1(byte encodedTag, double v) => WriteFixed64FieldTag1(encodedTag, BitConverter.DoubleToUInt64Bits(v));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteFloat64FieldTag2(ushort encodedTagLE, double v) => WriteFixed64FieldTag2(encodedTagLE, BitConverter.DoubleToUInt64Bits(v));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteStringFieldTag1(byte encodedTag, string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            EnsureSpace(2);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            dst = encodedTag;
+            Unsafe.Add(ref dst, 1) = 1;
+            _pos += 2;
+            return;
+        }
+
+        int charLen = value.Length;
+        if (charLen <= 127)
+        {
+            EnsureSpace(2 + charLen);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            dst = encodedTag;
+            Unsafe.Add(ref dst, 1) = (byte)((charLen << 1) | 1);
+            if (TryNarrowAsciiShort(ref MemoryMarshal.GetReference(value.AsSpan()), ref Unsafe.Add(ref dst, 2), charLen))
+            {
+                _pos += 2 + charLen;
+                return;
+            }
+        }
+
+        WriteStringFieldTag1Slow(encodedTag, value);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void WriteStringFieldTag1Slow(byte encodedTag, string value)
+    {
+        WriteTag1(encodedTag);
+        WriteStringValueSlow(value);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteStringFieldTag2(ushort encodedTagLE, string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            EnsureSpace(3);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            ushort tagEnc = BitConverter.IsLittleEndian ? encodedTagLE : BinaryPrimitives.ReverseEndianness(encodedTagLE);
+            Unsafe.WriteUnaligned(ref dst, tagEnc);
+            Unsafe.Add(ref dst, 2) = 1;
+            _pos += 3;
+            return;
+        }
+
+        int charLen = value.Length;
+        if (charLen <= 127)
+        {
+            EnsureSpace(3 + charLen);
+            ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), _pos);
+            ushort tagEnc = BitConverter.IsLittleEndian ? encodedTagLE : BinaryPrimitives.ReverseEndianness(encodedTagLE);
+            Unsafe.WriteUnaligned(ref dst, tagEnc);
+            Unsafe.Add(ref dst, 2) = (byte)((charLen << 1) | 1);
+            if (TryNarrowAsciiShort(ref MemoryMarshal.GetReference(value.AsSpan()), ref Unsafe.Add(ref dst, 3), charLen))
+            {
+                _pos += 3 + charLen;
+                return;
+            }
+        }
+
+        WriteStringFieldTag2Slow(encodedTagLE, value);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void WriteStringFieldTag2Slow(ushort encodedTagLE, string value)
+    {
+        WriteTag2(encodedTagLE);
+        WriteStringValueSlow(value);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteBytesFieldTag1(byte encodedTag, ReadOnlySpan<byte> value)
+    {
+        WriteTag1(encodedTag);
+        WriteBytesValue(value);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void WriteBytesFieldTag2(ushort encodedTagLE, ReadOnlySpan<byte> value)
+    {
+        WriteTag2(encodedTagLE);
+        WriteBytesValue(value);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ref byte BeginBulkFixedArrayTag1(byte encodedTag, OmniBufWireType elemType, int count, int elemSize)
+    {
+        if (_depth >= _maxDepth)
+        {
+            ThrowMaxDepthExceeded(_depth + 1, _maxDepth);
+        }
+
+        int countVarintLen = count <= 127 ? 1 : (count <= 16_383 ? 2 : (count <= 536_870_911 ? 4 : 9));
+        long dataBytes = (long)count * elemSize;
+        long bodyLen = 1L + countVarintLen + dataBytes;
+        int lenVarintLen = bodyLen <= 16_383 ? 2 : (bodyLen <= 536_870_911 ? 4 : 9);
+        long totalNeeded = 1L + lenVarintLen + bodyLen;
+        if (totalNeeded > Array.MaxLength)
+        {
+            GrowBuffer(totalNeeded);
+        }
+
+        EnsureSpace((int)totalNeeded);
+        int p = _pos;
+        ref byte bufRef = ref MemoryMarshal.GetArrayDataReference(_buf);
+        Unsafe.Add(ref bufRef, p++) = encodedTag;
+        WriteFixedWidthVarintAt(p, (ulong)bodyLen, lenVarintLen);
+        p += lenVarintLen;
+        Unsafe.Add(ref bufRef, p++) = (byte)elemType;
+        WriteFixedWidthVarintAt(p, (ulong)count, countVarintLen);
+        p += countVarintLen;
+        _pos = p;
+        return ref Unsafe.Add(ref bufRef, p);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ref byte BeginBulkFixedArrayTag2(ushort encodedTagLE, OmniBufWireType elemType, int count, int elemSize)
+    {
+        if (_depth >= _maxDepth)
+        {
+            ThrowMaxDepthExceeded(_depth + 1, _maxDepth);
+        }
+
+        int countVarintLen = count <= 127 ? 1 : (count <= 16_383 ? 2 : (count <= 536_870_911 ? 4 : 9));
+        long dataBytes = (long)count * elemSize;
+        long bodyLen = 1L + countVarintLen + dataBytes;
+        int lenVarintLen = bodyLen <= 16_383 ? 2 : (bodyLen <= 536_870_911 ? 4 : 9);
+        long totalNeeded = 2L + lenVarintLen + bodyLen;
+        if (totalNeeded > Array.MaxLength)
+        {
+            GrowBuffer(totalNeeded);
+        }
+
+        EnsureSpace((int)totalNeeded);
+        int p = _pos;
+        ref byte bufRef = ref MemoryMarshal.GetArrayDataReference(_buf);
+        ushort tagEnc = BitConverter.IsLittleEndian ? encodedTagLE : BinaryPrimitives.ReverseEndianness(encodedTagLE);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref bufRef, p), tagEnc);
+        p += 2;
+        WriteFixedWidthVarintAt(p, (ulong)bodyLen, lenVarintLen);
+        p += lenVarintLen;
+        Unsafe.Add(ref bufRef, p++) = (byte)elemType;
+        WriteFixedWidthVarintAt(p, (ulong)count, countVarintLen);
+        p += countVarintLen;
+        _pos = p;
+        return ref Unsafe.Add(ref bufRef, p);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ref byte BeginBulkFixedArray(uint fieldNum, OmniBufWireType elemType, int count, int elemSize)
+    {
+        if (_depth >= _maxDepth)
+        {
+            ThrowMaxDepthExceeded(_depth + 1, _maxDepth);
+        }
+
+        WriteTag(fieldNum, OmniBufWireType.Array);
+        int countVarintLen = count <= 127 ? 1 : (count <= 16_383 ? 2 : (count <= 536_870_911 ? 4 : 9));
+        long dataBytes = (long)count * elemSize;
+        long bodyLen = 1L + countVarintLen + dataBytes;
+        int lenVarintLen = bodyLen <= 16_383 ? 2 : (bodyLen <= 536_870_911 ? 4 : 9);
+        long totalNeeded = lenVarintLen + bodyLen;
+        if (totalNeeded > Array.MaxLength)
+        {
+            GrowBuffer(totalNeeded);
+        }
+
+        EnsureSpace((int)totalNeeded);
+        int p = _pos;
+        ref byte bufRef = ref MemoryMarshal.GetArrayDataReference(_buf);
+        WriteFixedWidthVarintAt(p, (ulong)bodyLen, lenVarintLen);
+        p += lenVarintLen;
+        Unsafe.Add(ref bufRef, p++) = (byte)elemType;
+        WriteFixedWidthVarintAt(p, (ulong)count, countVarintLen);
+        p += countVarintLen;
+        _pos = p;
+        return ref Unsafe.Add(ref bufRef, p);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void WriteFloat64Elements(ref byte dst, RepeatedField<double> values, int count)
+    {
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, values[i]);
+                dst = ref Unsafe.Add(ref dst, 8);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, BinaryPrimitives.ReverseEndianness(BitConverter.DoubleToUInt64Bits(values[i])));
+                dst = ref Unsafe.Add(ref dst, 8);
+            }
+        }
+
+        _pos += count * 8;
+    }
+
+    public void WriteFloat64ArrayFieldTag1(byte encodedTag, RepeatedField<double> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag1(encodedTag, OmniBufWireType.Float64, count, 8);
+        WriteFloat64Elements(ref dst, values, count);
+    }
+
+    public void WriteFloat64ArrayFieldTag2(ushort encodedTagLE, RepeatedField<double> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag2(encodedTagLE, OmniBufWireType.Float64, count, 8);
+        WriteFloat64Elements(ref dst, values, count);
+    }
+
+    public void WriteFloat64ArrayField(uint fieldNum, RepeatedField<double> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArray(fieldNum, OmniBufWireType.Float64, count, 8);
+        WriteFloat64Elements(ref dst, values, count);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void WriteFixed64Elements(ref byte dst, RepeatedField<ulong> values, int count)
+    {
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, values[i]);
+                dst = ref Unsafe.Add(ref dst, 8);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, BinaryPrimitives.ReverseEndianness(values[i]));
+                dst = ref Unsafe.Add(ref dst, 8);
+            }
+        }
+
+        _pos += count * 8;
+    }
+
+    public void WriteFixed64ArrayFieldTag1(byte encodedTag, RepeatedField<ulong> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag1(encodedTag, OmniBufWireType.Fixed64, count, 8);
+        WriteFixed64Elements(ref dst, values, count);
+    }
+
+    public void WriteFixed64ArrayFieldTag2(ushort encodedTagLE, RepeatedField<ulong> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag2(encodedTagLE, OmniBufWireType.Fixed64, count, 8);
+        WriteFixed64Elements(ref dst, values, count);
+    }
+
+    public void WriteFixed64ArrayField(uint fieldNum, RepeatedField<ulong> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArray(fieldNum, OmniBufWireType.Fixed64, count, 8);
+        WriteFixed64Elements(ref dst, values, count);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void WriteSfixed64Elements(ref byte dst, RepeatedField<long> values, int count)
+    {
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, values[i]);
+                dst = ref Unsafe.Add(ref dst, 8);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, BinaryPrimitives.ReverseEndianness((ulong)values[i]));
+                dst = ref Unsafe.Add(ref dst, 8);
+            }
+        }
+
+        _pos += count * 8;
+    }
+
+    public void WriteSfixed64ArrayFieldTag1(byte encodedTag, RepeatedField<long> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag1(encodedTag, OmniBufWireType.Sfixed64, count, 8);
+        WriteSfixed64Elements(ref dst, values, count);
+    }
+
+    public void WriteSfixed64ArrayFieldTag2(ushort encodedTagLE, RepeatedField<long> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag2(encodedTagLE, OmniBufWireType.Sfixed64, count, 8);
+        WriteSfixed64Elements(ref dst, values, count);
+    }
+
+    public void WriteSfixed64ArrayField(uint fieldNum, RepeatedField<long> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArray(fieldNum, OmniBufWireType.Sfixed64, count, 8);
+        WriteSfixed64Elements(ref dst, values, count);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void WriteFloat32Elements(ref byte dst, RepeatedField<float> values, int count)
+    {
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, values[i]);
+                dst = ref Unsafe.Add(ref dst, 4);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, BinaryPrimitives.ReverseEndianness(BitConverter.SingleToUInt32Bits(values[i])));
+                dst = ref Unsafe.Add(ref dst, 4);
+            }
+        }
+
+        _pos += count * 4;
+    }
+
+    public void WriteFloat32ArrayFieldTag1(byte encodedTag, RepeatedField<float> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag1(encodedTag, OmniBufWireType.Float32, count, 4);
+        WriteFloat32Elements(ref dst, values, count);
+    }
+
+    public void WriteFloat32ArrayFieldTag2(ushort encodedTagLE, RepeatedField<float> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag2(encodedTagLE, OmniBufWireType.Float32, count, 4);
+        WriteFloat32Elements(ref dst, values, count);
+    }
+
+    public void WriteFloat32ArrayField(uint fieldNum, RepeatedField<float> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArray(fieldNum, OmniBufWireType.Float32, count, 4);
+        WriteFloat32Elements(ref dst, values, count);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void WriteFixed32Elements(ref byte dst, RepeatedField<uint> values, int count)
+    {
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, values[i]);
+                dst = ref Unsafe.Add(ref dst, 4);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, BinaryPrimitives.ReverseEndianness(values[i]));
+                dst = ref Unsafe.Add(ref dst, 4);
+            }
+        }
+
+        _pos += count * 4;
+    }
+
+    public void WriteFixed32ArrayFieldTag1(byte encodedTag, RepeatedField<uint> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag1(encodedTag, OmniBufWireType.Fixed32, count, 4);
+        WriteFixed32Elements(ref dst, values, count);
+    }
+
+    public void WriteFixed32ArrayFieldTag2(ushort encodedTagLE, RepeatedField<uint> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag2(encodedTagLE, OmniBufWireType.Fixed32, count, 4);
+        WriteFixed32Elements(ref dst, values, count);
+    }
+
+    public void WriteFixed32ArrayField(uint fieldNum, RepeatedField<uint> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArray(fieldNum, OmniBufWireType.Fixed32, count, 4);
+        WriteFixed32Elements(ref dst, values, count);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void WriteSfixed32Elements(ref byte dst, RepeatedField<int> values, int count)
+    {
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, values[i]);
+                dst = ref Unsafe.Add(ref dst, 4);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.WriteUnaligned(ref dst, BinaryPrimitives.ReverseEndianness((uint)values[i]));
+                dst = ref Unsafe.Add(ref dst, 4);
+            }
+        }
+
+        _pos += count * 4;
+    }
+
+    public void WriteStringArrayFieldTag1(byte encodedTag, RepeatedField<string> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        BeginArrayFieldTag1(encodedTag, OmniBufWireType.String, count);
+        if (count > 0)
+        {
+            WriteStringElementsCore(values, count);
+        }
+
+        EndContainer();
+    }
+
+    public void WriteStringArrayFieldTag2(ushort encodedTagLE, RepeatedField<string> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        BeginArrayFieldTag2(encodedTagLE, OmniBufWireType.String, count);
+        if (count > 0)
+        {
+            WriteStringElementsCore(values, count);
+        }
+
+        EndContainer();
+    }
+
+    public void WriteStringArrayField(uint fieldNum, RepeatedField<string> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        BeginArrayField(fieldNum, OmniBufWireType.String, count);
+        if (count > 0)
+        {
+            WriteStringElementsCore(values, count);
+        }
+
+        EndContainer();
+    }
+
+    private void WriteStringElementsCore(RepeatedField<string> values, int count)
+    {
+        byte[] buf = _buf;
+        int pos = _pos;
+        int bufLen = buf.Length;
+        for (int i = 0; i < count; i++)
+        {
+            string? s = values[i];
+            if (string.IsNullOrEmpty(s))
+            {
+                if (bufLen - pos < 1)
+                {
+                    _pos = pos;
+                    EnsureSpace(1);
+                    buf = _buf;
+                    bufLen = buf.Length;
+                }
+
+                Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(buf), pos++) = 1;
+                continue;
+            }
+
+            int charLen = s.Length;
+            if (charLen <= 127)
+            {
+                int needed = 1 + charLen;
+                if (bufLen - pos < needed)
+                {
+                    _pos = pos;
+                    EnsureSpace(needed);
+                    buf = _buf;
+                    bufLen = buf.Length;
+                }
+
+                ref byte dst = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(buf), pos);
+                dst = (byte)((charLen << 1) | 1);
+                if (TryNarrowAsciiShort(ref MemoryMarshal.GetReference(s.AsSpan()), ref Unsafe.Add(ref dst, 1), charLen))
+                {
+                    pos += needed;
+                    continue;
+                }
+            }
+
+            _pos = pos;
+            WriteStringValueSlow(s);
+            buf = _buf;
+            pos = _pos;
+            bufLen = buf.Length;
+        }
+
+        _pos = pos;
+    }
+
+    public void WriteSfixed32ArrayFieldTag1(byte encodedTag, RepeatedField<int> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag1(encodedTag, OmniBufWireType.Sfixed32, count, 4);
+        WriteSfixed32Elements(ref dst, values, count);
+    }
+
+    public void WriteSfixed32ArrayFieldTag2(ushort encodedTagLE, RepeatedField<int> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArrayTag2(encodedTagLE, OmniBufWireType.Sfixed32, count, 4);
+        WriteSfixed32Elements(ref dst, values, count);
+    }
+
+    public void WriteSfixed32ArrayField(uint fieldNum, RepeatedField<int> values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        int count = values.Count;
+        ref byte dst = ref BeginBulkFixedArray(fieldNum, OmniBufWireType.Sfixed32, count, 4);
+        WriteSfixed32Elements(ref dst, values, count);
+    }
+
     /// <summary>
     /// Reserves a 2-byte Prefix-Varint length slot on the container stack for single-pass encoding.
     /// </summary>
@@ -501,9 +1399,7 @@ public sealed class OmniBufEncoder
         }
 
         EnsureSpace(2);
-        _containerStack[_depth++] = _pos;
-        _buf[_pos] = 0;
-        _buf[_pos + 1] = 0;
+        Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_containerStack), _depth++) = _pos;
         _pos += 2;
     }
 
@@ -536,14 +1432,19 @@ public sealed class OmniBufEncoder
         }
 
         EnsureSpace(4);
-        _containerStack[_depth++] = _pos | int.MinValue;
-        _buf.AsSpan(_pos, 4).Clear();
+        Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_containerStack), _depth++) = _pos | int.MinValue;
         _pos += 4;
     }
 
+    [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void ThrowMaxDepthExceeded(int depth, int maxDepth) =>
+    public static void ThrowMaxDepthExceeded(int depth, int maxDepth = OmniBufConstants.MaxNestingDepth) =>
         throw new OmniBufException($"omnibuf: encode nesting depth {depth} exceeds maximum {maxDepth}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowContainerUnderflow() =>
+        throw new OmniBufException("omnibuf: container stack underflow");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void GrowContainerStack()
@@ -561,10 +1462,10 @@ public sealed class OmniBufEncoder
     {
         if (_depth <= 0)
         {
-            throw new OmniBufException("omnibuf: container stack underflow");
+            ThrowContainerUnderflow();
         }
 
-        int rawEntry = _containerStack[--_depth];
+        int rawEntry = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_containerStack), --_depth);
         if (rawEntry < 0)
         {
             EndContainerLarge(rawEntry & int.MaxValue);
@@ -572,16 +1473,27 @@ public sealed class OmniBufEncoder
         }
 
         int lenPos = rawEntry;
-        int bodyStart = lenPos + 2;
-        int bodyLen = _pos - bodyStart;
-
+        int bodyLen = _pos - (lenPos + 2);
         if (bodyLen <= 16_383)
         {
-            BinaryPrimitives.WriteUInt16LittleEndian(
-                _buf.AsSpan(lenPos, 2),
-                (ushort)(((uint)bodyLen << 2) | 2u));
+            ushort enc = (ushort)(((uint)bodyLen << 2) | 2u);
+            if (!BitConverter.IsLittleEndian)
+            {
+                enc = BinaryPrimitives.ReverseEndianness(enc);
+            }
+
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), lenPos), enc);
+            return;
         }
-        else if (bodyLen <= 536_870_911)
+
+        EndContainerOverflow(lenPos, bodyLen);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void EndContainerOverflow(int lenPos, int bodyLen)
+    {
+        int bodyStart = lenPos + 2;
+        if (bodyLen <= 536_870_911)
         {
             EnsureSpace(2);
             _buf.AsSpan(bodyStart, bodyLen).CopyTo(_buf.AsSpan(lenPos + 4, bodyLen));
@@ -631,6 +1543,188 @@ public sealed class OmniBufEncoder
             BinaryPrimitives.WriteUInt64LittleEndian(_buf.AsSpan(lenPos + 1, 8), (ulong)bodyLen);
             _pos += 5;
         }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void BeginSubMsgFieldTag1(byte encodedTag)
+    {
+        if (_depth >= _maxDepth)
+        {
+            ThrowMaxDepthExceeded(_depth + 1, _maxDepth);
+        }
+
+        if (_depth == _containerStack.Length)
+        {
+            GrowContainerStack();
+        }
+
+        EnsureSpace(3);
+        int p = _pos;
+        Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), p) = encodedTag;
+        Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_containerStack), _depth++) = p + 1;
+        _pos = p + 3;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void BeginSubMsgFieldTag1(byte encodedTag, int sizeHint)
+    {
+        if (sizeHint > 16_383)
+        {
+            WriteTag1(encodedTag);
+            BeginContainerLarge();
+            return;
+        }
+
+        BeginSubMsgFieldTag1(encodedTag);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void BeginSubMsgFieldTag2(ushort encodedTagLE)
+    {
+        if (_depth >= _maxDepth)
+        {
+            ThrowMaxDepthExceeded(_depth + 1, _maxDepth);
+        }
+
+        if (_depth == _containerStack.Length)
+        {
+            GrowContainerStack();
+        }
+
+        EnsureSpace(4);
+        int p = _pos;
+        ushort tagEnc = BitConverter.IsLittleEndian ? encodedTagLE : BinaryPrimitives.ReverseEndianness(encodedTagLE);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buf), p), tagEnc);
+        Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_containerStack), _depth++) = p + 2;
+        _pos = p + 4;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void BeginSubMsgFieldTag2(ushort encodedTagLE, int sizeHint)
+    {
+        if (sizeHint > 16_383)
+        {
+            WriteTag2(encodedTagLE);
+            BeginContainerLarge();
+            return;
+        }
+
+        BeginSubMsgFieldTag2(encodedTagLE);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void BeginArrayFieldTag1(byte encodedTag, OmniBufWireType elemType, int count, int minBodyHint = 0)
+    {
+        if ((uint)count <= 127u && minBodyHint <= 16_383)
+        {
+            int fixedW = OmniBufConstants.FixedElementWidth(elemType);
+            if (fixedW == 0 || 2 + count * fixedW <= 16_383)
+            {
+                if (_depth >= _maxDepth)
+                {
+                    ThrowMaxDepthExceeded(_depth + 1, _maxDepth);
+                }
+
+                if (_depth == _containerStack.Length)
+                {
+                    GrowContainerStack();
+                }
+
+                EnsureSpace(5);
+                int p = _pos;
+                ref byte bufRef = ref MemoryMarshal.GetArrayDataReference(_buf);
+                Unsafe.Add(ref bufRef, p) = encodedTag;
+                Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_containerStack), _depth++) = p + 1;
+                Unsafe.Add(ref bufRef, p + 3) = (byte)elemType;
+                Unsafe.Add(ref bufRef, p + 4) = (byte)((count << 1) | 1);
+                _pos = p + 5;
+                return;
+            }
+        }
+
+        BeginArrayFieldTag1Slow(encodedTag, elemType, count, minBodyHint);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void BeginArrayFieldTag1Slow(byte encodedTag, OmniBufWireType elemType, int count, int minBodyHint)
+    {
+        if (!OmniBufConstants.IsValidContainerElemType(elemType) || count < 0)
+        {
+            throw new OmniBufException($"omnibuf: invalid WireArray header ({elemType}, count={count})");
+        }
+
+        WriteTag1(encodedTag);
+        long minElemWidth = Math.Max(1, OmniBufConstants.FixedElementWidth(elemType));
+        long minBody = Math.Max(minBodyHint, 2L + (long)count * minElemWidth);
+        if (minBody > 16_383)
+        {
+            BeginContainerLarge();
+        }
+        else
+        {
+            BeginContainer();
+        }
+
+        WriteRawByte((byte)elemType);
+        WriteVarint((ulong)count);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void BeginArrayFieldTag2(ushort encodedTagLE, OmniBufWireType elemType, int count, int minBodyHint = 0)
+    {
+        if ((uint)count <= 127u && minBodyHint <= 16_383)
+        {
+            int fixedW = OmniBufConstants.FixedElementWidth(elemType);
+            if (fixedW == 0 || 2 + count * fixedW <= 16_383)
+            {
+                if (_depth >= _maxDepth)
+                {
+                    ThrowMaxDepthExceeded(_depth + 1, _maxDepth);
+                }
+
+                if (_depth == _containerStack.Length)
+                {
+                    GrowContainerStack();
+                }
+
+                EnsureSpace(6);
+                int p = _pos;
+                ref byte bufRef = ref MemoryMarshal.GetArrayDataReference(_buf);
+                ushort tagEnc = BitConverter.IsLittleEndian ? encodedTagLE : BinaryPrimitives.ReverseEndianness(encodedTagLE);
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref bufRef, p), tagEnc);
+                Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_containerStack), _depth++) = p + 2;
+                Unsafe.Add(ref bufRef, p + 4) = (byte)elemType;
+                Unsafe.Add(ref bufRef, p + 5) = (byte)((count << 1) | 1);
+                _pos = p + 6;
+                return;
+            }
+        }
+
+        BeginArrayFieldTag2Slow(encodedTagLE, elemType, count, minBodyHint);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void BeginArrayFieldTag2Slow(ushort encodedTagLE, OmniBufWireType elemType, int count, int minBodyHint)
+    {
+        if (!OmniBufConstants.IsValidContainerElemType(elemType) || count < 0)
+        {
+            throw new OmniBufException($"omnibuf: invalid WireArray header ({elemType}, count={count})");
+        }
+
+        WriteTag2(encodedTagLE);
+        long minElemWidth = Math.Max(1, OmniBufConstants.FixedElementWidth(elemType));
+        long minBody = Math.Max(minBodyHint, 2L + (long)count * minElemWidth);
+        if (minBody > 16_383)
+        {
+            BeginContainerLarge();
+        }
+        else
+        {
+            BeginContainer();
+        }
+
+        WriteRawByte((byte)elemType);
+        WriteVarint((ulong)count);
     }
 
     public void BeginSubMsgField(uint fieldNum)

@@ -98,7 +98,26 @@ public unsafe ref struct OmniBufSpanReader
     {
         byte* cur = _cur;
         long rem = _end - cur;
-        if (rem > 0)
+        if (BitConverter.IsLittleEndian && rem >= 4)
+        {
+            byte b0 = *cur;
+            int tz = BitOperations.TrailingZeroCount((uint)b0 | 0x100u);
+            if (tz < 3)
+            {
+                uint raw = Unsafe.ReadUnaligned<uint>(cur);
+                int shiftLeft = 32 - (8 << tz);
+                uint val = (raw << shiftLeft) >> (shiftLeft + tz + 1);
+                _cur = cur + (1 << tz);
+                return val;
+            }
+
+            if (b0 == 0 && rem >= 9)
+            {
+                _cur = cur + 9;
+                return Unsafe.ReadUnaligned<ulong>(cur + 1);
+            }
+        }
+        else if (rem > 0)
         {
             byte b0 = *cur;
             if ((b0 & 1) != 0)
@@ -107,44 +126,33 @@ public unsafe ref struct OmniBufSpanReader
                 return (ulong)(b0 >> 1);
             }
 
-            if ((b0 & 2) != 0)
+            if ((b0 & 2) != 0 && rem >= 2)
             {
-                if (rem >= 2)
+                ushort u16 = Unsafe.ReadUnaligned<ushort>(cur);
+                if (!BitConverter.IsLittleEndian)
                 {
-                    ushort u16 = Unsafe.ReadUnaligned<ushort>(cur);
-                    if (!BitConverter.IsLittleEndian)
-                    {
-                        u16 = BinaryPrimitives.ReverseEndianness(u16);
-                    }
-
-                    _cur = cur + 2;
-                    return (ulong)(u16 >> 2);
+                    u16 = BinaryPrimitives.ReverseEndianness(u16);
                 }
-            }
-            else if ((b0 & 4) != 0)
-            {
-                if (rem >= 4)
-                {
-                    uint u32 = Unsafe.ReadUnaligned<uint>(cur);
-                    if (!BitConverter.IsLittleEndian)
-                    {
-                        u32 = BinaryPrimitives.ReverseEndianness(u32);
-                    }
 
+                _cur = cur + 2;
+                return (ulong)(u16 >> 2);
+            }
+
+            if (!BitConverter.IsLittleEndian)
+            {
+                if ((b0 & 4) != 0 && rem >= 4)
+                {
+                    uint u32 = BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<uint>(cur));
                     _cur = cur + 4;
                     return (ulong)(u32 >> 3);
                 }
-            }
-            else if (b0 == 0 && rem >= 9)
-            {
-                ulong u64 = Unsafe.ReadUnaligned<ulong>(cur + 1);
-                if (!BitConverter.IsLittleEndian)
-                {
-                    u64 = BinaryPrimitives.ReverseEndianness(u64);
-                }
 
-                _cur = cur + 9;
-                return u64;
+                if (b0 == 0 && rem >= 9)
+                {
+                    ulong u64 = BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<ulong>(cur + 1));
+                    _cur = cur + 9;
+                    return u64;
+                }
             }
         }
 
@@ -247,39 +255,60 @@ public unsafe ref struct OmniBufSpanReader
     {
         byte* cur = _cur;
         long rem = _end - cur;
-        ulong byteLen;
         if (rem > 0)
         {
             byte b0 = *cur;
             if ((b0 & 1) != 0)
             {
-                byteLen = (ulong)(b0 >> 1);
-                cur += 1;
-                rem -= 1;
-            }
-            else if ((b0 & 2) != 0 && rem >= 2)
-            {
-                ushort u16 = Unsafe.ReadUnaligned<ushort>(cur);
-                if (!BitConverter.IsLittleEndian)
+                int len = b0 >> 1;
+                byte* strPtr = cur + 1;
+                if (len < rem)
                 {
-                    u16 = BinaryPrimitives.ReverseEndianness(u16);
+                    _cur = strPtr + len;
+                    return len == 0 ? string.Empty : OmniBufConstants.DecodeUtf8StrictPinned(strPtr, len);
                 }
+            }
+        }
 
-                byteLen = (ulong)(u16 >> 2);
-                cur += 2;
-                rem -= 2;
-            }
-            else
+        (string s, nint next) = ReadStringSlow(cur, _end);
+        _cur = (byte*)next;
+        return s;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (string Value, nint Next) ReadStringSlow(byte* cur, byte* end)
+    {
+        long rem = end - cur;
+        if (rem <= 0)
+        {
+            ThrowInvalidVarint();
+        }
+
+        byte b0 = *cur;
+        ulong byteLen;
+        if ((b0 & 1) != 0)
+        {
+            byteLen = (ulong)(b0 >> 1);
+            cur += 1;
+            rem -= 1;
+        }
+        else if ((b0 & 2) != 0 && rem >= 2)
+        {
+            ushort u16 = Unsafe.ReadUnaligned<ushort>(cur);
+            if (!BitConverter.IsLittleEndian)
             {
-                byteLen = ReadVarintSlow(cur, rem, out int consumed);
-                cur += consumed;
-                rem -= consumed;
+                u16 = BinaryPrimitives.ReverseEndianness(u16);
             }
+
+            byteLen = (ulong)(u16 >> 2);
+            cur += 2;
+            rem -= 2;
         }
         else
         {
-            ThrowInvalidVarint();
-            return string.Empty;
+            byteLen = ReadVarintSlow(cur, rem, out int consumed);
+            cur += consumed;
+            rem -= consumed;
         }
 
         if (byteLen > (ulong)rem)
@@ -288,13 +317,13 @@ public unsafe ref struct OmniBufSpanReader
         }
 
         int len = (int)byteLen;
-        _cur = cur + len;
+        nint next = (nint)(cur + len);
         if (len == 0)
         {
-            return string.Empty;
+            return (string.Empty, next);
         }
 
-        return OmniBufConstants.DecodeUtf8StrictPinned(cur, len);
+        return (OmniBufConstants.DecodeUtf8StrictPinned(cur, len), next);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -348,11 +377,65 @@ public unsafe ref struct OmniBufSpanReader
     }
 
     /// <summary>
+    /// Reads a container length prefix with minimum body length 0 (optimized for 2-byte Prefix-Varint)
+    /// and returns a bounded child reader while advancing this reader past the container.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public OmniBufSpanReader ReadContainer()
+    {
+        byte* cur = _cur;
+        long rem = _end - cur;
+        ulong byteLen;
+        if (rem > 0)
+        {
+            byte b0 = *cur;
+            if ((b0 & 3) == 2 && rem >= 2)
+            {
+                ushort u16 = Unsafe.ReadUnaligned<ushort>(cur);
+                if (!BitConverter.IsLittleEndian)
+                {
+                    u16 = BinaryPrimitives.ReverseEndianness(u16);
+                }
+
+                byteLen = (ulong)(u16 >> 2);
+                cur += 2;
+                rem -= 2;
+            }
+            else if ((b0 & 1) != 0)
+            {
+                byteLen = (ulong)(b0 >> 1);
+                cur += 1;
+                rem -= 1;
+            }
+            else
+            {
+                byteLen = ReadVarintSlow(cur, rem, out int consumed);
+                cur += consumed;
+                rem -= consumed;
+            }
+        }
+        else
+        {
+            ThrowInvalidVarint();
+            return default;
+        }
+
+        if (byteLen > (ulong)rem)
+        {
+            ThrowLenOutOfBounds(byteLen);
+        }
+
+        int len = (int)byteLen;
+        _cur = cur + len;
+        return new OmniBufSpanReader(cur, len);
+    }
+
+    /// <summary>
     /// Reads a container length prefix (optimized for 2-byte Prefix-Varint emitted by OmniBufEncoder)
     /// and returns a bounded child reader while advancing this reader past the container.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public OmniBufSpanReader ReadContainer(int minBodyLen = 0)
+    public OmniBufSpanReader ReadContainer(int minBodyLen)
     {
         byte* cur = _cur;
         long rem = _end - cur;
@@ -587,7 +670,7 @@ public unsafe ref struct OmniBufSpanReader
             {
                 byte* strPtr = cur;
                 cur += len;
-                target.Add(OmniBufConstants.DecodeUtf8StrictPinned(strPtr, len));
+                target.Add(OmniBufConstants.DecodeUtf8StrictPinnedArrayElem(strPtr, len));
             }
         }
 
@@ -672,6 +755,342 @@ public unsafe ref struct OmniBufSpanReader
         }
 
         return cur;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ReadFloat64Array(int count, Google.Protobuf.Collections.RepeatedField<double> target)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        _cur = ReadFloat64ArrayCore(_cur, _end, count, target);
+    }
+
+    private static byte* ReadFloat64ArrayCore(
+        byte* cur,
+        byte* end,
+        int count,
+        Google.Protobuf.Collections.RepeatedField<double> target)
+    {
+        long bytes = (long)count * 8;
+        if (bytes > end - cur)
+        {
+            ThrowTruncatedFixed64();
+        }
+
+        int targetCap = target.Count + count;
+        if (target.Capacity < targetCap)
+        {
+            target.Capacity = targetCap;
+        }
+
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add(Unsafe.ReadUnaligned<double>(cur));
+                cur += 8;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add(BitConverter.UInt64BitsToDouble(BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<ulong>(cur))));
+                cur += 8;
+            }
+        }
+
+        return cur;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ReadFixed64Array(int count, Google.Protobuf.Collections.RepeatedField<ulong> target)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        _cur = ReadFixed64ArrayCore(_cur, _end, count, target);
+    }
+
+    private static byte* ReadFixed64ArrayCore(
+        byte* cur,
+        byte* end,
+        int count,
+        Google.Protobuf.Collections.RepeatedField<ulong> target)
+    {
+        long bytes = (long)count * 8;
+        if (bytes > end - cur)
+        {
+            ThrowTruncatedFixed64();
+        }
+
+        int targetCap = target.Count + count;
+        if (target.Capacity < targetCap)
+        {
+            target.Capacity = targetCap;
+        }
+
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add(Unsafe.ReadUnaligned<ulong>(cur));
+                cur += 8;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add(BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<ulong>(cur)));
+                cur += 8;
+            }
+        }
+
+        return cur;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ReadSfixed64Array(int count, Google.Protobuf.Collections.RepeatedField<long> target)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        _cur = ReadSfixed64ArrayCore(_cur, _end, count, target);
+    }
+
+    private static byte* ReadSfixed64ArrayCore(
+        byte* cur,
+        byte* end,
+        int count,
+        Google.Protobuf.Collections.RepeatedField<long> target)
+    {
+        long bytes = (long)count * 8;
+        if (bytes > end - cur)
+        {
+            ThrowTruncatedFixed64();
+        }
+
+        int targetCap = target.Count + count;
+        if (target.Capacity < targetCap)
+        {
+            target.Capacity = targetCap;
+        }
+
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add(Unsafe.ReadUnaligned<long>(cur));
+                cur += 8;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add((long)BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<ulong>(cur)));
+                cur += 8;
+            }
+        }
+
+        return cur;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ReadFloat32Array(int count, Google.Protobuf.Collections.RepeatedField<float> target)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        _cur = ReadFloat32ArrayCore(_cur, _end, count, target);
+    }
+
+    private static byte* ReadFloat32ArrayCore(
+        byte* cur,
+        byte* end,
+        int count,
+        Google.Protobuf.Collections.RepeatedField<float> target)
+    {
+        long bytes = (long)count * 4;
+        if (bytes > end - cur)
+        {
+            ThrowTruncatedFixed32();
+        }
+
+        int targetCap = target.Count + count;
+        if (target.Capacity < targetCap)
+        {
+            target.Capacity = targetCap;
+        }
+
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add(Unsafe.ReadUnaligned<float>(cur));
+                cur += 4;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add(BitConverter.UInt32BitsToSingle(BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<uint>(cur))));
+                cur += 4;
+            }
+        }
+
+        return cur;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ReadFixed32Array(int count, Google.Protobuf.Collections.RepeatedField<uint> target)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        _cur = ReadFixed32ArrayCore(_cur, _end, count, target);
+    }
+
+    private static byte* ReadFixed32ArrayCore(
+        byte* cur,
+        byte* end,
+        int count,
+        Google.Protobuf.Collections.RepeatedField<uint> target)
+    {
+        long bytes = (long)count * 4;
+        if (bytes > end - cur)
+        {
+            ThrowTruncatedFixed32();
+        }
+
+        int targetCap = target.Count + count;
+        if (target.Capacity < targetCap)
+        {
+            target.Capacity = targetCap;
+        }
+
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add(Unsafe.ReadUnaligned<uint>(cur));
+                cur += 4;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add(BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<uint>(cur)));
+                cur += 4;
+            }
+        }
+
+        return cur;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ReadSfixed32Array(int count, Google.Protobuf.Collections.RepeatedField<int> target)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        _cur = ReadSfixed32ArrayCore(_cur, _end, count, target);
+    }
+
+    private static byte* ReadSfixed32ArrayCore(
+        byte* cur,
+        byte* end,
+        int count,
+        Google.Protobuf.Collections.RepeatedField<int> target)
+    {
+        long bytes = (long)count * 4;
+        if (bytes > end - cur)
+        {
+            ThrowTruncatedFixed32();
+        }
+
+        int targetCap = target.Count + count;
+        if (target.Capacity < targetCap)
+        {
+            target.Capacity = targetCap;
+        }
+
+        if (BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add(Unsafe.ReadUnaligned<int>(cur));
+                cur += 4;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                target.Add((int)BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<uint>(cur)));
+                cur += 4;
+            }
+        }
+
+        return cur;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void ReadBoolArray(int count, Google.Protobuf.Collections.RepeatedField<bool> target)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        _cur = ReadBoolArrayCore(_cur, _end, count, target);
+    }
+
+    private static byte* ReadBoolArrayCore(
+        byte* cur,
+        byte* end,
+        int count,
+        Google.Protobuf.Collections.RepeatedField<bool> target)
+    {
+        if (count > end - cur)
+        {
+            ThrowTruncatedBool();
+        }
+
+        int targetCap = target.Count + count;
+        if (target.Capacity < targetCap)
+        {
+            target.Capacity = targetCap;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            byte b = cur[i];
+            if (b > 1)
+            {
+                ThrowInvalidBoolPadding(b);
+            }
+
+            target.Add(b == 1);
+        }
+
+        return cur + count;
     }
 
     [DoesNotReturn]

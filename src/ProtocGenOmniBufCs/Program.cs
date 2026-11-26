@@ -919,6 +919,213 @@ public static class Program
         return true;
     }
 
+    private static int TagEncodedByteWidth(uint fieldNum) =>
+        fieldNum <= 7 ? 1 : (fieldNum <= 1023 ? 2 : (fieldNum <= 33_554_431 ? 4 : 9));
+
+    private static int ScalarMinValueWidth(FieldDescriptorProto.Types.Type t) => t switch
+    {
+        FieldDescriptorProto.Types.Type.Bool => 0,
+        FieldDescriptorProto.Types.Type.Fixed32 or FieldDescriptorProto.Types.Type.Sfixed32 or FieldDescriptorProto.Types.Type.Float => 4,
+        FieldDescriptorProto.Types.Type.Fixed64 or FieldDescriptorProto.Types.Type.Sfixed64 or FieldDescriptorProto.Types.Type.Double => 8,
+        _ => 1,
+    };
+
+    private static int ScalarMaxValueWidth(FieldDescriptorProto.Types.Type t) => t switch
+    {
+        FieldDescriptorProto.Types.Type.Bool => 0,
+        FieldDescriptorProto.Types.Type.Fixed32 or FieldDescriptorProto.Types.Type.Sfixed32 or FieldDescriptorProto.Types.Type.Float => 4,
+        FieldDescriptorProto.Types.Type.Fixed64 or FieldDescriptorProto.Types.Type.Sfixed64 or FieldDescriptorProto.Types.Type.Double => 8,
+        FieldDescriptorProto.Types.Type.Uint32 or FieldDescriptorProto.Types.Type.Uint64
+            or FieldDescriptorProto.Types.Type.Int32 or FieldDescriptorProto.Types.Type.Sint32
+            or FieldDescriptorProto.Types.Type.Int64 or FieldDescriptorProto.Types.Type.Sint64
+            or FieldDescriptorProto.Types.Type.Enum => 9,
+        _ => -1, // String, Bytes, Message
+    };
+
+    /// <summary>
+    /// Returns a conservative static upper bound &lt;= 16_383 on a message's encoded wire size,
+    /// or -1 if the message can potentially exceed 16_383 bytes (contains strings, bytes,
+    /// repeated/map fields, cycles, or unbounded children).
+    /// </summary>
+    private static int ComputeStaticMaxSize(
+        DescriptorProto msg,
+        Dictionary<string, TypeSymbol> symbols,
+        HashSet<string>? visiting = null)
+    {
+        int total = 0;
+        foreach (FieldDescriptorProto f in msg.Field)
+        {
+            if (f.Label == FieldDescriptorProto.Types.Label.Repeated)
+            {
+                return -1;
+            }
+
+            int tagW = TagEncodedByteWidth((uint)f.Number);
+            if (f.Type == FieldDescriptorProto.Types.Type.Message)
+            {
+                if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? wrap))
+                {
+                    if (wrap.ShortName is "StringValue" or "BytesValue")
+                    {
+                        return -1;
+                    }
+
+                    total += tagW + 2 + 12;
+                }
+                else if (symbols.TryGetValue(f.TypeName, out TypeSymbol? childSym) && childSym.Message is not null)
+                {
+                    visiting ??= new HashSet<string>(StringComparer.Ordinal);
+                    if (!visiting.Add(childSym.ProtoFullName))
+                    {
+                        return -1;
+                    }
+
+                    int childMax = ComputeStaticMaxSize(childSym.Message, symbols, visiting);
+                    visiting.Remove(childSym.ProtoFullName);
+                    if (childMax < 0)
+                    {
+                        return -1;
+                    }
+
+                    total += tagW + 2 + childMax;
+                }
+                else
+                {
+                    return -1;
+                }
+            }
+            else
+            {
+                int valMax = ScalarMaxValueWidth(f.Type);
+                if (valMax < 0)
+                {
+                    return -1;
+                }
+
+                total += tagW + valMax;
+            }
+
+            if (total > 16_383)
+            {
+                return -1;
+            }
+        }
+
+        return total;
+    }
+
+    private static bool CanMessageExceed16K(DescriptorProto msg, Dictionary<string, TypeSymbol> symbols) =>
+        ComputeStaticMaxSize(msg, symbols) < 0;
+
+    private static int ComputeConstMinSize(
+        DescriptorProto msg,
+        bool isProto2,
+        Dictionary<string, TypeSymbol> symbols)
+    {
+        int total = 0;
+        foreach (FieldDescriptorProto f in msg.Field)
+        {
+            int tagW = TagEncodedByteWidth((uint)f.Number);
+            if (IsMapField(f, symbols, out _, out _))
+            {
+                total += tagW + 5; // tag + 2B len + keyType + valType + 1B count(0)
+                continue;
+            }
+
+            if (f.Label == FieldDescriptorProto.Types.Label.Repeated)
+            {
+                total += tagW + 4; // tag + 2B len + elemType + 1B count(0)
+                continue;
+            }
+
+            if (IsRealOneof(f) || f.Type == FieldDescriptorProto.Types.Type.Message || HasExplicitScalarPresence(f, isProto2))
+            {
+                continue;
+            }
+
+            total += tagW + ScalarMinValueWidth(f.Type);
+        }
+
+        return total;
+    }
+
+    private static string? BulkFixedArrayMethodPrefix(FieldDescriptorProto.Types.Type t) => t switch
+    {
+        FieldDescriptorProto.Types.Type.Double => "Float64",
+        FieldDescriptorProto.Types.Type.Fixed64 => "Fixed64",
+        FieldDescriptorProto.Types.Type.Sfixed64 => "Sfixed64",
+        FieldDescriptorProto.Types.Type.Float => "Float32",
+        FieldDescriptorProto.Types.Type.Fixed32 => "Fixed32",
+        FieldDescriptorProto.Types.Type.Sfixed32 => "Sfixed32",
+        _ => null,
+    };
+
+    private static string EmitBeginSubMsgField(string enc, uint fnum, string? sizeHintExpr)
+    {
+        ulong rawTag = ((ulong)fnum << 4) | 12UL;
+        if (rawTag <= 127UL)
+        {
+            byte enc1 = (byte)((rawTag << 1) | 1UL);
+            return sizeHintExpr is null
+                ? $"{enc}.BeginSubMsgFieldTag1(0x{enc1:X2})"
+                : $"{enc}.BeginSubMsgFieldTag1(0x{enc1:X2}, {sizeHintExpr})";
+        }
+
+        if (rawTag <= 16_383UL)
+        {
+            ushort enc2 = (ushort)((rawTag << 2) | 2UL);
+            return sizeHintExpr is null
+                ? $"{enc}.BeginSubMsgFieldTag2(0x{enc2:X4})"
+                : $"{enc}.BeginSubMsgFieldTag2(0x{enc2:X4}, {sizeHintExpr})";
+        }
+
+        return sizeHintExpr is null
+            ? $"{enc}.BeginSubMsgField({fnum}u)"
+            : $"{enc}.BeginSubMsgField({fnum}u, {sizeHintExpr})";
+    }
+
+    private static string EmitBeginArrayField(string enc, uint fnum, string elemWt, string countExpr, string? minBodyHintExpr = null)
+    {
+        ulong rawTag = ((ulong)fnum << 4) | 13UL;
+        if (rawTag <= 127UL)
+        {
+            byte enc1 = (byte)((rawTag << 1) | 1UL);
+            return minBodyHintExpr is null
+                ? $"{enc}.BeginArrayFieldTag1(0x{enc1:X2}, OmniBufWireType.{elemWt}, {countExpr})"
+                : $"{enc}.BeginArrayFieldTag1(0x{enc1:X2}, OmniBufWireType.{elemWt}, {countExpr}, {minBodyHintExpr})";
+        }
+
+        if (rawTag <= 16_383UL)
+        {
+            ushort enc2 = (ushort)((rawTag << 2) | 2UL);
+            return minBodyHintExpr is null
+                ? $"{enc}.BeginArrayFieldTag2(0x{enc2:X4}, OmniBufWireType.{elemWt}, {countExpr})"
+                : $"{enc}.BeginArrayFieldTag2(0x{enc2:X4}, OmniBufWireType.{elemWt}, {countExpr}, {minBodyHintExpr})";
+        }
+
+        return minBodyHintExpr is null
+            ? $"{enc}.BeginArrayField({fnum}u, OmniBufWireType.{elemWt}, {countExpr})"
+            : $"{enc}.BeginArrayField({fnum}u, OmniBufWireType.{elemWt}, {countExpr}, {minBodyHintExpr})";
+    }
+
+    private static string EmitWriteBulkFixedArrayField(string enc, uint fnum, string prefix, string listExpr)
+    {
+        ulong rawTag = ((ulong)fnum << 4) | 13UL;
+        if (rawTag <= 127UL)
+        {
+            byte enc1 = (byte)((rawTag << 1) | 1UL);
+            return $"{enc}.Write{prefix}ArrayFieldTag1(0x{enc1:X2}, {listExpr})";
+        }
+
+        if (rawTag <= 16_383UL)
+        {
+            ushort enc2 = (ushort)((rawTag << 2) | 2UL);
+            return $"{enc}.Write{prefix}ArrayFieldTag2(0x{enc2:X4}, {listExpr})";
+        }
+
+        return $"{enc}.Write{prefix}ArrayField({fnum}u, {listExpr})";
+    }
+
     private static void EmitMarshalMethods(
         StringBuilder sb,
         DescriptorProto msg,
@@ -956,31 +1163,120 @@ public static class Program
         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}}}");
         sb.AppendLine();
+
+        bool hasChildMsgEstimate = fields.Any(f =>
+            !IsMapField(f, symbols, out _, out _)
+            && f.Type == FieldDescriptorProto.Types.Type.Message
+            && !WrapperTypes.ContainsKey(f.TypeName)
+            && symbols.TryGetValue(f.TypeName, out TypeSymbol? cs)
+            && cs.Message is not null
+            && CanMessageExceed16K(cs.Message, symbols));
+        bool hasLoopEstimate = fields.Any(f =>
+            !IsMapField(f, symbols, out _, out _)
+            && f.Label == FieldDescriptorProto.Types.Label.Repeated
+            && (f.Type == FieldDescriptorProto.Types.Type.String
+                || f.Type == FieldDescriptorProto.Types.Type.Bytes
+                || (f.Type == FieldDescriptorProto.Types.Type.Message
+                    && !WrapperTypes.ContainsKey(f.TypeName)
+                    && symbols.TryGetValue(f.TypeName, out TypeSymbol? cs)
+                    && cs.Message is not null
+                    && CanMessageExceed16K(cs.Message, symbols))));
+        int constMin = ComputeConstMinSize(msg, isProto2, symbols);
+
+        if (!hasChildMsgEstimate && !hasLoopEstimate)
+        {
+            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}[System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
+        }
+
         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}internal int EstimateOmniBufMinSize(int depth = 0)");
         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}{{");
-        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (depth > 8) return 0;");
-        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    int total = 0;");
+        if (hasChildMsgEstimate)
+        {
+            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (depth > 8) return 0;");
+        }
+
+        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    int total = {constMin};");
         foreach (FieldDescriptorProto f in fields)
         {
             string prop = GetPropertyName(f, msg.Name);
-            if (IsMapField(f, symbols, out _, out _))
+            if (IsMapField(f, symbols, out FieldDescriptorProto? mk, out FieldDescriptorProto? mv))
             {
+                int entryMin = Math.Max(1, ScalarMinValueWidth(mk!.Type)) + Math.Max(1, ScalarMinValueWidth(mv!.Type));
+                int threshold = 16_383 / entryMin;
+                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop}.Count > {threshold}) return 16_384;");
+                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    total += this.{prop}.Count * {entryMin};");
+                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (total > 16_383) return 16_384;");
                 continue;
             }
 
             if (f.Label == FieldDescriptorProto.Types.Label.Repeated)
             {
-                if (f.Type == FieldDescriptorProto.Types.Type.String)
+                switch (f.Type)
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    for (int i = 0; i < this.{prop}.Count; i++) total += 1 + (this.{prop}[i]?.Length ?? 0);");
-                }
-                else if (f.Type == FieldDescriptorProto.Types.Type.Bytes)
-                {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    for (int i = 0; i < this.{prop}.Count; i++) total += 1 + this.{prop}[i].Length;");
-                }
-                else if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
-                {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    for (int i = 0; i < this.{prop}.Count; i++) total += 2 + (this.{prop}[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0);");
+                    case FieldDescriptorProto.Types.Type.Double:
+                    case FieldDescriptorProto.Types.Type.Fixed64:
+                    case FieldDescriptorProto.Types.Type.Sfixed64:
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop}.Count > 2047) return 16_384;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    total += this.{prop}.Count * 8;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (total > 16_383) return 16_384;");
+                        break;
+
+                    case FieldDescriptorProto.Types.Type.Float:
+                    case FieldDescriptorProto.Types.Type.Fixed32:
+                    case FieldDescriptorProto.Types.Type.Sfixed32:
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop}.Count > 4095) return 16_384;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    total += this.{prop}.Count * 4;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (total > 16_383) return 16_384;");
+                        break;
+
+                    case FieldDescriptorProto.Types.Type.Bool:
+                    case FieldDescriptorProto.Types.Type.Uint32:
+                    case FieldDescriptorProto.Types.Type.Uint64:
+                    case FieldDescriptorProto.Types.Type.Int32:
+                    case FieldDescriptorProto.Types.Type.Sint32:
+                    case FieldDescriptorProto.Types.Type.Int64:
+                    case FieldDescriptorProto.Types.Type.Sint64:
+                    case FieldDescriptorProto.Types.Type.Enum:
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop}.Count > 16_383) return 16_384;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    total += this.{prop}.Count;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (total > 16_383) return 16_384;");
+                        break;
+
+                    case FieldDescriptorProto.Types.Type.String:
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    var est_{f.Number} = this.{prop};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (est_{f.Number}.Count > 16_383) return 16_384;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    for (int i = 0; i < est_{f.Number}.Count; i++) {{ total += 1 + (est_{f.Number}[i]?.Length ?? 0); if (total > 16_383) return 16_384; }}");
+                        break;
+
+                    case FieldDescriptorProto.Types.Type.Bytes:
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    var est_{f.Number} = this.{prop};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (est_{f.Number}.Count > 16_383) return 16_384;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    for (int i = 0; i < est_{f.Number}.Count; i++) {{ total += 1 + est_{f.Number}[i].Length; if (total > 16_383) return 16_384; }}");
+                        break;
+
+                    case FieldDescriptorProto.Types.Type.Message:
+                        if (WrapperTypes.ContainsKey(f.TypeName))
+                        {
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop}.Count > 8191) return 16_384;");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    total += this.{prop}.Count * 2;");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (total > 16_383) return 16_384;");
+                        }
+                        else if (symbols.TryGetValue(f.TypeName, out TypeSymbol? elemSym) && elemSym.Message is not null && !CanMessageExceed16K(elemSym.Message, symbols))
+                        {
+                            int elemMin = 2 + ComputeConstMinSize(elemSym.Message, elemSym.IsProto2, symbols);
+                            int threshold = 16_383 / elemMin;
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop}.Count > {threshold}) return 16_384;");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    total += this.{prop}.Count * {elemMin};");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (total > 16_383) return 16_384;");
+                        }
+                        else
+                        {
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    var est_{f.Number} = this.{prop};");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (est_{f.Number}.Count > 8191) return 16_384;");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    for (int i = 0; i < est_{f.Number}.Count; i++) {{ total += 2 + (est_{f.Number}[i]?.EstimateOmniBufMinSize(depth + 1) ?? 0); if (total > 16_383) return 16_384; }}");
+                        }
+
+                        break;
                 }
 
                 continue;
@@ -999,7 +1295,7 @@ public static class Program
                 }
                 else if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{oneofPascal}Case == {oneofPascal}OneofCase.{prop} && this.{prop} is {{ }} om_{f.Number}) total += 3 + om_{f.Number}.EstimateOmniBufMinSize(depth + 1);");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{oneofPascal}Case == {oneofPascal}OneofCase.{prop} && this.{prop} is {{ }} om_{f.Number}) {{ total += 3 + om_{f.Number}.EstimateOmniBufMinSize(depth + 1); if (total > 16_383) return 16_384; }}");
                 }
 
                 continue;
@@ -1009,7 +1305,7 @@ public static class Program
             {
                 if (HasExplicitScalarPresence(f, isProto2))
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.Has{prop}) total += this.{prop}?.Length ?? 0;");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.Has{prop}) total += {TagEncodedByteWidth((uint)f.Number) + 1} + (this.{prop}?.Length ?? 0);");
                 }
                 else
                 {
@@ -1020,7 +1316,7 @@ public static class Program
             {
                 if (HasExplicitScalarPresence(f, isProto2))
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.Has{prop}) total += this.{prop}.Length;");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.Has{prop}) total += {TagEncodedByteWidth((uint)f.Number) + 1} + this.{prop}.Length;");
                 }
                 else
                 {
@@ -1029,7 +1325,15 @@ public static class Program
             }
             else if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
             {
-                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop} is {{ }} sm_{f.Number}) total += 3 + sm_{f.Number}.EstimateOmniBufMinSize(depth + 1);");
+                if (symbols.TryGetValue(f.TypeName, out TypeSymbol? subSym) && subSym.Message is not null && !CanMessageExceed16K(subSym.Message, symbols))
+                {
+                    int subMin = TagEncodedByteWidth((uint)f.Number) + 2 + ComputeConstMinSize(subSym.Message, subSym.IsProto2, symbols);
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop} is not null) total += {subMin};");
+                }
+                else
+                {
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop} is {{ }} sm_{f.Number}) {{ total += 3 + sm_{f.Number}.EstimateOmniBufMinSize(depth + 1); if (total > 16_383) return 16_384; }}");
+                }
             }
         }
 
@@ -1053,11 +1357,19 @@ public static class Program
         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    EncodeOmniBufBody(encoder, options.Deterministic, 0);");
         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}}}");
         sb.AppendLine();
-        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}internal void EncodeOmniBufBody(OmniBufEncoder encoder, bool deterministic, int depth = 0)");
+
+        bool isSmallEncodeLeaf = fields.Count <= 8
+            && fields.All(f => f.Label != FieldDescriptorProto.Types.Label.Repeated && f.Type != FieldDescriptorProto.Types.Type.Message);
+        if (isSmallEncodeLeaf)
+        {
+            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}[System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]");
+        }
+
+        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}internal void EncodeOmniBufBody(OmniBufEncoder encoder, bool deterministic, int depth = 0, bool knownSmall = false)");
         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}{{");
         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (depth > OmniBufConstants.MaxNestingDepth)");
         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
-        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        throw new OmniBufException($\"omnibuf: encode nesting depth {{depth}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
+        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        OmniBufEncoder.ThrowMaxDepthExceeded(depth);");
         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
 
         foreach (FieldDescriptorProto f in fields)
@@ -1072,7 +1384,7 @@ public static class Program
                 string keyCs = CSharpScalarType(keyField, symbols);
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (depth + 1 > OmniBufConstants.MaxNestingDepth)");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
-                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        throw new OmniBufException($\"omnibuf: WireMap encode depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
+                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    encoder.BeginMapField({fnum}u, OmniBufWireType.{keyWt}, OmniBufWireType.{valWt}, this.{prop}.Count);");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop}.Count > 0)");
@@ -1115,59 +1427,144 @@ public static class Program
                 string elemWt = WireTypeEnumName(f.Type);
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (depth + 1 > OmniBufConstants.MaxNestingDepth)");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
-                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        throw new OmniBufException($\"omnibuf: WireArray encode depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
+                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
-                if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
+
+                string? bulkPrefix = BulkFixedArrayMethodPrefix(f.Type);
+                if (bulkPrefix is not null)
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    int arrMin_{fnum} = 2;");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    for (int i = 0; i < this.{prop}.Count; i++) arrMin_{fnum} += 2 + (this.{prop}[i]?.EstimateOmniBufMinSize(0) ?? 0);");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    encoder.BeginArrayField({fnum}u, OmniBufWireType.{elemWt}, this.{prop}.Count, arrMin_{fnum});");
-                }
-                else
-                {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    encoder.BeginArrayField({fnum}u, OmniBufWireType.{elemWt}, this.{prop}.Count);");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {EmitWriteBulkFixedArrayField("encoder", fnum, bulkPrefix, $"this.{prop}")};");
+                    continue;
                 }
 
-                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    for (int i = 0; i < this.{prop}.Count; i++)");
-                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
-                if (f.Type == FieldDescriptorProto.Types.Type.Message)
+                if (f.Type == FieldDescriptorProto.Types.Type.String)
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 2 > OmniBufConstants.MaxNestingDepth)");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            throw new OmniBufException($\"omnibuf: encode nesting depth {{depth + 2}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
-                    if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? rWrap))
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {EmitWriteBulkFixedArrayField("encoder", fnum, "String", $"this.{prop}")};");
+                    continue;
+                }
+
+                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    var list_{fnum} = this.{prop};");
+                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    int count_{fnum} = list_{fnum}.Count;");
+
+                if (f.Type == FieldDescriptorProto.Types.Type.Message && !WrapperTypes.ContainsKey(f.TypeName))
+                {
+                    bool elemCanExceed = !symbols.TryGetValue(f.TypeName, out TypeSymbol? elemSym)
+                        || elemSym.Message is null
+                        || CanMessageExceed16K(elemSym.Message, symbols);
+                    if (!elemCanExceed)
                     {
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginContainer();");
-                        if (rWrap.IsValueType)
-                        {
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (this.{prop}[i].HasValue)");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            OmniBufWrappers.Write{rWrap.MethodSuffix}Body(encoder, this.{prop}[i]!.Value);");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
-                        }
-                        else
-                        {
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (this.{prop}[i] is not null)");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            OmniBufWrappers.Write{rWrap.MethodSuffix}Body(encoder, this.{prop}[i]);");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
-                        }
+                        int elemConstMin = 2 + ComputeConstMinSize(elemSym!.Message!, elemSym.IsProto2, symbols);
+                        int threshold = 16_383 / elemConstMin;
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    int arrMin_{fnum} = count_{fnum} > {threshold} ? 16_384 : (2 + count_{fnum} * {elemConstMin});");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {EmitBeginArrayField("encoder", fnum, elemWt, $"count_{fnum}", $"arrMin_{fnum}")};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (count_{fnum} > 0)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 2 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 2);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        int childDepth_{fnum} = depth + 2;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        for (int i = 0; i < count_{fnum}; i++)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            encoder.BeginContainer();");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            list_{fnum}[i]?.EncodeOmniBufBody(encoder, deterministic, childDepth_{fnum}, knownSmall: true);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            encoder.EndContainer();");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
                     }
                     else
                     {
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginContainer(this.{prop}[i]?.EstimateOmniBufMinSize(0) ?? 0);");
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        this.{prop}[i]?.EncodeOmniBufBody(encoder, deterministic, depth + 2);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    int arrMin_{fnum} = 2;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    bool childKnownSmall_{fnum} = knownSmall;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (!knownSmall && count_{fnum} > 0)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (count_{fnum} > 8191)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            arrMin_{fnum} = 16_384;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        else");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            bool anyLarge_{fnum} = false;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            for (int i = 0; i < count_{fnum}; i++)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                int elemMin = list_{fnum}[i]?.EstimateOmniBufMinSize(0) ?? 0;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                if (elemMin > 16_383)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    anyLarge_{fnum} = true;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    arrMin_{fnum} = 16_384;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                    break;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                }}");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                arrMin_{fnum} += 2 + elemMin;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            }}");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            childKnownSmall_{fnum} = !anyLarge_{fnum};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {EmitBeginArrayField("encoder", fnum, elemWt, $"count_{fnum}", $"arrMin_{fnum}")};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (count_{fnum} > 0)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 2 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 2);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        int childDepth_{fnum} = depth + 2;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (childKnownSmall_{fnum})");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            for (int i = 0; i < count_{fnum}; i++)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                encoder.BeginContainer();");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                list_{fnum}[i]?.EncodeOmniBufBody(encoder, deterministic, childDepth_{fnum}, knownSmall: true);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                encoder.EndContainer();");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            }}");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        else");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            for (int i = 0; i < count_{fnum}; i++)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                var item = list_{fnum}[i];");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                int elemMin = item?.EstimateOmniBufMinSize(0) ?? 0;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                encoder.BeginContainer(elemMin);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                item?.EncodeOmniBufBody(encoder, deterministic, childDepth_{fnum}, knownSmall: elemMin <= 16_383);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                encoder.EndContainer();");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            }}");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
                     }
 
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.EndContainer();");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    encoder.EndArray();");
+                    continue;
+                }
+
+                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {EmitBeginArrayField("encoder", fnum, elemWt, $"count_{fnum}")};");
+                if (f.Type == FieldDescriptorProto.Types.Type.Message)
+                {
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (count_{fnum} > 0)");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 2 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 2);");
+                    WrapperInfo rWrap = WrapperTypes[f.TypeName];
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        for (int i = 0; i < count_{fnum}; i++)");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            encoder.BeginContainer();");
+                    if (rWrap.IsValueType)
+                    {
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (list_{fnum}[i].HasValue)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                OmniBufWrappers.Write{rWrap.MethodSuffix}Body(encoder, list_{fnum}[i]!.Value);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            }}");
+                    }
+                    else
+                    {
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (list_{fnum}[i] is not null)");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                OmniBufWrappers.Write{rWrap.MethodSuffix}Body(encoder, list_{fnum}[i]);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            }}");
+                    }
+
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            encoder.EndContainer();");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
                 }
                 else
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {EmitWriteRawValue("encoder", f, $"this.{prop}[i]")};");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    for (int i = 0; i < count_{fnum}; i++)");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {EmitWriteRawValue("encoder", f, $"list_{fnum}[i]")};");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
                 }
 
-                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    encoder.EndArray();");
                 continue;
             }
@@ -1179,13 +1576,10 @@ public static class Program
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
                 if (f.Type == FieldDescriptorProto.Types.Type.Message)
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 1 > OmniBufConstants.MaxNestingDepth)");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            throw new OmniBufException($\"omnibuf: encode nesting depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginSubMsgField({fnum}u);");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);");
                     if (WrapperTypes.TryGetValue(f.TypeName, out WrapperInfo? oWrap))
                     {
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {EmitBeginSubMsgField("encoder", fnum, null)};");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (this.{prop} is {{ }} ow_{fnum})");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            OmniBufWrappers.Write{oWrap.MethodSuffix}Body(encoder, ow_{fnum});");
@@ -1193,7 +1587,20 @@ public static class Program
                     }
                     else
                     {
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        this.{prop}?.EncodeOmniBufBody(encoder, deterministic, depth + 1);");
+                        bool subCanExceed = !symbols.TryGetValue(f.TypeName, out TypeSymbol? subSym)
+                            || subSym.Message is null
+                            || CanMessageExceed16K(subSym.Message, symbols);
+                        if (!subCanExceed)
+                        {
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {EmitBeginSubMsgField("encoder", fnum, null)};");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        this.{prop}?.EncodeOmniBufBody(encoder, deterministic, depth + 1, knownSmall: true);");
+                        }
+                        else
+                        {
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        int subMin_{fnum} = knownSmall ? 0 : (this.{prop}?.EstimateOmniBufMinSize(0) ?? 0);");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {EmitBeginSubMsgField("encoder", fnum, $"subMin_{fnum}")};");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        this.{prop}?.EncodeOmniBufBody(encoder, deterministic, depth + 1, knownSmall: knownSmall || subMin_{fnum} <= 16_383);");
+                        }
                     }
 
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.EndSubMsg();");
@@ -1213,25 +1620,32 @@ public static class Program
                 {
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop} is {{ }} sw_{fnum})");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 1 > OmniBufConstants.MaxNestingDepth)");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            throw new OmniBufException($\"omnibuf: encode nesting depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginSubMsgField({fnum}u);");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {EmitBeginSubMsgField("encoder", fnum, null)};");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        OmniBufWrappers.Write{sWrap.MethodSuffix}Body(encoder, sw_{fnum});");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.EndSubMsg();");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
                 }
                 else
                 {
+                    bool subCanExceed = !symbols.TryGetValue(f.TypeName, out TypeSymbol? subSym)
+                        || subSym.Message is null
+                        || CanMessageExceed16K(subSym.Message, symbols);
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (this.{prop} is {{ }} msg_{fnum})");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 1 > OmniBufConstants.MaxNestingDepth)");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            throw new OmniBufException($\"omnibuf: encode nesting depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginSubMsgField({fnum}u, msg_{fnum}.EstimateOmniBufMinSize(0));");
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        msg_{fnum}.EncodeOmniBufBody(encoder, deterministic, depth + 1);");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 1 > OmniBufConstants.MaxNestingDepth) OmniBufEncoder.ThrowMaxDepthExceeded(depth + 1);");
+                    if (!subCanExceed)
+                    {
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {EmitBeginSubMsgField("encoder", fnum, null)};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        msg_{fnum}.EncodeOmniBufBody(encoder, deterministic, depth + 1, knownSmall: true);");
+                    }
+                    else
+                    {
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        int subMin_{fnum} = knownSmall ? 0 : msg_{fnum}.EstimateOmniBufMinSize(0);");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {EmitBeginSubMsgField("encoder", fnum, $"subMin_{fnum}")};");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        msg_{fnum}.EncodeOmniBufBody(encoder, deterministic, depth + 1, knownSmall: knownSmall || subMin_{fnum} <= 16_383);");
+                    }
+
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.EndSubMsg();");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
                 }
@@ -1296,7 +1710,7 @@ public static class Program
 
     private static bool CanEmitFastSequential(DescriptorProto msg, Dictionary<string, TypeSymbol> symbols)
     {
-        if (msg.Field.Count == 0 || msg.Field.Count > 16)
+        if (msg.Field.Count == 0 || msg.Field.Count > 32)
         {
             return false;
         }
@@ -1381,10 +1795,6 @@ public static class Program
 
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}internal void DecodeOmniBufFresh(OmniBufSpanReader rd, int depth, int maxDepth)");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}{{");
-            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    if (depth > maxDepth)");
-            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
-            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        OmniBufDecoder.ThrowMaxDepthExceeded(depth, maxDepth);");
-            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
             if (needsSeenLow)
             {
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    ulong seenLow = 0;");
@@ -1410,12 +1820,14 @@ public static class Program
                         {
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (count > 0)");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            var list = this.{prop};");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            int targetCap = count <= 4096 ? count : 4096;");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (this.{prop}.Capacity < targetCap) this.{prop}.Capacity = targetCap;");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (list.Capacity < targetCap) list.Capacity = targetCap;");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            int childDepth = depth + 2;");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            for (int i = 0; i < count; i++)");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            {{");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                ReadOnlySpan<byte> sub = body.ReadLenSpan(0);");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                this.{prop}.Add(OmniBufWrappers.Decode{rWrap.MethodSuffix}(sub, {rWrap.DefaultExpr}, depth + 2, maxDepth));");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                list.Add(OmniBufWrappers.Decode{rWrap.MethodSuffix}(sub, {rWrap.DefaultExpr}, childDepth, maxDepth));");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            }}");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
                         }
@@ -1426,24 +1838,26 @@ public static class Program
                             bool elemFast = elemSym.Message is not null && CanEmitFastSequential(elemSym.Message, symbols);
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (count > 0)");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (depth + 2 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 2, maxDepth);");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            int childDepth = depth + 2;");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (childDepth > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(childDepth, maxDepth);");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            var list = this.{prop};");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            int targetCap = count <= 4096 ? count : 4096;");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (this.{prop}.Capacity < targetCap) this.{prop}.Capacity = targetCap;");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (list.Capacity < targetCap) list.Capacity = targetCap;");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            for (int i = 0; i < count; i++)");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            {{");
                             if (elemFast)
                             {
-                                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                var sub = body.ReadContainer(0);");
+                                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                var sub = body.ReadContainer();");
                                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                var elem = new {elemMsgCs}();");
-                                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                if (!sub.IsAtEnd) elem.DecodeOmniBufFresh(sub, depth + 2, maxDepth);");
-                                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                this.{prop}.Add(elem);");
+                                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                if (!sub.IsAtEnd) elem.DecodeOmniBufFresh(sub, childDepth, maxDepth);");
+                                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                list.Add(elem);");
                             }
                             else
                             {
                                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                ReadOnlySpan<byte> sub = body.ReadLenSpan(0);");
                                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                var elem = new {elemMsgCs}();");
-                                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                elem.DecodeOmniBuf(sub, depth + 2, maxDepth, merge: false);");
-                                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                this.{prop}.Add(elem);");
+                                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                elem.DecodeOmniBuf(sub, childDepth, maxDepth, merge: false);");
+                                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                list.Add(elem);");
                             }
 
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            }}");
@@ -1458,15 +1872,24 @@ public static class Program
                     {
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (count > 0) body.ReadUint32Array(count, this.{prop});");
                     }
+                    else if (BulkFixedArrayMethodPrefix(f.Type) is { } bulkReadPrefix)
+                    {
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (count > 0) body.Read{bulkReadPrefix}Array(count, this.{prop});");
+                    }
+                    else if (f.Type == FieldDescriptorProto.Types.Type.Bool)
+                    {
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (count > 0) body.ReadBoolArray(count, this.{prop});");
+                    }
                     else
                     {
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (count > 0)");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            var list = this.{prop};");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            int targetCap = count <= 4096 ? count : 4096;");
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (this.{prop}.Capacity < targetCap) this.{prop}.Capacity = targetCap;");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            if (list.Capacity < targetCap) list.Capacity = targetCap;");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            for (int i = 0; i < count; i++)");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            {{");
-                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                this.{prop}.Add({EmitReaderReadRawValue("body", f, symbols)});");
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}                list.Add({EmitReaderReadRawValue("body", f, symbols)});");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            }}");
                         sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        }}");
                     }
@@ -1509,7 +1932,7 @@ public static class Program
                         if (subFast)
                         {
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (depth + 1 > maxDepth) OmniBufDecoder.ThrowMaxDepthExceeded(depth + 1, maxDepth);");
-                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        var sub = rd.ReadContainer(0);");
+                            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        var sub = rd.ReadContainer();");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        var subMsg = new {subCs}();");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        this.{prop} = subMsg;");
                             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (!sub.IsAtEnd) subMsg.DecodeOmniBufFresh(sub, depth + 1, maxDepth);");
@@ -3314,23 +3737,73 @@ public static class Program
         _ => "default!",
     };
 
-    private static string EmitWriteField(string enc, uint fnum, FieldDescriptorProto f, string valExpr) => f.Type switch
+    private static string EmitWriteField(string enc, uint fnum, FieldDescriptorProto f, string valExpr)
     {
-        FieldDescriptorProto.Types.Type.Uint32 or FieldDescriptorProto.Types.Type.Uint64 => $"{enc}.WriteUintField({fnum}u, {valExpr})",
-        FieldDescriptorProto.Types.Type.Int32 or FieldDescriptorProto.Types.Type.Sint32
-            or FieldDescriptorProto.Types.Type.Int64 or FieldDescriptorProto.Types.Type.Sint64 => $"{enc}.WriteSintField({fnum}u, {valExpr})",
-        FieldDescriptorProto.Types.Type.Enum => $"{enc}.WriteSintField({fnum}u, (int){valExpr})",
-        FieldDescriptorProto.Types.Type.Bool => $"{enc}.WriteBoolField({fnum}u, {valExpr})",
-        FieldDescriptorProto.Types.Type.Fixed32 => $"{enc}.WriteFixed32Field({fnum}u, {valExpr})",
-        FieldDescriptorProto.Types.Type.Fixed64 => $"{enc}.WriteFixed64Field({fnum}u, {valExpr})",
-        FieldDescriptorProto.Types.Type.Sfixed32 => $"{enc}.WriteSfixed32Field({fnum}u, {valExpr})",
-        FieldDescriptorProto.Types.Type.Sfixed64 => $"{enc}.WriteSfixed64Field({fnum}u, {valExpr})",
-        FieldDescriptorProto.Types.Type.Float => $"{enc}.WriteFloat32Field({fnum}u, {valExpr})",
-        FieldDescriptorProto.Types.Type.Double => $"{enc}.WriteFloat64Field({fnum}u, {valExpr})",
-        FieldDescriptorProto.Types.Type.String => $"{enc}.WriteStringField({fnum}u, {valExpr})",
-        FieldDescriptorProto.Types.Type.Bytes => $"{enc}.WriteBytesField({fnum}u, {valExpr}.Span)",
-        _ => throw new InvalidOperationException($"Unsupported proto type {f.Type}"),
-    };
+        ulong rawTag = ((ulong)fnum << 4) | (ulong)WireTypeByte(f.Type);
+        if (rawTag <= 127UL)
+        {
+            byte enc1 = (byte)((rawTag << 1) | 1UL);
+            string tagLit = $"0x{enc1:X2}";
+            return f.Type switch
+            {
+                FieldDescriptorProto.Types.Type.Uint32 or FieldDescriptorProto.Types.Type.Uint64 => $"{enc}.WriteUintFieldTag1({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Int32 or FieldDescriptorProto.Types.Type.Sint32
+                    or FieldDescriptorProto.Types.Type.Int64 or FieldDescriptorProto.Types.Type.Sint64 => $"{enc}.WriteSintFieldTag1({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Enum => $"{enc}.WriteSintFieldTag1({tagLit}, (int){valExpr})",
+                FieldDescriptorProto.Types.Type.Bool => $"{enc}.WriteBoolFieldTag1({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Fixed32 => $"{enc}.WriteFixed32FieldTag1({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Fixed64 => $"{enc}.WriteFixed64FieldTag1({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Sfixed32 => $"{enc}.WriteSfixed32FieldTag1({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Sfixed64 => $"{enc}.WriteSfixed64FieldTag1({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Float => $"{enc}.WriteFloat32FieldTag1({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Double => $"{enc}.WriteFloat64FieldTag1({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.String => $"{enc}.WriteStringFieldTag1({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Bytes => $"{enc}.WriteBytesFieldTag1({tagLit}, {valExpr}.Span)",
+                _ => throw new InvalidOperationException($"Unsupported proto type {f.Type}"),
+            };
+        }
+
+        if (rawTag <= 16_383UL)
+        {
+            ushort enc2 = (ushort)((rawTag << 2) | 2UL);
+            string tagLit = $"0x{enc2:X4}";
+            return f.Type switch
+            {
+                FieldDescriptorProto.Types.Type.Uint32 or FieldDescriptorProto.Types.Type.Uint64 => $"{enc}.WriteUintFieldTag2({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Int32 or FieldDescriptorProto.Types.Type.Sint32
+                    or FieldDescriptorProto.Types.Type.Int64 or FieldDescriptorProto.Types.Type.Sint64 => $"{enc}.WriteSintFieldTag2({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Enum => $"{enc}.WriteSintFieldTag2({tagLit}, (int){valExpr})",
+                FieldDescriptorProto.Types.Type.Bool => $"{enc}.WriteBoolFieldTag2({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Fixed32 => $"{enc}.WriteFixed32FieldTag2({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Fixed64 => $"{enc}.WriteFixed64FieldTag2({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Sfixed32 => $"{enc}.WriteSfixed32FieldTag2({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Sfixed64 => $"{enc}.WriteSfixed64FieldTag2({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Float => $"{enc}.WriteFloat32FieldTag2({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Double => $"{enc}.WriteFloat64FieldTag2({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.String => $"{enc}.WriteStringFieldTag2({tagLit}, {valExpr})",
+                FieldDescriptorProto.Types.Type.Bytes => $"{enc}.WriteBytesFieldTag2({tagLit}, {valExpr}.Span)",
+                _ => throw new InvalidOperationException($"Unsupported proto type {f.Type}"),
+            };
+        }
+
+        return f.Type switch
+        {
+            FieldDescriptorProto.Types.Type.Uint32 or FieldDescriptorProto.Types.Type.Uint64 => $"{enc}.WriteUintField({fnum}u, {valExpr})",
+            FieldDescriptorProto.Types.Type.Int32 or FieldDescriptorProto.Types.Type.Sint32
+                or FieldDescriptorProto.Types.Type.Int64 or FieldDescriptorProto.Types.Type.Sint64 => $"{enc}.WriteSintField({fnum}u, {valExpr})",
+            FieldDescriptorProto.Types.Type.Enum => $"{enc}.WriteSintField({fnum}u, (int){valExpr})",
+            FieldDescriptorProto.Types.Type.Bool => $"{enc}.WriteBoolField({fnum}u, {valExpr})",
+            FieldDescriptorProto.Types.Type.Fixed32 => $"{enc}.WriteFixed32Field({fnum}u, {valExpr})",
+            FieldDescriptorProto.Types.Type.Fixed64 => $"{enc}.WriteFixed64Field({fnum}u, {valExpr})",
+            FieldDescriptorProto.Types.Type.Sfixed32 => $"{enc}.WriteSfixed32Field({fnum}u, {valExpr})",
+            FieldDescriptorProto.Types.Type.Sfixed64 => $"{enc}.WriteSfixed64Field({fnum}u, {valExpr})",
+            FieldDescriptorProto.Types.Type.Float => $"{enc}.WriteFloat32Field({fnum}u, {valExpr})",
+            FieldDescriptorProto.Types.Type.Double => $"{enc}.WriteFloat64Field({fnum}u, {valExpr})",
+            FieldDescriptorProto.Types.Type.String => $"{enc}.WriteStringField({fnum}u, {valExpr})",
+            FieldDescriptorProto.Types.Type.Bytes => $"{enc}.WriteBytesField({fnum}u, {valExpr}.Span)",
+            _ => throw new InvalidOperationException($"Unsupported proto type {f.Type}"),
+        };
+    }
 
     private static string EmitWriteRawValue(string enc, FieldDescriptorProto f, string valExpr) => f.Type switch
     {
