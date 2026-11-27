@@ -98,26 +98,7 @@ public unsafe ref struct OmniBufSpanReader
     {
         byte* cur = _cur;
         long rem = _end - cur;
-        if (BitConverter.IsLittleEndian && rem >= 4)
-        {
-            byte b0 = *cur;
-            int tz = BitOperations.TrailingZeroCount((uint)b0 | 0x100u);
-            if (tz < 3)
-            {
-                uint raw = Unsafe.ReadUnaligned<uint>(cur);
-                int shiftLeft = 32 - (8 << tz);
-                uint val = (raw << shiftLeft) >> (shiftLeft + tz + 1);
-                _cur = cur + (1 << tz);
-                return val;
-            }
-
-            if (b0 == 0 && rem >= 9)
-            {
-                _cur = cur + 9;
-                return Unsafe.ReadUnaligned<ulong>(cur + 1);
-            }
-        }
-        else if (rem > 0)
+        if (rem > 0)
         {
             byte b0 = *cur;
             if ((b0 & 1) != 0)
@@ -126,33 +107,44 @@ public unsafe ref struct OmniBufSpanReader
                 return (ulong)(b0 >> 1);
             }
 
-            if ((b0 & 2) != 0 && rem >= 2)
+            if ((b0 & 2) != 0)
             {
-                ushort u16 = Unsafe.ReadUnaligned<ushort>(cur);
-                if (!BitConverter.IsLittleEndian)
+                if (rem >= 2)
                 {
-                    u16 = BinaryPrimitives.ReverseEndianness(u16);
+                    ushort u16 = Unsafe.ReadUnaligned<ushort>(cur);
+                    if (!BitConverter.IsLittleEndian)
+                    {
+                        u16 = BinaryPrimitives.ReverseEndianness(u16);
+                    }
+
+                    _cur = cur + 2;
+                    return (ulong)(u16 >> 2);
                 }
-
-                _cur = cur + 2;
-                return (ulong)(u16 >> 2);
             }
-
-            if (!BitConverter.IsLittleEndian)
+            else if ((b0 & 4) != 0)
             {
-                if ((b0 & 4) != 0 && rem >= 4)
+                if (rem >= 4)
                 {
-                    uint u32 = BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<uint>(cur));
+                    uint u32 = Unsafe.ReadUnaligned<uint>(cur);
+                    if (!BitConverter.IsLittleEndian)
+                    {
+                        u32 = BinaryPrimitives.ReverseEndianness(u32);
+                    }
+
                     _cur = cur + 4;
                     return (ulong)(u32 >> 3);
                 }
-
-                if (b0 == 0 && rem >= 9)
+            }
+            else if (b0 == 0 && rem >= 9)
+            {
+                ulong u64 = Unsafe.ReadUnaligned<ulong>(cur + 1);
+                if (!BitConverter.IsLittleEndian)
                 {
-                    ulong u64 = BinaryPrimitives.ReverseEndianness(Unsafe.ReadUnaligned<ulong>(cur + 1));
-                    _cur = cur + 9;
-                    return u64;
+                    u64 = BinaryPrimitives.ReverseEndianness(u64);
                 }
+
+                _cur = cur + 9;
+                return u64;
             }
         }
 
@@ -265,7 +257,7 @@ public unsafe ref struct OmniBufSpanReader
                 if (len < rem)
                 {
                     _cur = strPtr + len;
-                    return len == 0 ? string.Empty : OmniBufConstants.DecodeUtf8StrictPinned(strPtr, len);
+                    return len == 0 ? string.Empty : OmniBufConstants.DecodeUtf8StrictPinnedShort(strPtr, len);
                 }
             }
         }
@@ -670,7 +662,7 @@ public unsafe ref struct OmniBufSpanReader
             {
                 byte* strPtr = cur;
                 cur += len;
-                target.Add(OmniBufConstants.DecodeUtf8StrictPinnedArrayElem(strPtr, len));
+                target.Add(OmniBufConstants.DecodeUtf8StrictPinned(strPtr, len));
             }
         }
 

@@ -278,7 +278,7 @@ public sealed class OpaqueEditions2024Child
     {
         long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        if (_readCount == 0) { _readCount = 1; return null; }
         long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
         System.Threading.Volatile.Write(ref _fieldIndex, built);
         return built;
@@ -1205,7 +1205,7 @@ public sealed class OpaqueTestEditions2024
     {
         long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        if (_readCount == 0) { _readCount = 1; return null; }
         long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
         System.Threading.Volatile.Write(ref _fieldIndex, built);
         return built;
@@ -1837,7 +1837,7 @@ public sealed class OpaqueTestEditions2024
                     {
                         throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
-                    encoder.BeginSubMsgField(9u);
+                    encoder.BeginSubMsgFieldTag2(0x0272, d.f_Child!.RawSpan.Length);
                     d.f_Child!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
                 }
@@ -1851,7 +1851,7 @@ public sealed class OpaqueTestEditions2024
                     {
                         throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
-                    encoder.BeginSubMsgField(10u);
+                    encoder.BeginSubMsgFieldTag2(0x02B2, d.f_DelimitedChild!.RawSpan.Length);
                     d.f_DelimitedChild!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
                 }
@@ -1962,7 +1962,7 @@ public sealed class OpaqueTestEditions2024
                     {
                         throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
-                    encoder.BeginSubMsgField(17u);
+                    encoder.BeginSubMsgFieldTag2(0x0472, d.f_ChoiceChild!.RawSpan.Length);
                     d.f_ChoiceChild!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
                 }

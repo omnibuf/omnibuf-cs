@@ -1,3 +1,6 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
+
 namespace OmniBuf;
 
 /// <summary>
@@ -46,6 +49,7 @@ public readonly record struct UnmarshalOptions
 
     public int MaxMessageBytes
     {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => (_setMask & HasMaxMessageBytesMask) != 0 ? _maxMessageBytes : DefaultMaxMessageBytes;
         init
         {
@@ -57,6 +61,7 @@ public readonly record struct UnmarshalOptions
 
     public int MaxCollectionElements
     {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => (_setMask & HasMaxCollectionElementsMask) != 0 ? _maxCollectionElements : DefaultMaxCollectionElements;
         init
         {
@@ -68,6 +73,7 @@ public readonly record struct UnmarshalOptions
 
     public int MaxNestingDepth
     {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => (_setMask & HasMaxNestingDepthMask) != 0 ? _maxNestingDepth : DefaultMaxNestingDepth;
         init
         {
@@ -87,21 +93,33 @@ public readonly record struct UnmarshalOptions
     public override int GetHashCode() =>
         HashCode.Combine(MaxMessageBytes, MaxCollectionElements, MaxNestingDepth);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void ValidateMessageLength(int length)
     {
         int maxBytes = MaxMessageBytes;
         if (length > maxBytes)
         {
-            throw new OmniBufException($"omnibuf: message length {length} exceeds maximum {maxBytes}");
+            ThrowMessageLengthExceeded(length, maxBytes);
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void ValidateCollectionCount(long count)
     {
         int maxElems = MaxCollectionElements;
         if (count > maxElems)
         {
-            throw new OmniBufException($"omnibuf: collection element count {count} exceeds maximum {maxElems}");
+            ThrowCollectionCountExceeded(count, maxElems);
         }
     }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowMessageLengthExceeded(int length, int maxBytes) =>
+        throw new OmniBufException($"omnibuf: message length {length} exceeds maximum {maxBytes}");
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowCollectionCountExceeded(long count, int maxElems) =>
+        throw new OmniBufException($"omnibuf: collection element count {count} exceeds maximum {maxElems}");
 }

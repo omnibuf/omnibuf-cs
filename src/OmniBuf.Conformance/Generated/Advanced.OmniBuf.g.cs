@@ -2575,7 +2575,7 @@ public sealed partial class OuterEnvelope
             {
                 long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
                 if (idx is not null) return idx;
-                if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+                if (_readCount == 0) { _readCount = 1; return null; }
                 long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
                 System.Threading.Volatile.Write(ref _fieldIndex, built);
                 return built;
@@ -2932,7 +2932,7 @@ public sealed class OpaqueOuterEnvelope
     {
         long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        if (_readCount == 0) { _readCount = 1; return null; }
         long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
         System.Threading.Volatile.Write(ref _fieldIndex, built);
         return built;
@@ -4211,7 +4211,7 @@ public sealed class OpaqueOuterEnvelope
                             {
                                 throw new OmniBufException($"omnibuf: nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                             }
-                            encoder.BeginContainer();
+                            encoder.BeginContainer(v?.RawSpan.Length ?? 0);
                             if (v is not null)
                             {
                                 v.SpliceBodyInto(encoder, deterministic, validate, depth + 2);
@@ -4228,7 +4228,7 @@ public sealed class OpaqueOuterEnvelope
                             {
                                 throw new OmniBufException($"omnibuf: nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                             }
-                            encoder.BeginContainer();
+                            encoder.BeginContainer(kv.Value?.RawSpan.Length ?? 0);
                             if (kv.Value is not null)
                             {
                                 kv.Value.SpliceBodyInto(encoder, deterministic, validate, depth + 2);
@@ -4706,7 +4706,7 @@ public sealed class OpaqueOuterEnvelope
                         {
                             throw new OmniBufException($"omnibuf: nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                         }
-                        encoder.BeginContainer();
+                        encoder.BeginContainer(list[i]?.RawSpan.Length ?? 0);
                         if (list[i] is not null)
                         {
                             list[i].SpliceBodyInto(encoder, deterministic, validate, depth + 2);
@@ -4883,7 +4883,7 @@ public sealed class OpaqueOuterEnvelope
                     {
                         throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
-                    encoder.BeginSubMsgField(34u);
+                    encoder.BeginSubMsgFieldTag2(0x08B2, d.f_OptInner!.RawSpan.Length);
                     d.f_OptInner!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
                 }
@@ -4929,7 +4929,7 @@ public sealed class OpaqueOuterEnvelope
                     {
                         throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
-                    encoder.BeginSubMsgField(39u);
+                    encoder.BeginSubMsgFieldTag2(0x09F2, d.f_CMsg!.RawSpan.Length);
                     d.f_CMsg!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
                 }
@@ -5011,7 +5011,7 @@ public sealed class OpaqueOuterEnvelope
                     {
                         throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
-                    encoder.BeginSubMsgField(50u);
+                    encoder.BeginSubMsgFieldTag2(0x0CB2, d.f_SingleInner!.RawSpan.Length);
                     d.f_SingleInner!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
                 }
@@ -5040,7 +5040,7 @@ public sealed class OpaqueOuterEnvelope
                     {
                         throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
-                    encoder.BeginSubMsgField(90u);
+                    encoder.BeginSubMsgFieldTag2(0x16B2, d.f_F90Sub!.RawSpan.Length);
                     d.f_F90Sub!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
                 }
@@ -5660,7 +5660,7 @@ public sealed class OpaqueProtoTreeNode
     {
         long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        if (_readCount == 0) { _readCount = 1; return null; }
         long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
         System.Threading.Volatile.Write(ref _fieldIndex, built);
         return built;
@@ -5994,7 +5994,7 @@ public sealed class OpaqueProtoTreeNode
                     {
                         throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
-                    encoder.BeginSubMsgField(3u);
+                    encoder.BeginSubMsgFieldTag1(0x79, d.f_Primary!.RawSpan.Length);
                     d.f_Primary!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
                 }
@@ -6017,7 +6017,7 @@ public sealed class OpaqueProtoTreeNode
                         {
                             throw new OmniBufException($"omnibuf: nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                         }
-                        encoder.BeginContainer();
+                        encoder.BeginContainer(list[i]?.RawSpan.Length ?? 0);
                         if (list[i] is not null)
                         {
                             list[i].SpliceBodyInto(encoder, deterministic, validate, depth + 2);
@@ -6052,7 +6052,7 @@ public sealed class OpaqueProtoTreeNode
                             {
                                 throw new OmniBufException($"omnibuf: nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                             }
-                            encoder.BeginContainer();
+                            encoder.BeginContainer(v?.RawSpan.Length ?? 0);
                             if (v is not null)
                             {
                                 v.SpliceBodyInto(encoder, deterministic, validate, depth + 2);
@@ -6069,7 +6069,7 @@ public sealed class OpaqueProtoTreeNode
                             {
                                 throw new OmniBufException($"omnibuf: nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                             }
-                            encoder.BeginContainer();
+                            encoder.BeginContainer(kv.Value?.RawSpan.Length ?? 0);
                             if (kv.Value is not null)
                             {
                                 kv.Value.SpliceBodyInto(encoder, deterministic, validate, depth + 2);
@@ -7146,7 +7146,7 @@ public sealed class OpaqueWideMessage
     {
         long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        if (_readCount == 0) { _readCount = 1; return null; }
         long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
         System.Threading.Volatile.Write(ref _fieldIndex, built);
         return built;

@@ -2461,7 +2461,7 @@ public static class Program
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (idx is not null) return idx;");
-            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (System.Threading.Volatile.Read(ref _readCount) == 0) {{ System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }}");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (_readCount == 0) {{ _readCount = 1; return null; }}");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        System.Threading.Volatile.Write(ref _fieldIndex, built);");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        return built;");
@@ -3448,7 +3448,7 @@ public static class Program
                 }
                 else
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginContainer();");
+                    sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        encoder.BeginContainer(list[i]?.RawSpan.Length ?? 0);");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        if (list[i] is not null)");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        {{");
                     sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}            list[i].SpliceBodyInto(encoder, deterministic, validate, depth + 2);");
@@ -3495,7 +3495,7 @@ public static class Program
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {{");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}        throw new OmniBufException($\"omnibuf: nesting depth {{depth + 1}} exceeds maximum {{OmniBufConstants.MaxNestingDepth}}\");");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    }}");
-            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    encoder.BeginSubMsgField({fnum}u);");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {EmitBeginSubMsgField("encoder", fnum, $"d.f_{prop}!.RawSpan.Length")};");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    d.f_{prop}!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    encoder.EndSubMsg();");
             sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}}}");
@@ -3559,7 +3559,7 @@ public static class Program
             }
             else
             {
-                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}encoder.BeginContainer();");
+                sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}encoder.BeginContainer({valExpr}?.RawSpan.Length ?? 0);");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}if ({valExpr} is not null)");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}{{");
                 sb.AppendLine(CultureInfo.InvariantCulture, $"{indent}    {valExpr}.SpliceBodyInto(encoder, deterministic, validate, depth + 2);");

@@ -407,7 +407,7 @@ public sealed class OpaqueConformanceRequest
     {
         long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        if (_readCount == 0) { _readCount = 1; return null; }
         long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
         System.Threading.Volatile.Write(ref _fieldIndex, built);
         return built;
@@ -1036,7 +1036,7 @@ public sealed class OpaqueConformanceResponse
     {
         long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        if (_readCount == 0) { _readCount = 1; return null; }
         long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
         System.Threading.Volatile.Write(ref _fieldIndex, built);
         return built;
@@ -1602,7 +1602,7 @@ public sealed class OpaqueAllTypesSubMsg
     {
         long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        if (_readCount == 0) { _readCount = 1; return null; }
         long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
         System.Threading.Volatile.Write(ref _fieldIndex, built);
         return built;
@@ -2549,7 +2549,7 @@ public sealed class OpaqueTestAllTypes
     {
         long[]? idx = System.Threading.Volatile.Read(ref _fieldIndex);
         if (idx is not null) return idx;
-        if (System.Threading.Volatile.Read(ref _readCount) == 0) { System.Threading.Volatile.Write(ref _readCount, (byte)1); return null; }
+        if (_readCount == 0) { _readCount = 1; return null; }
         long[] built = OmniBufOpaque.BuildFieldIndex(_raw, MaxIndexedField);
         System.Threading.Volatile.Write(ref _fieldIndex, built);
         return built;
@@ -2961,7 +2961,7 @@ public sealed class OpaqueTestAllTypes
                     {
                         throw new OmniBufException($"omnibuf: nesting depth {depth + 1} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                     }
-                    encoder.BeginSubMsgField(8u);
+                    encoder.BeginSubMsgFieldTag2(0x0232, d.f_F8SubMsg!.RawSpan.Length);
                     d.f_F8SubMsg!.SpliceBodyInto(encoder, deterministic, validate, depth + 1);
                     encoder.EndSubMsg();
                 }
@@ -3022,7 +3022,7 @@ public sealed class OpaqueTestAllTypes
                         {
                             throw new OmniBufException($"omnibuf: nesting depth {depth + 2} exceeds maximum {OmniBufConstants.MaxNestingDepth}");
                         }
-                        encoder.BeginContainer();
+                        encoder.BeginContainer(list[i]?.RawSpan.Length ?? 0);
                         if (list[i] is not null)
                         {
                             list[i].SpliceBodyInto(encoder, deterministic, validate, depth + 2);

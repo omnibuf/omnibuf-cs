@@ -6,7 +6,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>protoc-gen-omnibuf-cs</ToolCommandName>
     <PackageId>OmniBuf.ProtocGen</PackageId>
-    <Version>0.1.9</Version>
+    <Version>0.1.10</Version>
     <Authors>OmniBuf Contributors</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <Description>Protobuf compiler plugin generating OmniBuf C# codecs and Opaque header-hop views.</Description>
